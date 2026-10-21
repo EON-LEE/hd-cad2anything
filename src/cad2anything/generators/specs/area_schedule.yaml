@@ -1,0 +1,12 @@
+name: area_schedule
+version: "1.0"
+title_ko: 면적표
+description: 층별 연면적과 매장별 전용면적, 공용면적 배분, 임대면적을 계산한다.
+inputs:
+  entity_kinds: [exterior, unit, walkway, vertical_link, amenity]
+  data: []
+outputs: [xlsx, csv]
+triggers:
+  change_types: [add, remove, move, reassign, split, merge, resize, walkway_change]
+risk_tier: high
+approval_mode: pre_publish

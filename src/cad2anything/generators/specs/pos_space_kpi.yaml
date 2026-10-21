@@ -1,0 +1,12 @@
+name: pos_space_kpi
+version: "1.0"
+title_ko: POS↔공간 매핑과 평효율 기준선
+description: 개정 유효기간의 POS 단말을 매장과 브랜드에 매핑하고 매장별 면적당 매출 기준선을 계산한다.
+inputs:
+  entity_kinds: [unit]
+  data: [tenancies, pos_terminals, transactions]
+outputs: [xlsx, csv]
+triggers:
+  change_types: [add, remove, move, reassign, split, merge, resize]
+risk_tier: high
+approval_mode: pre_publish

@@ -181,9 +181,7 @@ class SpatialModel:
         self.entities[entity.entity_id] = entity
 
     def by_kind(self, kind: EntityKind, floor: str | None = None) -> list[Entity]:
-        return [
-            e for e in self.entities.values() if e.kind == kind and (floor is None or e.floor == floor)
-        ]
+        return [e for e in self.entities.values() if e.kind == kind and (floor is None or e.floor == floor)]
 
     def units(self, floor: str | None = None) -> list[Entity]:
         return self.by_kind(EntityKind.UNIT, floor)
