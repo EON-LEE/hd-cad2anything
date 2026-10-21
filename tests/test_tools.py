@@ -39,6 +39,16 @@ def test_floor_summary_and_find_units(toolkit: Toolkit):
     assert by_name["units"][0]["brand_name"] == brand
 
 
+def test_find_units_sorted_by_walking_distance_and_area(toolkit: Toolkit):
+    nearest = toolkit.spatial_find_units("R2", floor="3F", sort_by="walk_to_escalator_m", limit=5)
+    distances = [row["walk_to_escalator_m"] for row in nearest["units"]]
+    assert len(distances) == 5 and distances == sorted(distances) and distances[0] is not None
+    largest = toolkit.spatial_find_units("R2", floor="3F", sort_by="area_m2", limit=3)["units"]
+    assert [row["area_m2"] for row in largest] == sorted((row["area_m2"] for row in largest), reverse=True)
+    with pytest.raises(ToolError):
+        toolkit.spatial_find_units("R2", sort_by="rent")
+
+
 def test_unit_details_and_nearby(toolkit: Toolkit):
     unit_code = toolkit.spatial_find_units("R0", floor="3F", vacant=False)["units"][0]["unit_code"]
     details = toolkit.spatial_unit_details("R0", unit_code)

@@ -33,6 +33,8 @@ from cad2anything.workspace import Workspace
 DEFAULT_LIMIT = 50
 BUSINESS_TABLES = ("tenancies", "pos_terminals", "transactions")
 ADHOC_KINDS = {k.value for k in EntityKind}
+# Distances sort ascending (nearest first); area sorts descending (largest first).
+FIND_SORTS = ("walk_to_escalator_m", "walk_to_entrance_m", "area_m2")
 
 __all__ = ["DEFAULT_LIMIT", "ToolError", "Toolkit", "apply_moves", "workspace_from_env"]
 
@@ -158,7 +160,10 @@ class Toolkit(AnalyticsTools):
         brand_query: str | None = None,
         vacant: bool | None = None,
         limit: int = DEFAULT_LIMIT,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
+        if sort_by not in (None, *FIND_SORTS):
+            raise ToolError(f"sort_by는 {', '.join(FIND_SORTS)} 중 하나여야 합니다.")
         model = self._model(rev)
         query = (brand_query or "").strip().lower()
         rows = []
@@ -179,8 +184,25 @@ class Toolkit(AnalyticsTools):
             if vacant is not None and bool(attrs.get("vacant")) != vacant:
                 continue
             rows.append(self._unit_row(unit))
+        if sort_by in ("walk_to_escalator_m", "walk_to_entrance_m"):
+            features = self.unit_features(rev)
+            if features is None:
+                raise ToolError("보행거리를 계산할 공간 특징을 사용할 수 없습니다.")
+            distance = features.set_index("unit_code")[sort_by].to_dict()
+            for row in rows:
+                value = distance.get(row["unit_code"])
+                row[sort_by] = None if value is None or pd.isna(value) else round(float(value), 1)
+            rows.sort(key=lambda row: (row[sort_by] is None, row[sort_by] or 0.0))
+        elif sort_by == "area_m2":
+            rows.sort(key=lambda row: -row["area_m2"])
         limit = max(1, min(int(limit), 200))
-        return {"rev": rev, "count": len(rows), "units": rows[:limit], "truncated": len(rows) > limit}
+        return {
+            "rev": rev,
+            "count": len(rows),
+            "sort_by": sort_by,
+            "units": rows[:limit],
+            "truncated": len(rows) > limit,
+        }
 
     def spatial_unit_details(self, rev: str, unit_code: str) -> dict[str, Any]:
         model = self._model(rev)

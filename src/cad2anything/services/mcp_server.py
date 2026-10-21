@@ -23,7 +23,7 @@ INSTRUCTIONS = (
 TOOL_DESCRIPTIONS: dict[str, str] = {
     "spatial_list_revisions": "도면 개정 목록(실제·가상, 적용일, 부모, 모델 출처)을 반환한다.",
     "spatial_floor_summary": "개정과 층을 받아 매장 수, 공실, 면적, 카테고리 구성, 수직동선, 편의시설을 요약한다.",
-    "spatial_find_units": "조건(층, 카테고리 코드나 한국어 이름, 브랜드명 일부, 공실 여부)으로 매장을 찾는다.",
+    "spatial_find_units": "조건(층, 카테고리 코드나 한국어 이름, 브랜드명 일부, 공실 여부)으로 매장을 찾는다. sort_by로 에스컬레이터·입구 보행거리 가까운 순(walk_to_escalator_m, walk_to_entrance_m)이나 면적 큰 순(area_m2)으로 정렬한다.",
     "spatial_unit_details": "매장 속성, 인접 매장(공유 경계 길이), 통로 접면, 에스컬레이터·입구 보행거리, 집기 구성을 반환한다.",
     "spatial_nearby_units": "매장 경계에서 반경(m) 안의 같은 층 매장을 거리순으로 반환한다(PostGIS 사용 가능 시 PostGIS).",
     "revision_diff": "두 개정 사이의 의미 단위 변경(이동, 교체, 신설, 삭제, 분할, 병합, 면적, 집기, 통로)을 요약한다.",
