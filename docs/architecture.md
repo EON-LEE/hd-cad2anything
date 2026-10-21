@@ -54,7 +54,7 @@ flowchart TB
 |---|---|---|---|
 | Orchestrator | Prompt agent + Atlas 에이전트 브리지(함수 도구) | 자연어 진입, 계획, 라우팅, 개정 workflow, 승인 요청, 화면 제어 이벤트 | 전문 에이전트 상담, 화면 제어 함수, MCP 조회 도구 |
 | CAD Change Interpreter | Prompt agent | 도면 의미 해석, 개정 diff를 업무 언어로 요약, 신뢰도가 낮은 항목 확인 요청 | `cad.*`, `revision.*`, `spatial.*` |
-| Space Productivity Analyst | Prompt agent | 평효율, GMROF, 노출도, 교차구매, 층간 이동, 개편 전후 비교, 원인 분해 | `analytics.*`, `spatial.*`, Code Interpreter |
+| Space Productivity Analyst | Prompt agent | 평효율, GMROF, 노출도, 교차구매, 층간 이동, 고객 한 명의 하루 결제 순서, 개편 전후 비교, 원인 분해 | `analytics.*`, `spatial.*`, Code Interpreter |
 | Layout Planner | Prompt agent | 제약 기반 배치 대안 생성(가상 개정), 비교, 설명 | `layout.*`, `whatif.*`, `revision.*` |
 | Generator | Prompt agent | 등록된 생성기 실행, 즉석 산출물 조합, 등록안 제안 | `registry.*`, `render.*` |
 | Market & Benchmark Researcher | Prompt agent | 공개 업계 동향과 벤치마크 조사(인용 포함) | 웹 검색, 파일 검색 |

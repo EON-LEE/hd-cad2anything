@@ -127,17 +127,30 @@ def score(case: dict[str, Any], run: CaseRun) -> dict[str, Any]:
     }
 
 
+def _merge_expect(defaults: dict[str, Any], expect: dict[str, Any]) -> dict[str, Any]:
+    """Apply default checks to a case: the case wins, except ``*_none`` lists, which are combined."""
+    merged = dict(expect)
+    for kind, values in defaults.items():
+        if kind not in merged:
+            merged[kind] = values
+        elif kind.endswith("_none"):
+            merged[kind] = list(dict.fromkeys([*merged[kind], *values]))
+    return merged
+
+
 def load_cases(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    defaults = data.get("defaults", {})
     cases = data["cases"]
     ids = [case["id"] for case in cases]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate case ids")
     for case in cases:
-        unknown = set(case.get("expect") or {}) - set(CHECK_TYPES)
+        case["expect"] = _merge_expect(defaults.get("expect") or {}, case.get("expect") or {})
+        unknown = set(case["expect"]) - set(CHECK_TYPES)
         if unknown:
             raise ValueError(f"{case['id']}: unknown check types {sorted(unknown)}")
-    return data.get("defaults", {}), cases
+    return defaults, cases
 
 
 def run_cases(

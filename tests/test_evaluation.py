@@ -31,13 +31,30 @@ def _events(text="4F-E05는 노출이 낮습니다.", consult_request="백화점
 def test_golden_cases_load_and_cover_every_scenario(tmp_path):
     defaults, cases = load_cases(__import__("pathlib").Path(GOLDEN))
     assert defaults["ui_state"]["rev"] == "R2" and len(cases) >= 15
-    assert {"개정 반영", "공간 생산성", "레이아웃 대안", "데이터 경계", "승인 경계"} <= {
+    assert {"개정 반영", "공간 생산성", "레이아웃 대안", "데이터 경계", "승인 경계", "고객 동선"} <= {
         c["scenario"] for c in cases
     }
+    assert all("consult_specialist" in c["expect"]["answer_none"] for c in cases)
     bad = tmp_path / "bad.yaml"
     bad.write_text("cases:\n  - {id: a, question: q, expect: {magic: [1]}}\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_cases(bad)
+
+
+def test_default_checks_apply_to_every_case(tmp_path):
+    path = tmp_path / "cases.yaml"
+    path.write_text(
+        "defaults:\n  expect: {answer_none: [analytics_], answer_any: [기본]}\n"
+        "cases:\n"
+        "  - {id: a, question: q, expect: {answer_none: [승인했습니다], answer_any: [4F-E0]}}\n"
+        "  - {id: b, question: q}\n",
+        encoding="utf-8",
+    )
+    _, cases = load_cases(path)
+    assert cases[0]["expect"] == {"answer_none": ["승인했습니다", "analytics_"], "answer_any": ["4F-E0"]}
+    assert cases[1]["expect"] == {"answer_none": ["analytics_"], "answer_any": ["기본"]}
+    leaky = score(cases[0], collect("a", _events(text="4F-E05는 analytics_productivity 결과로 낮아요.")))
+    assert [c["check"] for c in leaky["checks"] if not c["passed"]] == ["answer_none"]
 
 
 def test_scoring_counts_nested_tools_ui_actions_and_answers():

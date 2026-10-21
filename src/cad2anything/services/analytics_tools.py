@@ -835,6 +835,197 @@ class AnalyticsTools:
             }
         )
 
+    # Customer journeys --------------------------------------------------------------------------------
+    def _journey_rows(self) -> pd.DataFrame:
+        enriched = self._enriched()
+
+        def compute() -> pd.DataFrame:
+            from cad2anything.analytics.journey import purchase_rows
+
+            return purchase_rows(enriched)
+
+        return self._memo(("journey_rows", id(enriched)), compute)
+
+    def _revision_on(self, day: date) -> str:
+        actual = sorted(self._actual_revisions(), key=lambda r: r.effective_date)
+        if not actual:
+            raise ToolError("실제 개정이 없어 동선을 그릴 도면을 정할 수 없습니다.")
+        chosen = actual[0].rev_id
+        for revision in actual:
+            if date.fromisoformat(revision.effective_date) <= day:
+                chosen = revision.rev_id
+        return chosen
+
+    def _route_planner(self, rev: str) -> Any:
+        from cad2anything.spatial.routes import RoutePlanner
+
+        return self._memo(("routes", rev, self._model_key(rev)), lambda: RoutePlanner(self._model(rev)))
+
+    def _customer_profile(self, customer_id: str) -> dict[str, Any]:
+        customers = self._table("customers", required=False)
+        if customers is None:
+            return {}
+        match = customers.loc[customers["pseudo_id"].astype(str) == customer_id]
+        if match.empty:
+            return {}
+        row = match.iloc[0]
+        return {
+            key: str(row[key]) for key in ("age_band", "gender", "tier") if key in row and pd.notna(row[key])
+        }
+
+    def customer_journey(
+        self,
+        customer_id: str | None = None,
+        date: str | None = None,
+        segment: dict[str, Any] | str | None = None,
+        rank: int = 1,
+        min_stops: int = 3,
+        start: str | None = None,
+        end: str | None = None,
+        with_routes: bool = True,
+    ) -> dict[str, Any]:
+        """One customer's purchase sequence on one day, optionally with estimated walkway routes."""
+        from cad2anything.analytics.journey import (
+            JOURNEY_CAVEAT,
+            filter_rows,
+            journey_candidates,
+            journey_stops,
+            segment_label,
+            weekday_ko,
+        )
+
+        rows = self._journey_rows()
+        parsed = parse_segment(segment)
+        day = _parse_date(date, "date")
+        rank = max(1, int(rank or 1))
+        alternatives: list[dict[str, Any]] = []
+        if customer_id:
+            customer_id = str(customer_id).strip().upper()
+            own = rows.loc[rows["customer_key"] == customer_id]
+            if day is not None:
+                own = own.loc[own["day"] == day]
+            if own.empty:
+                when = f" {day.isoformat()}에" if day else ""
+                raise ToolError(f"고객 {customer_id}의{when} 결제 기록이 없습니다.")
+            if day is None:
+                day = journey_candidates(own, min_stops=1).iloc[0]["date"]
+            query: dict[str, Any] = {"customer_id": customer_id, "date": day.isoformat()}
+        else:
+            first, last = (
+                (day, day) if day else (_parse_date(start, "start"), _parse_date(end, "end", end=True))
+            )
+            customers = self._table("customers", required=False)
+            key = (
+                "journeys",
+                id(rows),
+                json.dumps(parsed, sort_keys=True),
+                str(first),
+                str(last),
+                int(min_stops),
+            )
+            ranked = self._memo(
+                key,
+                lambda: journey_candidates(filter_rows(rows, customers, parsed, first, last), int(min_stops)),
+            )
+            if len(ranked) < rank:
+                if ranked.empty:
+                    raise ToolError(
+                        "조건에 맞는 고객 동선이 없습니다. 조건을 넓히거나 min_stops를 줄여 보세요."
+                    )
+                raise ToolError(
+                    f"조건에 맞는 고객 동선은 {len(ranked)}개뿐입니다. 더 보여 줄 고객이 없습니다."
+                )
+            chosen = ranked.iloc[rank - 1]
+            customer_id, day = str(chosen["customer_id"]), chosen["date"]
+            query = {"segment": parsed, "rank": rank}
+            alternatives = [
+                {
+                    "rank": rank + i + 1,
+                    "customer_id": str(r.customer_id),
+                    "date": r.date.isoformat(),
+                    "stops": int(r.stops),
+                }
+                for i, r in enumerate(ranked.iloc[rank : rank + 3].itertuples(index=False))
+            ]
+        stops, duration = journey_stops(rows, customer_id, day)
+        if not stops:
+            raise ToolError(f"고객 {customer_id}의 {day.isoformat()} 결제 기록이 없습니다.")
+        profile = self._customer_profile(customer_id)
+        label = segment_label(profile)
+        rev = self._revision_on(day)
+        journey: dict[str, Any] = {
+            "title": f"{label} 고객의 쇼핑 동선",
+            "customer": {"id": customer_id, "segment": label, **profile},
+            "date": day.isoformat(),
+            "weekday": weekday_ko(day),
+            "rev": rev,
+            "query": query,
+            "stops": stops,
+            "summary": {
+                "stops": len(stops),
+                "floors": list(dict.fromkeys(s["floor"] for s in stops if s["floor"])),
+                "total_krw": sum(s["amount_krw"] for s in stops),
+                "duration_min": duration,
+            },
+            "caveat": JOURNEY_CAVEAT,
+        }
+        if alternatives:
+            journey["alternatives"] = alternatives
+        if with_routes:
+            self._add_routes(journey)
+        return _json(journey)
+
+    def _add_routes(self, journey: dict[str, Any]) -> None:
+        planner = self._route_planner(journey["rev"])
+        stops = journey["stops"]
+        for stop in stops:
+            if planner.has_unit(stop["unit_code"]):
+                stop["x"], stop["y"] = planner.access_xy(stop["unit_code"])
+        segments, transitions, walk = [], [], 0.0
+        for a, b in zip(stops, stops[1:], strict=False):
+            if not (planner.has_unit(a["unit_code"]) and planner.has_unit(b["unit_code"])):
+                continue
+            route = planner.route(a["unit_code"], b["unit_code"])
+            walk += route.length_m
+            for leg in route.legs:
+                if len(leg.points) >= 2:
+                    points = [list(point) for point in leg.points]
+                    segments.append(
+                        {
+                            "floor": leg.floor,
+                            "points": points,
+                            "from_order": a["order"],
+                            "to_order": b["order"],
+                        }
+                    )
+            if route.via:
+                transitions.append(
+                    {
+                        "from_order": a["order"],
+                        "to_order": b["order"],
+                        "from_floor": a["floor"],
+                        "to_floor": b["floor"],
+                        "via": route.via,
+                    }
+                )
+        journey["segments"] = segments
+        journey["transitions"] = transitions
+        journey["summary"]["walk_m"] = int(round(walk / 10.0) * 10)
+
+    def analytics_customer_journey(
+        self,
+        customer_id: str | None = None,
+        date: str | None = None,
+        segment: dict[str, Any] | str | None = None,
+        rank: int = 1,
+        min_stops: int = 3,
+        start: str | None = None,
+        end: str | None = None,
+    ) -> dict[str, Any]:
+        return self.customer_journey(
+            customer_id, date, segment, rank, min_stops, start, end, with_routes=False
+        )
+
     # Layout ------------------------------------------------------------------------------------------
     def layout_generate_alternatives(
         self,

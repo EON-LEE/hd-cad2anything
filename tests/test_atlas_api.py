@@ -150,6 +150,7 @@ def test_chat_streams_sse_events(client, runtime):
 
 def test_combined_app_routes_mcp_and_api(toolkit, monkeypatch):
     monkeypatch.setenv("MCP_API_KEY", "test-key")
+    monkeypatch.setenv("ATLAS_WARMUP", "0")
     app = create_app(toolkit, runtime_factory=lambda _: ScriptedRuntime())
     with TestClient(app) as client:
         assert client.get("/healthz").json()["ok"] is True

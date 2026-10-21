@@ -33,6 +33,17 @@ TABLE_SHAPE_ERROR = (
     "table payload에는 행이 필요합니다. 형식: {title, columns: [열 이름], rows: [[값, ...], ...]}. "
     "도구 결과의 실제 값을 rows에 넣어 다시 호출하세요."
 )
+JOURNEY_ARGS = ("customer_id", "date", "segment", "rank")
+JOURNEY_STOP_FIELDS = (
+    "order",
+    "time",
+    "floor",
+    "unit_code",
+    "brand_name",
+    "category_name",
+    "amount_krw",
+    "gap_min",
+)
 
 
 @dataclass
@@ -94,10 +105,15 @@ def table_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class UiActionHandler:
-    """Executes client-side UI tools. The heatmap provider computes metric values deterministically."""
+    """Executes client-side UI tools. Providers compute heatmap values and journeys deterministically."""
 
-    def __init__(self, heatmap_provider: HeatmapProvider | None = None):
+    def __init__(
+        self,
+        heatmap_provider: HeatmapProvider | None = None,
+        journey_provider: Callable[..., dict[str, Any]] | None = None,
+    ):
         self.heatmap_provider = heatmap_provider
+        self.journey_provider = journey_provider
 
     def handle(self, name: str, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         method = getattr(self, f"_{name}", None)
@@ -140,6 +156,33 @@ class UiActionHandler:
             output["lowest_units"] = [k for _, k in ranked[:3]]
             output["highest_units"] = [k for _, k in ranked[-3:][::-1]]
         return UiActionResult(json.dumps(output, ensure_ascii=False), patches)
+
+    def _ui_show_journey(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
+        if self.journey_provider is None:
+            return UiActionResult(json.dumps({"ok": False, "error": "journey provider unavailable"}))
+        params = {k: args[k] for k in JOURNEY_ARGS if args.get(k) not in (None, "", {})}
+        try:
+            journey = self.journey_provider(**params)
+        except (ToolError, KeyError, ValueError) as exc:  # let the model see the reason and recover
+            return UiActionResult(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        patches = [_replace("/journey", journey)]
+        first_floor = next((stop["floor"] for stop in journey.get("stops", []) if stop.get("floor")), None)
+        if first_floor:
+            patches.append(_replace("/floor", first_floor))
+            ui_state["floor"] = first_floor
+        patches.append(_replace("/panel", {"type": "journey", "payload": {}}))
+        output = {
+            "ok": True,
+            "customer": journey.get("customer"),
+            "date": journey.get("date"),
+            "weekday": journey.get("weekday"),
+            "stops": [{k: stop.get(k) for k in JOURNEY_STOP_FIELDS} for stop in journey.get("stops", [])],
+            "transitions": journey.get("transitions", []),
+            "summary": journey.get("summary"),
+            "caveat": journey.get("caveat"),
+            "shown": f"{first_floor or ''} 도면에 동선과 결제 순서를 표시하고 동선 목록을 열었습니다.",
+        }
+        return UiActionResult(json.dumps(output, ensure_ascii=False, default=str), patches)
 
     def _ui_highlight_units(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         color = args.get("color") or "#e53935"
@@ -185,7 +228,12 @@ class UiActionHandler:
 
     def _ui_clear(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         what = args["what"]
-        targets = {"heatmap": ("/heatmap", None), "highlights": ("/highlights", []), "edges": ("/edges", [])}
+        targets = {
+            "heatmap": ("/heatmap", None),
+            "highlights": ("/highlights", []),
+            "edges": ("/edges", []),
+            "journey": ("/journey", None),
+        }
         selected = list(targets.values()) if what == "all" else [targets[what]]
         patches = [_replace(path, value) for path, value in selected]
         if what == "all":

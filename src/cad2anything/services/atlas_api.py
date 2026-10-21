@@ -315,6 +315,21 @@ def create_api(
         except ToolError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.get("/api/analytics/journey")
+    def journey(
+        customer_id: str | None = None,
+        date: str | None = None,
+        segment: str | None = None,
+        rank: int = Query(1, ge=1, le=500),
+        min_stops: int = Query(3, ge=1, le=12),
+    ) -> dict[str, Any]:
+        try:
+            return toolkit.customer_journey(
+                customer_id=customer_id, date=date, segment=segment, rank=rank, min_stops=min_stops
+            )
+        except ToolError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/api/chat")
     def chat(request: ChatRequest) -> StreamingResponse:
         agent_runtime = runtime()

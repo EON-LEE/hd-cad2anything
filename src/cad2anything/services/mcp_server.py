@@ -43,6 +43,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "analytics_time_patterns": "시간대(hour), 요일(weekday), 날짜, 월과 카테고리·층 조합별 매출과 비중을 반환한다. category에는 카테고리 코드나 이름, 또는 식음료 전체를 뜻하는 'F&B'를 쓸 수 있다.",
     "layout_generate_alternatives": "실제 개정을 기준으로 제약(층, 앵커 유지, 면적 허용 오차, 최대 이동 수, 이동 가능 카테고리)을 지키며 기대 매출을 높이는 배치 대안을 만들고 가상 개정으로 저장한다. 이동별 기여도, 층별 변화 범위, 제약 충족표를 반환한다(추정치).",
     "whatif_score_moves": "브랜드 이동안(moves: brand_id 또는 브랜드명, to_unit)의 연간 기대 매출 변화와 범위, 층별 영향, 제약 충족 여부를 추정한다. 가상 개정은 만들지 않는다.",
+    "analytics_customer_journey": "가명 고객 한 명의 하루 결제 순서(시각, 층, 매장, 금액, 이전 결제 후 경과 시간)를 반환한다. customer_id·date를 주거나, segment(age_band, gender, tier)와 rank로 조건에 맞는 고객 하루를 고른다. 결제 순서이며 실제 이동 경로가 아니다.",
 }
 
 

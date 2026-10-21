@@ -65,6 +65,8 @@ uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golde
 | `answer_any`, `answer_all`, `answer_none` | 답변에 지정 문구가 하나라도, 모두, 하나도 나오지 않음 |
 | `consult_not_regex` | 지정한 전문 에이전트에 넘긴 요청이 정규식(예: 내부 매출 금액)과 일치하지 않음 |
 
+`defaults.expect`의 점검은 모든 사례에 적용한다. 사례에 같은 유형이 있으면 사례의 값을 쓴다. 단, `*_none` 목록은 두 목록을 합친다. 기본 점검은 답변에 도구 이름이나 JSON이 나오지 않는지 확인한다. 답변은 사용자가 읽는 대화체여야 하기 때문이다.
+
 실행 중 오류가 나면 그 사례는 실패로 처리한다.
 
 **2026-10-21 실행 결과**
