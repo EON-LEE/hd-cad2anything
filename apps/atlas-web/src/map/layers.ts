@@ -4,11 +4,16 @@ import { PathLayer, PolygonLayer, ScatterplotLayer, TextLayer } from '@deck.gl/l
 import { LINK_COLORS, changeColor, hexToRgba, withAlpha, type Rgba } from '../lib/colors'
 import type { FloorModel, LineItem, Point2, PolygonItem, UnitInfo } from '../lib/geometry'
 import { AMENITY_LABELS, LINK_TYPE_LABELS } from '../lib/format'
+import { JOURNEY_COLOR } from '../lib/journey'
 import {
   unitFillColor,
   unitLabels,
   type EdgeRender,
   type HighlightRender,
+  type JourneyNoteRender,
+  type JourneyPathRender,
+  type JourneyRender,
+  type JourneyStopRender,
   type LabelItem,
   type UnitStyleContext,
 } from './prepare'
@@ -32,7 +37,19 @@ export interface LayerInput {
   highlights: HighlightRender[]
   selection: UnitInfo[]
   edges: EdgeRender[]
+  /** The customer journey on this floor (empty render data when off). */
+  journey: JourneyRender
   zoom: number
+}
+
+const JOURNEY_RGBA = hexToRgba(JOURNEY_COLOR)
+/** Stop markers are ~1.4 m in world units, clamped to stay legible at any zoom. */
+const STOP_RADIUS_M = 1.4
+const STOP_RADIUS_MIN_PX = 9
+const STOP_RADIUS_MAX_PX = 16
+
+export function stopRadiusPx(zoom: number): number {
+  return Math.min(STOP_RADIUS_MAX_PX, Math.max(STOP_RADIUS_MIN_PX, STOP_RADIUS_M * 2 ** zoom))
 }
 
 const rings = (d: PolygonItem) => d.rings
@@ -329,5 +346,81 @@ export function buildLayers(input: LayerInput): Layer[] {
       ),
     )
   }
+  result.push(...journeyLayers(input.journey, input.zoom))
   return result
+}
+
+/** Customer journey on top of everything: cased orange path, numbered stops, times and floor-change notes. */
+export function journeyLayers(journey: JourneyRender, zoom: number): Layer[] {
+  const { paths, stops, notes } = journey
+  if (!paths.length && !stops.length && !notes.length) return []
+  const radius = stopRadiusPx(zoom)
+  const pathProps = {
+    data: paths,
+    getPath: (d: JourneyPathRender) => d.path,
+    widthUnits: 'pixels' as const,
+    capRounded: true,
+    jointRounded: true,
+  }
+  return [
+    new PathLayer<JourneyPathRender>({ id: 'journey-casing', ...pathProps, getColor: [255, 255, 255, 235], getWidth: 9 }),
+    new PathLayer<JourneyPathRender>({ id: 'journey-path', ...pathProps, getColor: JOURNEY_RGBA, getWidth: 5 }),
+    new ScatterplotLayer<JourneyStopRender>({
+      id: 'journey-stops',
+      data: stops,
+      getPosition: (d) => d.position,
+      getFillColor: JOURNEY_RGBA,
+      getLineColor: [255, 255, 255, 255],
+      stroked: true,
+      getRadius: STOP_RADIUS_M,
+      radiusUnits: 'common',
+      radiusMinPixels: STOP_RADIUS_MIN_PX,
+      radiusMaxPixels: STOP_RADIUS_MAX_PX,
+      getLineWidth: 2,
+      lineWidthUnits: 'pixels',
+      pickable: true,
+    }),
+    textLayer(
+      'journey-stop-numbers',
+      stops.map((s) => ({ key: s.key, position: s.position, text: String(s.order), color: [255, 255, 255, 255] as Rgba, size: 12 })),
+      { fontWeight: 700, outlineWidth: 0 },
+    ),
+    textLayer(
+      'journey-times',
+      stops.filter((s) => s.time).map((s) => ({ key: s.key, position: s.position, text: s.time, color: [31, 41, 55, 255] as Rgba, size: 11 })),
+      {
+        getTextAnchor: 'start',
+        getPixelOffset: [radius + 5, 0],
+        background: true,
+        getBackgroundColor: [255, 255, 255, 230],
+        backgroundPadding: [3, 1],
+        backgroundBorderRadius: 3,
+        outlineWidth: 0,
+        updateTriggers: { getPixelOffset: radius },
+      },
+    ),
+    new TextLayer<JourneyNoteRender>({
+      id: 'journey-notes',
+      data: notes,
+      getPosition: (d) => d.position,
+      getText: (d) => d.text,
+      getColor: [154, 52, 18, 255],
+      getSize: 11,
+      sizeUnits: 'pixels',
+      getTextAnchor: 'middle',
+      getAlignmentBaseline: 'bottom',
+      getPixelOffset: (d) => [0, -(radius + 6 + d.stack * 20)],
+      characterSet: 'auto',
+      fontFamily: FONT_FAMILY,
+      fontWeight: 700,
+      fontSettings: FONT_SETTINGS,
+      background: true,
+      getBackgroundColor: [255, 247, 237, 245],
+      getBorderColor: JOURNEY_RGBA,
+      getBorderWidth: 1,
+      backgroundBorderRadius: 4,
+      backgroundPadding: [5, 2],
+      updateTriggers: { getPixelOffset: radius },
+    }),
+  ]
 }

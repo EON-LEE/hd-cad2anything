@@ -31,6 +31,58 @@ export function formatPercentile(value: number | null | undefined): string {
   return `${Math.round(pct)}백분위`
 }
 
+/** Korean floor name from a floor code: "3F" -> "3층", "B1" -> "지하 1층". Unknown codes are returned as is. */
+export function floorLabel(code: string | null | undefined): string {
+  if (!code) return ''
+  const upper = code.trim().toUpperCase()
+  const basement = /^B(\d+)F?$/.exec(upper)
+  if (basement) return `지하 ${Number(basement[1])}층`
+  const above = /^(\d+)F$/.exec(upper)
+  if (above) return `${Number(above[1])}층`
+  if (upper === 'RF') return '옥상'
+  return code
+}
+
+/** Particle "으로"/"로" after a word (Hangul final consonant rule; "(으)로" when unknown). */
+export function withEuro(word: string): string {
+  const last = word.trim().at(-1)
+  const code = last ? last.charCodeAt(0) : 0
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    const final = (code - 0xac00) % 28
+    return `${word}${final === 0 || final === 8 ? '로' : '으로'}`
+  }
+  return `${word}(으)로`
+}
+
+/** 2.4만원 below 10만원, 51만원 up to 1억, 1.2억원 above; small amounts in 원. */
+export function formatManwon(krw: number | null | undefined): string {
+  if (krw === null || krw === undefined || !Number.isFinite(krw)) return '–'
+  const sign = krw < 0 ? '−' : ''
+  const abs = Math.abs(krw)
+  const trim = (value: string) => value.replace(/\.0$/, '')
+  if (abs >= 1e8) return `${sign}${trim((abs / 1e8).toFixed(1))}억원`
+  if (abs >= 1e5) return `${sign}${numberFormat.format(Math.round(abs / 1e4))}만원`
+  if (abs >= 1e4) return `${sign}${trim((abs / 1e4).toFixed(1))}만원`
+  return `${sign}${numberFormat.format(Math.round(abs))}원`
+}
+
+/** 185 -> "3시간 5분", 45 -> "45분", 120 -> "2시간". */
+export function formatMinutes(minutes: number | null | undefined): string {
+  if (minutes === null || minutes === undefined || !Number.isFinite(minutes)) return '–'
+  const total = Math.max(0, Math.round(minutes))
+  const h = Math.floor(total / 60)
+  const m = total % 60
+  if (h === 0) return `${m}분`
+  return m === 0 ? `${h}시간` : `${h}시간 ${m}분`
+}
+
+/** 640 -> "640m", 1250 -> "1.3km". */
+export function formatWalk(meters: number | null | undefined): string {
+  if (meters === null || meters === undefined || !Number.isFinite(meters)) return '–'
+  if (meters < 1000) return `${Math.round(meters)}m`
+  return `${(meters / 1000).toFixed(1).replace(/\.0$/, '')}km`
+}
+
 export const REVISION_KIND_LABELS: Record<string, string> = {
   actual: '실제',
   hypothetical: '가상(what-if)',

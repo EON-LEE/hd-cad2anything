@@ -4,6 +4,7 @@ import type { Artifact, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
 import { buildMockScript, playScript, sleep } from './chatScripts'
 import { buildMockFloor, buildMockMeta } from './floors'
+import { mockJourney } from './journey'
 import { changesBetween, getWorld } from './world'
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -80,6 +81,12 @@ export function createMockSource(): AtlasDataSource {
       await sleep(400)
       requireRevision(body.rev)
       return { alternatives: mockLayoutAlternatives(world, body) }
+    },
+    async getJourney(params) {
+      await sleep(250)
+      const journey = mockJourney(world, params)
+      if (!journey) throw new ApiError(404, '조건에 맞는 고객 동선이 없습니다.')
+      return clone(journey)
     },
     async streamChat(body: ChatRequest, onEvent, signal) {
       runCounter += 1

@@ -219,6 +219,20 @@ export function fitViewState(
   return { target: [cx, cy, 0], zoom, minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM }
 }
 
+/** fitViewState for the part of the canvas right of `leftInset` pixels (e.g. beside a floating card). */
+export function fitViewStateBeside(
+  bbox: BBox,
+  width: number,
+  height: number,
+  leftInset: number,
+  options: { padding?: number; minSpan?: number; maxZoom?: number } = {},
+): OrthoViewState {
+  const inset = Math.max(0, Math.min(leftInset, width - 80))
+  const view = fitViewState(bbox, width - inset, height, options)
+  const shift = inset / 2 / 2 ** view.zoom
+  return { ...view, target: [view.target[0] - shift, view.target[1], 0] }
+}
+
 export function worldToScreen(view: Pick<OrthoViewState, 'target' | 'zoom'>, width: number, height: number, p: Point2): Point2 {
   const scale = 2 ** view.zoom
   return [width / 2 + (p[0] - view.target[0]) * scale, height / 2 - (p[1] - view.target[1]) * scale]

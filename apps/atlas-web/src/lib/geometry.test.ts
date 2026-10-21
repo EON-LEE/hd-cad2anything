@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { FeatureCollection } from '../types/api'
-import { buildFloorModel, curvedPath, fitViewState, floorOfUnitCode, polygonCentroid, screenToWorld, worldToScreen } from './geometry'
+import { buildFloorModel, curvedPath, fitViewState, fitViewStateBeside, floorOfUnitCode, polygonCentroid, screenToWorld, worldToScreen } from './geometry'
 
 const square = (x0: number, y0: number, x1: number, y1: number) => [
   [x0, y0],
@@ -87,6 +87,17 @@ describe('geometry helpers', () => {
     const screen = worldToScreen(view, 1000, 700, [70, 50])
     expect(screen).toEqual([500 + 80, 350 - 80])
     expect(screenToWorld(view, 1000, 700, screen)).toEqual([70, 50])
+  })
+
+  it('fits beside a floating card on the left', () => {
+    const view = fitViewStateBeside([0, 0, 120, 80], 1000, 700, 354, { padding: 20 })
+    // The floor fills the 646 px right of the card and is centered there.
+    expect(2 ** view.zoom * 120).toBeCloseTo(646 - 40, 6)
+    const [left] = worldToScreen(view, 1000, 700, [0, 40])
+    const [right] = worldToScreen(view, 1000, 700, [120, 40])
+    expect((left + right) / 2).toBeCloseTo(354 + 646 / 2, 6)
+    expect(left).toBeCloseTo(354 + 20, 6)
+    expect(fitViewStateBeside([0, 0, 120, 80], 1000, 700, 0)).toEqual(fitViewState([0, 0, 120, 80], 1000, 700))
   })
 
   it('builds curved edge paths through a bent midpoint', () => {

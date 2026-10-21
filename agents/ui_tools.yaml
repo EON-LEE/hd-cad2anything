@@ -74,7 +74,7 @@ tools:
     parameters:
       type: object
       properties:
-        type: { type: string, enum: [changes, artifact, layout, table, none] }
+        type: { type: string, enum: [changes, artifact, layout, table, journey, none] }
         payload:
           type: object
           properties:
@@ -96,8 +96,27 @@ tools:
     parameters:
       type: object
       properties:
-        what: { type: string, enum: [heatmap, highlights, edges, all] }
+        what: { type: string, enum: [heatmap, highlights, edges, journey, all] }
       required: [what]
+      additionalProperties: false
+  - name: ui_show_journey
+    description: >-
+      고객 한 명의 하루 쇼핑 동선을 도면에 그리고 동선 목록을 연다. 결제 순서와 시각, 매장, 금액을 보여 주고
+      매장 사이 경로는 통로망으로 추정한다. customer_id와 date를 모르면 segment만 주면 조건에 맞는 고객 하루를
+      골라 준다. "다른 고객"을 요청받으면 같은 segment에 rank를 1 늘린다. 결과의 stops로 동선을 설명한다.
+    parameters:
+      type: object
+      properties:
+        customer_id: { type: string, description: "가명 고객 ID. 예: C0004230" }
+        date: { type: string, description: "YYYY-MM-DD" }
+        segment:
+          type: object
+          description: "고객 조건. 예: {age_band: 40s, gender: F, tier: [VIP, VVIP]}"
+          properties:
+            age_band: { type: string, enum: [20s, 30s, 40s, 50s, 60s+] }
+            gender: { type: string, enum: [F, M] }
+            tier: { type: array, items: { type: string, enum: [VVIP, VIP, GOLD, MEMBER] } }
+        rank: { type: integer, description: "조건에 맞는 동선 중 몇 번째를 보여 줄지. 기본 1" }
       additionalProperties: false
   - name: consult_specialist
     description: >-

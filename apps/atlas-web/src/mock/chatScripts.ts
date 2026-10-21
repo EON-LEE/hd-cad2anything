@@ -1,11 +1,15 @@
-// Scripted AG-UI event streams for mock mode. Each script emits tool-call chips and STATE_DELTA
-// patches exactly like the backend would (see docs/specs/atlas-api.md §2-3).
+// Scripted AG-UI event streams for mock mode. Like the backend (docs/specs/atlas-api.md §2-3), each
+// script sends labelled tool calls (nested calls inside a specialist agent), STATE_DELTA patches for
+// UI function tools and exactly one assistant message streamed in small deltas.
 import { CHANGE_COLORS, CHANGE_LABELS, CHANGE_ORDER, DEFAULT_HIGHLIGHT_COLOR } from '../lib/colors'
-import { APPROVAL_MODE_LABELS, RISK_LABELS, formatKrw, formatNumber } from '../lib/format'
+import { APPROVAL_MODE_LABELS, RISK_LABELS, floorLabel, formatKrw, formatManwon, formatMinutes, formatNumber, withEuro } from '../lib/format'
+import { segmentParam, transitionText } from '../lib/journey'
 import type { PatchOperation } from '../lib/jsonPatch'
+import { QUICK_PROMPTS } from '../lib/prompts'
 import type { AgUiEvent, ChatRequest, GraphEdge, Highlight } from '../types/api'
 import { mockLayoutAlternatives, mockProductivityDetails, planImpact } from './analytics'
 import { categoryName } from './catalog'
+import { mockJourney } from './journey'
 import { changesBetween, type MockWorld } from './world'
 
 export interface ScriptStep {
@@ -42,20 +46,33 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** Split text into small streaming chunks, preferring word boundaries. */
+/** Split text into small streaming chunks (at most 5 characters, preferring word boundaries). */
 export function chunkText(text: string): string[] {
   const chunks: string[] = []
   let current = ''
+  let length = 0
   for (const ch of text) {
     current += ch
-    if ((current.length >= 4 && /[\s,.·:)\n]/.test(ch)) || current.length >= 7) {
+    length += 1
+    if ((length >= 2 && /[\s,.·:)\n]/.test(ch)) || length >= 5) {
       chunks.push(current)
       current = ''
+      length = 0
     }
   }
   if (current) chunks.push(current)
   return chunks
 }
+
+interface NestedCall {
+  name: string
+  label: string
+  args: unknown
+  summary: string
+  duration?: number
+}
+
+const json = (value: unknown) => JSON.stringify(value)
 
 class ScriptBuilder {
   readonly steps: ScriptStep[] = []
@@ -66,35 +83,61 @@ class ScriptBuilder {
   constructor(threadId: string, runId: string) {
     this.threadId = threadId
     this.runId = runId
-    this.steps.push({ event: { type: 'RUN_STARTED', thread_id: threadId, run_id: runId }, delay: 150 })
+    this.steps.push({ event: { type: 'RUN_STARTED', thread_id: threadId, run_id: runId }, delay: 120 })
   }
 
-  say(text: string): this {
-    const id = `msg-${this.runId}-${this.counter++}`
-    this.steps.push({ event: { type: 'TEXT_MESSAGE_START', message_id: id }, delay: 120 })
-    for (const delta of chunkText(text)) this.steps.push({ event: { type: 'TEXT_MESSAGE_CONTENT', message_id: id, delta }, delay: 18 })
-    this.steps.push({ event: { type: 'TEXT_MESSAGE_END', message_id: id }, delay: 20 })
+  private push(event: AgUiEvent, delay: number): void {
+    this.steps.push({ event, delay })
+  }
+
+  private nextId(prefix: string): string {
+    return `${prefix}-${this.runId}-${this.counter++}`
+  }
+
+  /** The model "thinks" a little longer before its first action. */
+  private pause(normal: number): number {
+    return this.steps.length <= 1 ? 600 : normal
+  }
+
+  tool(name: string, label: string, args: unknown, summary: string, duration = 700): this {
+    const id = this.nextId('call')
+    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, label, args }, this.pause(250))
+    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, duration)
     return this
   }
 
-  tool(name: string, args: unknown, summary: string, duration = 650): this {
-    const id = `call-${this.runId}-${this.counter++}`
-    this.steps.push({ event: { type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, args }, delay: 160 })
-    this.steps.push({ event: { type: 'TOOL_CALL_END', tool_call_id: id, summary }, delay: duration })
+  /** consult_specialist with the specialist's own tool calls nested under it. */
+  consult(agent: string, label: string, args: unknown, calls: NestedCall[], summary: string): this {
+    const id = this.nextId('call')
+    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: 'consult_specialist', label, args }, this.pause(250))
+    for (const call of calls) {
+      const child = this.nextId('call')
+      this.push(
+        { type: 'TOOL_CALL_START', tool_call_id: child, tool_name: call.name, label: call.label, args: call.args, parent_tool_call_id: id, agent },
+        400,
+      )
+      this.push({ type: 'TOOL_CALL_END', tool_call_id: child, summary: call.summary, ok: true }, call.duration ?? 700)
+    }
+    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, 500)
     return this
   }
 
   /** A UI function tool call (ui_*) that the backend turns into a STATE_DELTA. */
-  ui(name: string, args: unknown, delta: PatchOperation[], summary: string): this {
-    const id = `call-${this.runId}-${this.counter++}`
-    this.steps.push({ event: { type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, args }, delay: 120 })
-    this.steps.push({ event: { type: 'STATE_DELTA', delta }, delay: 120 })
-    this.steps.push({ event: { type: 'TOOL_CALL_END', tool_call_id: id, summary }, delay: 60 })
+  ui(name: string, label: string, args: unknown, delta: PatchOperation[], summary = json({ ok: true })): this {
+    const id = this.nextId('call')
+    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, label, args }, this.pause(200))
+    this.push({ type: 'STATE_DELTA', delta }, 180)
+    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, 80)
     return this
   }
 
-  finish(): ScriptStep[] {
-    this.steps.push({ event: { type: 'RUN_FINISHED', thread_id: this.threadId, run_id: this.runId }, delay: 80 })
+  /** The run's single assistant message, streamed in small deltas, then RUN_FINISHED. */
+  answer(text: string): ScriptStep[] {
+    const id = this.nextId('msg')
+    this.push({ type: 'TEXT_MESSAGE_START', message_id: id }, this.pause(450))
+    for (const delta of chunkText(text)) this.push({ type: 'TEXT_MESSAGE_CONTENT', message_id: id, delta }, 22)
+    this.push({ type: 'TEXT_MESSAGE_END', message_id: id }, 20)
+    this.push({ type: 'RUN_FINISHED', thread_id: this.threadId, run_id: this.runId }, 60)
     return this.steps
   }
 }
@@ -102,21 +145,33 @@ class ScriptBuilder {
 const replace = (path: string, value: unknown): PatchOperation => ({ op: 'replace', path, value })
 
 function detectFloor(message: string, fallback: string): string {
+  const basement = /지하\s*(\d+)\s*층/.exec(message)
+  if (basement) return `B${basement[1]}`
   const korean = /(\d+)\s*층/.exec(message)
   if (korean) return `${korean[1]}F`
   const code = /\b(B\d|\d{1,2}F)\b/i.exec(message)
   return code ? code[1].toUpperCase() : fallback
 }
 
+/** The mock world only has 1F and 3F: other floors fall back to 3F with a note for the answer. */
+function resolveFloor(world: MockWorld, rev: string, requested: string): { floor: string; note: string } {
+  const floors = world.revisions.get(rev)?.floors ?? {}
+  if (floors[requested]) return { floor: requested, note: '' }
+  const floor = floors['3F'] ? '3F' : (Object.keys(floors)[0] ?? requested)
+  return { floor, note: `모의 데이터에는 ${floorLabel(requested)} 도면이 없어서 ${withEuro(floorLabel(floor))} 대신 보여 드릴게요.` }
+}
+
+function unitAt(world: MockWorld, rev: string, code: string) {
+  return world.revisions.get(rev)?.floors[code.split('-')[0]]?.units.find((u) => u.code === code)
+}
+
 function brandNameAt(world: MockWorld, rev: string, code: string): string {
-  const floor = code.split('-')[0]
-  const u = world.revisions.get(rev)?.floors[floor]?.units.find((x) => x.code === code)
+  const u = unitAt(world, rev, code)
   return u?.brandId ? (world.brands.get(u.brandId)?.name ?? u.brandId) : '(공실)'
 }
 
 function unitExists(world: MockWorld, rev: string, code: string): boolean {
-  const floor = code.split('-')[0]
-  return !!world.revisions.get(rev)?.floors[floor]?.units.some((u) => u.code === code)
+  return !!unitAt(world, rev, code)
 }
 
 // --- scripts -----------------------------------------------------------------------------------
@@ -128,7 +183,7 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
   else if (/F\/W|가을/i.test(message)) to = 'R2'
   const from = world.revisions.get(to)?.info.parent_rev_id
   if (!from) {
-    return b.say(`${to}은(는) 기준 개정이라 비교할 이전 개정이 없습니다. 다른 개정을 선택한 뒤 다시 요청해 주세요.`).finish()
+    return b.answer(`${to}은(는) 기준 개정이라 비교할 이전 개정이 없어요. 다른 개정을 고른 뒤 다시 물어봐 주세요.`)
   }
   const items = changesBetween(world, from, to)
   const impact = planImpact(items)
@@ -137,7 +192,7 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
   const countText = CHANGE_ORDER.filter((t) => counts.has(t))
     .map((t) => `${CHANGE_LABELS[t]} ${counts.get(t)}`)
     .join(' · ')
-  const notes = world.revisions.get(to)?.notes ?? ''
+  const notes = world.revisions.get(to)?.notes ?? to
 
   const floorCounts = new Map<string, number>()
   for (const item of items) floorCounts.set(item.floor, (floorCounts.get(item.floor) ?? 0) + 1)
@@ -162,46 +217,58 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
       })
     }
   }
+  const codes = highlights.map((h) => h.unit_code)
 
-  b.say(`${notes}(${to})를 직전 개정 ${from}과 비교하고 생성기 레지스트리로 재생성 영향을 분석하겠습니다.\n`)
-  b.tool('revision.diff', { rev_from: from, rev_to: to }, `변경 ${items.length}건: ${countText}`, 800)
   b.tool(
-    'registry.plan_impact',
+    'revision_diff',
+    `${notes}(${to}) 도면 변경 내역 확인`,
     { rev_from: from, rev_to: to },
-    `재생성 대상 ${impact.length}개 (게시 전 승인 ${impact.filter((i) => i.approval_mode === 'pre_publish').length}개)`,
-    500,
+    json({ ok: true, rev_from: from, rev_to: to, changes: items.length, by_type: Object.fromEntries(counts) }),
+    900,
   )
-  b.ui('ui_compare', { rev: to, compare_rev: from }, [replace('/rev', to), replace('/compareRev', from), replace('/heatmap', null)], `${from} → ${to} 비교 표시`)
-  b.ui(
-    'ui_highlight_units',
-    { floor: focusFloor, unit_codes: highlights.map((h) => h.unit_code) },
-    [replace('/floor', focusFloor), replace('/highlights', highlights), replace('/edges', edges)],
-    `${focusFloor} 변경 매장 ${highlights.length}개 강조`,
+  b.tool(
+    'registry_impact',
+    '다시 만들 산출물 확인',
+    { rev_from: from, rev_to: to },
+    json({ ok: true, generators: impact.map((i) => ({ name: i.generator, risk: i.risk_tier, approval: i.approval_mode })) }),
+    600,
   )
-  b.ui('ui_focus', { unit_codes: highlights.map((h) => h.unit_code) }, [replace('/focus', { unit_codes: highlights.map((h) => h.unit_code) })], '변경 구역으로 이동')
-  b.ui('ui_show_panel', { type: 'changes' }, [replace('/panel', { type: 'changes', payload: { rev_from: from, rev_to: to } })], '개정 검토 패널 열기')
+  b.ui('ui_compare', `${from} → ${to} 비교 표시`, { rev_from: from, rev_to: to }, [
+    replace('/rev', to),
+    replace('/compareRev', from),
+    replace('/heatmap', null),
+  ])
+  b.ui('ui_highlight_units', `${floorLabel(focusFloor)} 변경 매장 ${codes.length}곳 강조`, { unit_codes: codes }, [
+    replace('/floor', focusFloor),
+    replace('/highlights', highlights),
+    replace('/edges', edges),
+  ])
+  b.ui('ui_focus', '변경 구역으로 확대', { unit_codes: codes }, [replace('/focus', { unit_codes: codes })])
+  b.ui('ui_show_panel', '변경 목록 열기', { type: 'changes' }, [replace('/panel', { type: 'changes', payload: { rev_from: from, rev_to: to } })])
 
-  const lines = [`**${notes}(${from} → ${to}) 변경점 ${items.length}건**`]
+  const lines = [`${notes}(${to})에서는 직전 개정(${from})보다 **${items.length}건**이 바뀌었어요. (${countText})`, '', '### 주요 변경']
   for (const type of CHANGE_ORDER) {
     const group = items.filter((i) => i.change_type === type)
-    if (!group.length) continue
-    lines.push(`- ${CHANGE_LABELS[type]} ${group.length}건: ${group.map((g) => g.summary).join(' / ')}`)
+    if (group.length) lines.push(`- **${CHANGE_LABELS[type]} ${group.length}건**: ${group.map((g) => g.summary).join(' / ')}`)
   }
-  lines.push('', `**재생성 대상 생성기 ${impact.length}개**`)
+  lines.push('', '### 다시 만들어야 하는 산출물')
   for (const entry of impact) {
     lines.push(
-      `- ${entry.title_ko} (${RISK_LABELS[entry.risk_tier] ?? entry.risk_tier} · ${APPROVAL_MODE_LABELS[entry.approval_mode] ?? entry.approval_mode}) — ${entry.floors.join(', ')}`,
+      `- ${entry.title_ko} — ${RISK_LABELS[entry.risk_tier] ?? entry.risk_tier}, ${APPROVAL_MODE_LABELS[entry.approval_mode] ?? entry.approval_mode} (${entry.floors.join(', ')})`,
     )
   }
-  lines.push('', `도면에서 ${focusFloor} 변경 매장을 유형별 색으로 강조했고, '개정 검토' 탭에 변경 목록과 승인 대상을 열어 두었습니다. 고위험 산출물은 게시 전에 승인해야 합니다.`)
-  return b.say(lines.join('\n')).finish()
+  lines.push(
+    '',
+    `도면에는 ${floorLabel(focusFloor)} 변경 매장을 유형별 색으로 표시했고, '개정 검토' 탭에 변경 목록과 승인 대상을 열어 두었어요. 고위험 산출물은 게시 전에 승인이 필요해요.`,
+  )
+  return b.answer(lines.join('\n'))
 }
 
 function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const rev = req.ui_state.rev
-  const floor = detectFloor(req.message, req.ui_state.floor)
+  const { floor, note } = resolveFloor(world, rev, detectFloor(req.message, req.ui_state.floor))
   const details = mockProductivityDetails(world, rev, floor)
-  if (!details?.length) return b.say(`${rev} ${floor}의 생산성 데이터를 찾지 못했습니다.`).finish()
+  if (!details?.length) return b.answer(`${rev} ${floorLabel(floor)}의 생산성 데이터를 찾지 못했어요.`)
   const sorted = [...details].sort((x, y) => (x.percentile ?? 0) - (y.percentile ?? 0))
   const low = sorted.slice(0, 2)
   const best = sorted.at(-1)!
@@ -220,128 +287,276 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
     { from: low[0].unit_code, to: otherFloor, weight: 0.9, label: 'lift 0.9' },
   ]
   const codes = low.map((d) => d.unit_code)
+  const place = floorLabel(floor)
 
-  b.say(`${rev} 기준 ${floor} 매장별 평효율을 계산하고 하위 매장의 노출 조건을 확인하겠습니다.\n`)
-  b.tool('analytics.productivity', { rev, floor, level: 'unit' }, `${details.length}개 매장 평효율 산출 · 하위 20% ${details.filter((d) => d.low_efficiency).length}개`, 900)
-  b.tool(
-    'spatial.exposure',
-    { rev, floor, unit_codes: codes },
-    `저효율 매장의 에스컬레이터 평균 거리 ${lowAvg.toFixed(0)} m (층 평균 ${floorAvg.toFixed(0)} m)`,
-    600,
+  b.consult(
+    'space-productivity-analyst',
+    '공간 생산성 전문 에이전트에게 확인',
+    { agent: 'space_productivity_analyst', request: `${rev} ${floor} 저효율 매장과 원인을 분석해 주세요.` },
+    [
+      {
+        name: 'analytics_productivity',
+        label: `${place} 공간 생산성 계산`,
+        args: { rev, floor, level: 'unit' },
+        summary: json({ ok: true, units: details.length, low_efficiency: details.filter((d) => d.low_efficiency).length }),
+        duration: 900,
+      },
+      {
+        name: 'analytics_drivers',
+        label: '효율 저하 원인 분석',
+        args: { rev, floor, unit_codes: codes },
+        summary: json({ ok: true, escalator_distance_m: { low_units: Math.round(lowAvg), floor_mean: Math.round(floorAvg) } }),
+        duration: 700,
+      },
+      {
+        name: 'analytics_cross_shopping',
+        label: '저효율 매장 교차구매 확인',
+        args: { level: 'unit', focal: codes.join(','), segment: '' },
+        summary: json({ ok: true, pairs: edges.length, lift_range: [0.9, 1.3] }),
+        duration: 500,
+      },
+    ],
+    json({ ok: true, agent: 'space_productivity_analyst', chars: 812, tool_calls: 3 }),
   )
-  b.tool('analytics.cross_shopping', { level: 'unit', focal: codes.join(','), segment: '' }, '저효율 매장과 상위 매장의 교차구매 lift 0.9~1.3', 500)
-  b.ui(
-    'ui_show_heatmap',
-    { metric: 'sales_per_m2', floor },
-    [replace('/floor', floor), replace('/compareRev', null), replace('/heatmap', { metric: 'sales_per_m2', label: '평효율(원/㎡)', values })],
-    '평효율 heatmap 표시',
-  )
-  b.ui('ui_highlight_units', { unit_codes: codes }, [replace('/highlights', highlights)], `저효율 매장 ${codes.length}개 강조`)
-  b.ui('ui_draw_edges', { edges: edges.length }, [replace('/edges', edges)], `교차구매 연결 ${edges.length}개 표시`)
-  b.ui('ui_focus', { unit_codes: codes }, [replace('/focus', { unit_codes: codes })], '저효율 구역으로 이동')
+  b.ui('ui_show_heatmap', `${place} 도면을 평효율로 색칠`, { metric: 'sales_per_m2', floor }, [
+    replace('/floor', floor),
+    replace('/compareRev', null),
+    replace('/heatmap', { metric: 'sales_per_m2', label: '평효율(원/㎡)', values }),
+  ])
+  b.ui('ui_highlight_units', `저효율 매장 ${codes.length}곳 강조`, { unit_codes: codes }, [replace('/highlights', highlights)])
+  b.ui('ui_draw_edges', `교차구매 관계선 ${edges.length}개 표시`, { edges: edges.length }, [replace('/edges', edges)])
+  b.ui('ui_focus', '저효율 매장으로 확대', { unit_codes: codes }, [replace('/focus', { unit_codes: codes })])
 
-  const lines = [`**${floor} 저효율 매장과 원인 (${rev})**`]
+  const lines = note ? [note, ''] : []
+  lines.push(`${rev} 기준 ${place}에서 평효율이 가장 낮은 매장 두 곳이에요.`, '')
   for (const d of low) {
     lines.push(
-      `- ${d.unit_code} ${d.brand_name}: 평효율 ${formatNumber(d.sales_per_m2)}원/㎡ (${d.percentile}백분위, 연매출 ${formatKrw(d.sales_krw)}). 원인: ${d.driver}`,
+      `- **${d.brand_name}** (${d.unit_code}) — ㎡당 ${formatNumber(d.sales_per_m2)}원, 층 내 ${d.percentile}백분위, 연매출 ${formatKrw(d.sales_krw)}`,
     )
   }
   lines.push(
     '',
-    `공통 원인은 동선 노출입니다. 두 매장의 에스컬레이터 평균 거리는 ${lowAvg.toFixed(0)} m로 층 평균 ${floorAvg.toFixed(0)} m보다 멉니다. 최고 효율 매장 ${best.unit_code}(${best.brand_name})과의 교차구매 lift도 1.1~1.3에 그칩니다.`,
+    '### 왜 낮을까요?',
+    `- **동선 노출이 약해요.** 두 매장은 에스컬레이터까지 평균 ${lowAvg.toFixed(0)}m로, 층 평균(${floorAvg.toFixed(0)}m)보다 멀어요.`,
+    `- **주변 매장과의 연계가 약해요.** 이 층 최고 효율 매장 ${best.brand_name}(${best.unit_code}) 고객의 교차구매 lift가 1.1~1.3에 그쳐요.`,
+    `- 매장별로는 ${low.map((d) => `${d.brand_name}: ${d.driver}`).join(' / ')}`,
     '',
-    `도면을 평효율 heatmap으로 칠하고 두 매장을 강조했습니다. 재배치 대안이 필요하면 "${floor === '1F' ? '1층' : '3층'} 재배치안 3개 비교"라고 요청하세요.`,
+    `도면을 평효율로 색칠하고 두 매장을 빨간 테두리로 표시했어요. 재배치 아이디어가 필요하면 "${place} 재배치안 3개 만들어 비교해줘"라고 물어봐 주세요.`,
   )
-  return b.say(lines.join('\n')).finish()
+  return b.answer(lines.join('\n'))
+}
+
+function categoryAt(world: MockWorld, rev: string, code: string): string {
+  return categoryName(unitAt(world, rev, code)?.category)
 }
 
 function crossShoppingScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const rev = req.ui_state.rev
-  const pairs: [string, string, number][] = [
-    ['3F-C01', '1F-C03', 2.4],
-    ['3F-S03', '1F-S01', 2.1],
-    ['3F-N02', '3F-C06', 1.9],
-    ['3F-C06', '1F-W01', 1.7],
-    ['3F-C01', '3F-S03', 1.6],
-  ]
+  const cosmetics = /화장품|코스메틱|뷰티/.test(req.message)
+  const segment = 'age_band:40s;tier:VIP|VVIP'
+  const pairs: [string, string, number][] = cosmetics
+    ? [
+        ['1F-C03', '3F-C01', 2.4],
+        ['1F-C03', '1F-E01', 2.1],
+        ['1F-W01', '3F-C06', 1.9],
+        ['1F-N03', '1F-S02', 1.7],
+        ['1F-C03', '3F-C05', 1.6],
+      ]
+    : [
+        ['3F-C01', '1F-C03', 2.4],
+        ['3F-S03', '1F-S01', 2.1],
+        ['3F-N02', '3F-C06', 1.9],
+        ['3F-C06', '1F-W01', 1.7],
+        ['3F-C01', '3F-S03', 1.6],
+      ]
+  const floor = cosmetics ? '1F' : '3F'
   const edges: GraphEdge[] = pairs.map(([from, to, lift]) => ({ from, to, weight: lift, label: `lift ${lift.toFixed(1)}` }))
-  const focal = '3F-C01'
-  b.say('40대 VIP·VVIP 고객의 브랜드 교차구매를 분석하겠습니다.\n')
+  const onFloor = [...new Set(pairs.flatMap(([a, c]) => [a, c]))].filter((code) => code.startsWith(`${floor}-`))
+  const centers = cosmetics ? [...new Set(pairs.map(([a]) => a))] : ['3F-C01']
+  const highlights: Highlight[] = centers.map((code) => ({
+    unit_code: code,
+    color: '#8e24aa',
+    reason: cosmetics ? '40대 VIP 교차구매의 기준 매장(화장품)' : '40대 VIP 교차구매 중심 브랜드',
+  }))
+  const maxLift = Math.max(...pairs.map((p) => p[2])).toFixed(1)
+
   b.tool(
-    'analytics.cross_shopping',
-    { level: 'brand', focal: brandNameAt(world, rev, focal), segment: 'age_band:40s;tier:VIP|VVIP' },
-    `상위 연관 ${pairs.length}쌍 · 최대 lift ${Math.max(...pairs.map((p) => p[2])).toFixed(1)}`,
-    900,
+    'analytics_cross_shopping',
+    cosmetics ? '40대 VIP 고객의 화장품 교차구매 분석' : '40대 VIP 고객의 교차구매 분석',
+    { level: cosmetics ? 'category' : 'brand', focal: cosmetics ? 'COSMETICS' : brandNameAt(world, rev, '3F-C01'), segment },
+    json({ ok: true, segment, pairs: pairs.length, max_lift: Number(maxLift), n_customers: 1284 }),
+    1000,
   )
-  b.ui(
-    'ui_draw_edges',
-    { edges: edges.length },
-    [replace('/floor', '3F'), replace('/heatmap', null), replace('/compareRev', null), replace('/edges', edges)],
-    `교차구매 연결 ${edges.length}개 표시`,
-  )
-  b.ui(
-    'ui_highlight_units',
-    { unit_codes: [focal] },
-    [replace('/highlights', [{ unit_code: focal, color: '#8e24aa', reason: '40대 VIP 교차구매 중심 브랜드' }])],
-    '중심 브랜드 강조',
-  )
-  b.ui('ui_focus', { unit_codes: ['3F-C01', '3F-S03', '3F-N02', '3F-C06'] }, [replace('/focus', { unit_codes: ['3F-C01', '3F-S03', '3F-N02', '3F-C06'] })], '연관 매장으로 이동')
-  const lines = ['**40대 VIP·VVIP 교차구매 상위 5쌍**']
-  for (const [from, to, lift] of pairs) {
-    lines.push(`- ${brandNameAt(world, rev, from)}(${from}) ↔ ${brandNameAt(world, rev, to)}(${to}): lift ${lift.toFixed(1)}`)
-  }
-  lines.push(
-    '',
-    `중심 브랜드는 ${brandNameAt(world, rev, focal)}입니다. 1층 화장품·명품과의 층간 연관이 강하므로 3F↔1F 연계 프로모션과 에스컬레이터 동선 안내가 유효합니다. 다른 층 매장은 도면 가장자리의 층 배지로 연결했고, '관계 그래프' 탭에서 전체 관계를 볼 수 있습니다.`,
-  )
-  return b.say(lines.join('\n')).finish()
+  b.ui('ui_draw_edges', `교차구매 관계선 ${edges.length}개 표시`, { edges: edges.length }, [
+    replace('/floor', floor),
+    replace('/heatmap', null),
+    replace('/compareRev', null),
+    replace('/edges', edges),
+  ])
+  b.ui('ui_highlight_units', cosmetics ? `화장품 매장 ${highlights.length}곳 강조` : '중심 브랜드 강조', { unit_codes: centers }, [
+    replace('/highlights', highlights),
+  ])
+  b.ui('ui_focus', '연관 매장으로 확대', { unit_codes: onFloor }, [replace('/focus', { unit_codes: onFloor })])
+
+  const pairLine = ([a, c, lift]: [string, string, number]) =>
+    `- ${brandNameAt(world, rev, a)} + **${brandNameAt(world, rev, c)}** (${categoryAt(world, rev, c)}, ${floorLabel(c.split('-')[0])}) — lift ${lift.toFixed(1)}`
+  const lines = cosmetics
+    ? [
+        '40대 VIP·VVIP 고객이 화장품과 함께 많이 산 매장들이에요. lift는 우연히 함께 살 때보다 몇 배 자주 같이 샀는지를 뜻해요.',
+        '',
+        ...pairs.map(pairLine),
+        '',
+        '### 이렇게 활용해 보세요',
+        `- **3층 여성 컨템포러리와의 연계가 가장 강해요** (lift ${maxLift}). 1층 화장품 구매 고객에게 3층 혜택을 주는 층간 연계 프로모션을 검토할 만해요.`,
+        '- 같은 1층의 주얼리·시계, 명품과도 자주 함께 사요. 화장품 매장과 가까운 동선 배치가 유리해요.',
+        '',
+        "도면에는 1층 화장품 매장을 중심으로 관계선을 그렸어요. 3층 매장은 오른쪽 가장자리의 층 배지로 이어지고, '관계 그래프' 탭에서 전체 관계를 볼 수 있어요.",
+      ]
+    : [
+        '40대 VIP·VVIP 고객의 브랜드 교차구매 상위 5쌍이에요.',
+        '',
+        ...pairs.map(pairLine),
+        '',
+        `중심 브랜드는 ${brandNameAt(world, rev, '3F-C01')}예요. 1층 화장품·명품과의 층간 연관이 강해서 3층↔1층 연계 프로모션과 에스컬레이터 동선 안내가 효과적이에요. 다른 층 매장은 도면 가장자리의 층 배지로 연결했고, '관계 그래프' 탭에서 전체 관계를 볼 수 있어요.`,
+      ]
+  return b.answer(lines.join('\n'))
 }
 
 function layoutScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const rev = req.ui_state.rev
-  const floor = detectFloor(req.message, req.ui_state.floor)
+  const { floor, note } = resolveFloor(world, rev, detectFloor(req.message, req.ui_state.floor))
+  const place = floorLabel(floor)
   const constraints = { max_moves: 3, keep_anchors: true }
   const alternatives = mockLayoutAlternatives(world, { rev, floors: [floor], constraints })
-  if (!alternatives.length) return b.say(`${rev} ${floor}에는 생성할 수 있는 재배치 대안이 없습니다.`).finish()
+  if (!alternatives.length) return b.answer(`${rev} ${place}에서는 만들 수 있는 재배치 대안이 없어요.`)
   const violations = alternatives.reduce((acc, a) => acc + a.constraints.filter((c) => !c.ok).length, 0)
   const low = Math.min(...alternatives.map((a) => a.kpi_delta.low))
   const high = Math.max(...alternatives.map((a) => a.kpi_delta.high))
   const best = [...alternatives].sort((x, y) => y.kpi_delta.sales_krw - x.kpi_delta.sales_krw)[0]
   const moved = [...new Set(best.moves.flatMap((m) => [m.from_unit, m.to_unit]))]
-  b.say(`${floor} 재배치 대안을 제약 조건(최대 이동 3, 앵커 고정)으로 생성하고 KPI 영향을 추정하겠습니다.\n`)
-  b.tool('layout.generate_alternatives', { rev, floors: [floor], constraints }, `대안 ${alternatives.length}개 생성 · 제약 위반 ${violations}건`, 1100)
-  b.tool('whatif.estimate_kpi', { alternatives: alternatives.map((a) => a.id) }, `매출 영향 범위 ${formatKrw(low, true)} ~ ${formatKrw(high, true)}`, 700)
-  b.ui(
-    'ui_show_panel',
-    { type: 'layout' },
-    [replace('/floor', floor), replace('/heatmap', null), replace('/compareRev', null), replace('/panel', { type: 'layout', payload: { rev, floors: [floor], alternatives } })],
-    '레이아웃 대안 패널 열기',
+
+  b.tool(
+    'layout_generate_alternatives',
+    `${place} 재배치 대안 계산`,
+    { rev, floors: [floor], constraints },
+    json({ ok: true, alternatives: alternatives.map((a) => a.id), constraint_violations: violations }),
+    1200,
   )
-  b.ui(
-    'ui_highlight_units',
-    { unit_codes: moved },
-    [
-      replace(
-        '/highlights',
-        best.moves.map((m) => ({ unit_code: m.to_unit, color: CHANGE_COLORS.move, reason: `${best.id}: ${m.brand_name} 도착 예정` })),
-      ),
-      replace(
-        '/edges',
-        best.moves.map((m) => ({ from: m.from_unit, to: m.to_unit, weight: 2, label: m.brand_name, color: CHANGE_COLORS.move })),
-      ),
-      replace('/focus', { unit_codes: moved }),
-    ],
-    `${best.id} 이동 경로 표시`,
+  b.tool(
+    'whatif_score_moves',
+    '이동 효과 추정',
+    { alternatives: alternatives.map((a) => a.id) },
+    json({ ok: true, sales_krw: { low, high } }),
+    800,
   )
-  const lines = [`**${floor} 재배치 대안 ${alternatives.length}개 비교 (${rev} 기준)**`]
+  b.ui('ui_show_panel', '재배치 대안 열기', { type: 'layout' }, [
+    replace('/floor', floor),
+    replace('/heatmap', null),
+    replace('/compareRev', null),
+    replace('/panel', { type: 'layout', payload: { rev, floors: [floor], alternatives } }),
+  ])
+  b.ui('ui_highlight_units', `${best.id} 이동 경로 표시`, { unit_codes: moved }, [
+    replace(
+      '/highlights',
+      best.moves.map((m) => ({ unit_code: m.to_unit, color: CHANGE_COLORS.move, reason: `${best.id}: ${m.brand_name} 도착 예정` })),
+    ),
+    replace(
+      '/edges',
+      best.moves.map((m) => ({ from: m.from_unit, to: m.to_unit, weight: 2, label: m.brand_name, color: CHANGE_COLORS.move })),
+    ),
+    replace('/focus', { unit_codes: moved }),
+  ])
+
+  const lines = note ? [note, ''] : []
+  lines.push(
+    `${place} 재배치 대안 ${alternatives.length}개를 만들었어요. (${rev} 기준, 최대 3곳 이동, 앵커 매장 고정)`,
+    '',
+    '| 대안 | 이동 | 예상 매출 변화 (범위) | 제약 조건 |',
+    '|---|---|---|---|',
+  )
   for (const a of alternatives) {
     const failed = a.constraints.filter((c) => !c.ok).map((c) => c.name)
     lines.push(
-      `- ${a.id}: 이동 ${a.moves.length}건, 목적함수 ${a.objective_before.toFixed(2)}→${a.objective_after.toFixed(2)}, 매출 ${formatKrw(a.kpi_delta.sales_krw, true)} (${formatKrw(a.kpi_delta.low, true)}~${formatKrw(a.kpi_delta.high, true)})${failed.length ? `, 제약 위반: ${failed.join(', ')}` : ', 제약 모두 충족'}`,
+      `| ${a.id} | ${a.moves.length}건 | ${formatKrw(a.kpi_delta.sales_krw, true)} (${formatKrw(a.kpi_delta.low, true)} ~ ${formatKrw(a.kpi_delta.high, true)}) | ${failed.length ? `위반: ${failed.join(', ')}` : '모두 충족'} |`,
     )
   }
-  lines.push('', `추천안은 ${best.id}입니다. 도면에 ${best.id}의 이동 경로를 표시했고, '레이아웃 대안' 탭에서 다른 대안을 미리볼 수 있습니다. 예측 범위는 합성 데이터 기반 추정치입니다.`)
-  return b.say(lines.join('\n')).finish()
+  lines.push(
+    '',
+    `**추천: ${best.id}** — 이동 ${best.moves.length}건으로 매출이 ${formatKrw(best.kpi_delta.sales_krw, true)} 바뀔 것으로 추정돼요.`,
+    '',
+    `도면에 ${best.id}의 이동 경로를 그렸고, '레이아웃 대안' 탭에서 다른 대안도 미리 볼 수 있어요. 예측 범위는 합성 데이터로 만든 추정치예요.`,
+  )
+  return b.answer(lines.join('\n'))
+}
+
+/** Segment filter mentioned in a question ("40대 여성 VIP" -> {age_band: "40s", gender: "F", tier: "VIP"}). */
+export function segmentFromMessage(message: string): Record<string, string> {
+  const segment: Record<string, string> = {}
+  const age = /([2-9])0\s*대/.exec(message)
+  if (age) segment.age_band = Number(age[1]) >= 6 ? '60s+' : `${age[1]}0s`
+  if (/여성|여자/.test(message)) segment.gender = 'F'
+  else if (/남성|남자/.test(message)) segment.gender = 'M'
+  if (/VVIP/i.test(message)) segment.tier = 'VVIP'
+  else if (/VIP/i.test(message)) segment.tier = 'VIP'
+  return segment
+}
+
+function journeyScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
+  const segment = segmentFromMessage(req.message)
+  const args = { segment: segmentParam(segment), rank: 1 }
+  const journey = mockJourney(world, { segment, rank: 1 })
+  if (!journey) return b.answer('조건에 맞는 고객 동선을 찾지 못했어요. 조건을 바꿔 다시 물어봐 주세요.')
+  const stops = journey.stops
+  const s = journey.summary
+  const firstFloor = stops[0].floor
+
+  b.tool(
+    'analytics_customer_journey',
+    '고객 동선 찾기',
+    args,
+    json({ ok: true, customer: journey.customer, date: journey.date, stops: stops.length, floors: s.floors, total_krw: s.total_krw }),
+    1000,
+  )
+  b.ui('ui_clear', '이전 분석 표시 지우기', { what: 'all' }, [
+    replace('/heatmap', null),
+    replace('/highlights', []),
+    replace('/edges', []),
+    replace('/journey', null),
+    replace('/focus', null),
+    replace('/compareRev', null),
+  ])
+  b.ui(
+    'ui_show_journey',
+    '도면에 고객 동선 그리기',
+    args,
+    [replace('/journey', journey), replace('/floor', firstFloor), replace('/panel', { type: 'journey', payload: {} })],
+    json({ ok: true, shown: `${firstFloor} 도면에 동선과 결제 순서를 표시하고 동선 목록을 열었습니다.` }),
+  )
+
+  const lines = [
+    `${journey.customer?.segment ?? ''} 고객 한 분(${journey.customer?.id ?? '가명'})의 ${journey.date}(${journey.weekday}) 하루예요. ${formatMinutes(s.duration_min)} 동안 ${s.floors.length}개 층에서 ${s.stops}번 결제했고, 모두 ${formatManwon(s.total_krw)}을 썼어요.`,
+    '',
+  ]
+  stops.forEach((stop, i) => {
+    const move = journey.transitions.find((t) => t.to_order === stop.order)
+    const prefix = move ? `${transitionText(move)} → ` : ''
+    lines.push(
+      `${i + 1}. ${prefix}**${stop.time}** ${floorLabel(stop.floor)} ${stop.brand_name ?? stop.unit_code} (${stop.category_name ?? ''}) · ${formatManwon(stop.amount_krw)}`,
+    )
+  })
+  const biggest = [...stops].sort((x, y) => (y.amount_krw ?? 0) - (x.amount_krw ?? 0))[0]
+  const cafe = stops.findIndex((stop) => stop.category === 'CAFE')
+  lines.push('', '### 눈여겨볼 점', `- 가장 큰 결제는 ${floorLabel(biggest.floor)} ${biggest.brand_name}(${biggest.category_name})의 ${formatManwon(biggest.amount_krw)}이었어요.`)
+  if (cafe >= 0 && cafe < stops.length - 1) {
+    lines.push(`- ${floorLabel(stops[cafe].floor)} 카페에 들른 뒤에도 결제가 ${stops.length - 1 - cafe}번 더 이어졌어요. 쉬어 갈 곳이 쇼핑 시간을 늘려 주는 흐름이에요.`)
+  }
+  lines.push(
+    '',
+    "도면에 이동 경로(주황 선)와 결제 순서를 표시했어요. 왼쪽 카드에서 결제 항목을 누르면 그 매장으로 이동하고, '다른 고객 보기'로 비슷한 고객의 하루를 볼 수 있어요.",
+    '',
+    '참고: 결제 기록의 순서로 추정한 경로라서 실제로 걸은 길과 다를 수 있어요.',
+  )
+  return b.answer(lines.join('\n'))
 }
 
 function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes: string[]): ScriptStep[] {
@@ -349,79 +564,68 @@ function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes:
   const floor = codes[0].split('-')[0]
   const details = mockProductivityDetails(world, rev, floor) ?? []
   const rows = details.filter((d) => codes.includes(d.unit_code))
-  b.tool('analytics.productivity', { rev, floor, level: 'unit', unit_codes: codes }, `${rows.length}개 매장 KPI 조회`, 600)
-  b.ui(
-    'ui_highlight_units',
-    { unit_codes: codes },
-    [
-      replace('/floor', floor),
-      replace('/highlights', codes.map((c) => ({ unit_code: c, color: '#1e88e5', reason: '질문 대상 매장' }))),
-      replace('/focus', { unit_codes: codes }),
-    ],
-    `${codes.length}개 매장 강조`,
-  )
+  b.tool('analytics_productivity', `${codes.join(', ')} 매장 성과 조회`, { rev, floor, level: 'unit', unit_codes: codes }, json({ ok: true, rows: rows.length }), 600)
+  b.ui('ui_highlight_units', `매장 ${codes.length}곳 강조`, { unit_codes: codes }, [
+    replace('/floor', floor),
+    replace('/highlights', codes.map((c) => ({ unit_code: c, color: '#1e88e5', reason: '질문 대상 매장' }))),
+    replace('/focus', { unit_codes: codes }),
+  ])
   const lines = rows.length
     ? rows.map(
         (d) =>
-          `- ${d.unit_code} ${d.brand_name}(${categoryName(d.category)}): 평효율 ${formatNumber(d.sales_per_m2)}원/㎡, ${d.percentile}백분위, 연매출 ${formatKrw(d.sales_krw)} — ${d.driver}`,
+          `- **${d.brand_name}** (${d.unit_code}, ${categoryName(d.category)}) — ㎡당 ${formatNumber(d.sales_per_m2)}원, ${d.percentile}백분위, 연매출 ${formatKrw(d.sales_krw)}. ${d.driver}`,
       )
-    : ['- 해당 매장의 KPI가 없습니다(공실이거나 다른 개정에 없는 매장).']
-  return b.say([`**${codes.join(', ')} 요약 (${rev})**`, ...lines].join('\n')).finish()
+    : ['- 이 매장의 성과 데이터가 없어요. 공실이거나 이 개정에 없는 매장이에요.']
+  return b.answer([`${rev} 기준으로 요약했어요.`, '', ...lines, '', '도면에서 해당 매장을 파란 테두리로 표시했어요.'].join('\n'))
 }
 
 function helpScript(_world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const selection = req.ui_state.selection
   if (selection.length) {
-    b.ui('ui_focus', { unit_codes: selection }, [replace('/focus', { unit_codes: selection })], '선택 매장으로 이동')
+    b.ui('ui_focus', '선택한 매장으로 확대', { unit_codes: selection }, [replace('/focus', { unit_codes: selection })])
   }
-  return b
-    .say(
-      [
-        '지금은 내장 모의 데이터로 동작하고 있어 아래 질문에 시나리오 응답을 드릴 수 있습니다.',
-        '- "S/S 개편 도면 변경점과 재생성 대상 알려줘": 개정 diff, 영향 분석, 승인 대상',
-        '- "3층 저효율 zone과 원인": 평효율 heatmap과 원인 분석',
-        '- "40대 VIP 교차구매 보여줘": 교차구매 관계와 층간 연결',
-        '- "3층 재배치안 3개 비교": 레이아웃 대안과 KPI 범위',
-        '- "3층 평효율 표로 보여줘": 매장별 평효율 표(panel.type = table)',
-        '- 매장 코드(예: 3F-C02)를 넣어 질문하면 해당 매장 KPI를 요약합니다.',
-        selection.length ? `\n선택한 매장 ${selection.join(', ')}로 화면을 이동했습니다.` : '',
-      ].join('\n'),
-    )
-    .finish()
+  return b.answer(
+    [
+      '지금은 내장 모의 데이터로 동작하고 있어서 아래 질문에 시나리오 답변을 드릴 수 있어요.',
+      '',
+      ...QUICK_PROMPTS.map((prompt) => `- ${prompt}`),
+      '- 3층 평효율 표로 보여줘',
+      '- 매장 코드(예: 3F-C02)를 넣어 물어보면 그 매장의 성과를 요약해요.',
+      ...(selection.length ? ['', `선택한 매장 ${selection.join(', ')}(으)로 화면을 옮겼어요.`] : []),
+    ].join('\n'),
+  )
 }
 
 function tableScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const rev = req.ui_state.rev
-  const floor = detectFloor(req.message, req.ui_state.floor)
+  const { floor, note } = resolveFloor(world, rev, detectFloor(req.message, req.ui_state.floor))
   const details = mockProductivityDetails(world, rev, floor)
-  if (!details?.length) return b.say(`${rev} ${floor}의 생산성 데이터를 찾지 못했습니다.`).finish()
+  if (!details?.length) return b.answer(`${rev} ${floorLabel(floor)}의 생산성 데이터를 찾지 못했어요.`)
   const rows = [...details]
     .sort((x, y) => (y.sales_per_m2 ?? 0) - (x.sales_per_m2 ?? 0))
     .map((d) => [d.unit_code, d.brand_name, categoryName(d.category), d.sales_per_m2, d.percentile, d.driver])
-  b.tool('analytics.productivity', { rev, floor, level: 'unit' }, `${rows.length}개 매장 평효율 산출`, 700)
-  b.ui(
-    'ui_show_panel',
-    { type: 'table' },
-    [
-      replace('/floor', floor),
-      replace('/panel', {
-        type: 'table',
-        payload: { title: `${floor} 매장별 평효율 (${rev})`, columns: ['매장', '브랜드', '카테고리', '평효율(원/㎡)', '백분위', '요인'], rows },
-      }),
-    ],
-    '평효율 표 열기',
-  )
-  return b.say(`${floor} 매장 ${rows.length}개의 평효율을 높은 순으로 표에 정리했습니다. 표는 도면 아래쪽에 열려 있고, 닫기 버튼으로 닫을 수 있습니다.`).finish()
+  b.tool('analytics_productivity', `${floorLabel(floor)} 공간 생산성 계산`, { rev, floor, level: 'unit' }, json({ ok: true, units: rows.length }), 700)
+  b.ui('ui_show_panel', '평효율 표 열기', { type: 'table' }, [
+    replace('/floor', floor),
+    replace('/panel', {
+      type: 'table',
+      payload: { title: `${floor} 매장별 평효율 (${rev})`, columns: ['매장', '브랜드', '카테고리', '평효율(원/㎡)', '백분위', '요인'], rows },
+    }),
+  ])
+  const lines = note ? [note, ''] : []
+  lines.push(`${floorLabel(floor)} 매장 ${rows.length}곳의 평효율을 높은 순으로 표에 정리했어요. 표는 도면 아래쪽에 열려 있고, × 버튼으로 닫을 수 있어요.`)
+  return b.answer(lines.join('\n'))
 }
 
 export function buildMockScript(world: MockWorld, req: ChatRequest, threadId: string, runId: string): ScriptStep[] {
   const b = new ScriptBuilder(threadId, runId)
   const message = req.message
-  if (/변경|재생성|개정|S\/S|F\/W/i.test(message)) return revisionScript(world, req, b)
+  if (/변경|재생성|개정|바뀌|S\/S|F\/W/i.test(message)) return revisionScript(world, req, b)
   if (/재배치|대안|레이아웃/.test(message)) return layoutScript(world, req, b)
   if (/표로|표 |테이블|table/i.test(message)) return tableScript(world, req, b)
+  if (/동선|경로|여정|journey/i.test(message)) return journeyScript(world, req, b)
   if (/저효율|효율|원인|zone|존/i.test(message)) return productivityScript(world, req, b)
-  if (/교차|VIP|연관/i.test(message)) return crossShoppingScript(world, req, b)
+  if (/교차|VIP|연관|같이 사|함께 사/i.test(message)) return crossShoppingScript(world, req, b)
   const codes = [...new Set(message.toUpperCase().match(/\b(?:B\d|\d{1,2}F)-[A-Z]\d{2}[A-Z]?\b/g) ?? [])].filter((c) =>
     unitExists(world, req.ui_state.rev, c),
   )

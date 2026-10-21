@@ -1,50 +1,79 @@
 import { describe, expect, it } from 'vitest'
+import type { ChatRun } from '../lib/chatRun'
 import type { AgUiEvent, UiState } from '../types/api'
-import { appReducer, createAppState, touchedKeys, type AppAction, type AppState } from './reducer'
+import { appReducer, createAppState, touchedKeys, type AppAction, type AppState, type ChatItem } from './reducer'
 import { createInitialUiState } from './uiState'
 
 const ui: UiState = createInitialUiState(null, { rev: 'R2', floor: '3F' })
 
-function run(state: AppState, events: AgUiEvent[]): AppState {
-  return events.reduce((s, event) => appReducer(s, { type: 'chat/event', event }), state)
+function run(state: AppState, events: AgUiEvent[], at = 1000): AppState {
+  return events.reduce((s, event, i) => appReducer(s, { type: 'chat/event', event, at: at + i * 1000 }), state)
 }
 
-describe('appReducer: chat event sequence', () => {
-  it('assembles streamed text, tool calls and STATE_DELTA patches', () => {
-    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u1', text: '3층 저효율 zone과 원인' })
+const lastRun = (state: AppState): ChatRun => {
+  const item = state.chat.items.at(-1) as Extract<ChatItem, { kind: 'run' }>
+  expect(item.kind).toBe('run')
+  return item.run
+}
+
+const journey = {
+  title: '40대 여성 VIP 고객의 쇼핑 동선',
+  stops: [
+    { order: 1, time: '11:32', unit_code: '1F-C03', floor: '1F', amount_krw: 24000, gap_min: null, x: 90, y: 37 },
+    { order: 2, time: '12:41', unit_code: '3F-C05', floor: '3F', amount_krw: 14500, gap_min: 69, x: 60, y: 50 },
+  ],
+  segments: [{ floor: '1F', points: [[90, 37], [90, 40], [70.5, 40]], from_order: 1, to_order: 2 }],
+  transitions: [{ from_order: 1, to_order: 2, from_floor: '1F', to_floor: '3F', via: 'ESC-B' }],
+}
+
+describe('appReducer: chat runs', () => {
+  it('folds a run: labelled steps, STATE_DELTA patches and the streamed answer', () => {
+    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u1', text: '4층 저효율 매장', at: 0 })
     expect(state.chat.running).toBe(true)
+    expect(state.chat.items.map((i) => i.kind)).toEqual(['user', 'run'])
+    expect(lastRun(state).status).toBe('thinking')
 
     state = run(state, [
       { type: 'RUN_STARTED', thread_id: 't1', run_id: 'r1' },
-      { type: 'TEXT_MESSAGE_START', message_id: 'm1' },
-      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm1', delta: '3F 평효율을 ' },
-      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics.productivity', args: { rev: 'R2', floor: '3F' } },
-      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm1', delta: '계산했습니다.' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics_productivity', args: { rev: 'R2', floor: '3F' } },
     ])
-    const midTool = state.chat.items.find((i) => i.kind === 'tool')
-    expect(midTool).toMatchObject({ status: 'running', name: 'analytics.productivity' })
-    expect(state.chat.items.find((i) => i.kind === 'assistant')).toMatchObject({ text: '3F 평효율을 계산했습니다.', streaming: true })
+    expect(lastRun(state)).toMatchObject({ status: 'working', runId: 'r1' })
+    expect(lastRun(state).steps[0]).toMatchObject({ label: '공간 생산성 계산', status: 'running' })
 
-    state = run(state, [
-      { type: 'TOOL_CALL_END', tool_call_id: 'c1', summary: '18개 매장 산출' },
-      {
-        type: 'STATE_DELTA',
-        delta: [
-          { op: 'replace', path: '/heatmap', value: { metric: 'sales_per_m2', label: '평효율(원/㎡)', values: { '3F-N05': 0.82 } } },
-          { op: 'add', path: '/highlights/-', value: { unit_code: '3F-N05', color: '#e53935', reason: '저효율 하위 10%' } },
-          { op: 'replace', path: '/edges', value: [{ from: '3F-N05', to: '2F-C03', weight: 2.4, label: 'lift 2.4' }] },
-          { op: 'replace', path: '/focus', value: { unit_codes: ['3F-N05'] } },
-        ],
-      },
-      { type: 'TEXT_MESSAGE_END', message_id: 'm1' },
-      { type: 'RUN_FINISHED', thread_id: 't1', run_id: 'r1' },
-    ])
+    state = run(
+      state,
+      [
+        { type: 'TOOL_CALL_END', tool_call_id: 'c1', summary: '18개 매장 산출' },
+        { type: 'TOOL_CALL_START', tool_call_id: 'u1', tool_name: 'ui_show_heatmap', label: '3층 도면을 평효율로 색칠' },
+        {
+          type: 'STATE_DELTA',
+          delta: [
+            { op: 'replace', path: '/heatmap', value: { metric: 'sales_per_m2', label: '평효율(원/㎡)', values: { '3F-N05': 0.82 } } },
+            { op: 'add', path: '/highlights/-', value: { unit_code: '3F-N05', color: '#e53935', reason: '저효율 하위 10%' } },
+            { op: 'replace', path: '/edges', value: [{ from: '3F-N05', to: '2F-C03', weight: 2.4, label: 'lift 2.4' }] },
+            { op: 'replace', path: '/focus', value: { unit_codes: ['3F-N05'] } },
+          ],
+        },
+        { type: 'TOOL_CALL_END', tool_call_id: 'u1' },
+        { type: 'TEXT_MESSAGE_START', message_id: 'm1' },
+        { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm1', delta: '3F 평효율을 ' },
+        { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm1', delta: '계산했습니다.' },
+        { type: 'TEXT_MESSAGE_END', message_id: 'm1' },
+        { type: 'RUN_FINISHED', thread_id: 't1', run_id: 'r1' },
+      ],
+      3000,
+    )
 
     expect(state.chat.running).toBe(false)
     expect(state.chat.threadId).toBe('t1')
-    expect(state.chat.items.map((i) => i.kind)).toEqual(['user', 'assistant', 'tool', 'state'])
-    expect(state.chat.items[2]).toMatchObject({ status: 'done', summary: '18개 매장 산출' })
-    expect(state.chat.items[3]).toMatchObject({ kind: 'state', paths: ['heatmap', 'highlights', 'edges', 'focus'] })
+    expect(state.chat.items.map((i) => i.kind)).toEqual(['user', 'run'])
+    const finished = lastRun(state)
+    expect(finished).toMatchObject({ status: 'done', answer: '3F 평효율을 계산했습니다.', startedAt: 0, endedAt: 11000 })
+    expect(finished.steps.map((s) => [s.label, s.status])).toEqual([
+      ['공간 생산성 계산', 'done'],
+      ['3층 도면을 평효율로 색칠', 'done'],
+    ])
+    expect(finished.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'focus'])
     expect(state.ui.heatmap?.values).toEqual({ '3F-N05': 0.82 })
     expect(state.ui.highlights).toEqual([{ unit_code: '3F-N05', color: '#e53935', reason: '저효율 하위 10%' }])
     expect(state.ui.edges[0]).toMatchObject({ from: '3F-N05', to: '2F-C03', weight: 2.4 })
@@ -53,8 +82,10 @@ describe('appReducer: chat event sequence', () => {
     expect(state.panelSeq).toBe(0)
   })
 
-  it('rejects an invalid STATE_DELTA atomically and records the error', () => {
-    const before = createAppState(ui)
+  it('rejects an invalid STATE_DELTA atomically and marks the step', () => {
+    const before = run(appReducer(createAppState(ui), { type: 'chat/user', id: 'u', text: 'x', at: 0 }), [
+      { type: 'TOOL_CALL_START', tool_call_id: 'u1', tool_name: 'ui_set_floor' },
+    ])
     const after = run(before, [
       {
         type: 'STATE_DELTA',
@@ -65,10 +96,10 @@ describe('appReducer: chat event sequence', () => {
       },
     ])
     expect(after.ui).toBe(before.ui)
-    expect(after.chat.items[0]).toMatchObject({ kind: 'state', error: expect.stringContaining('Operation 1 failed') })
+    expect(lastRun(after).steps[0]).toMatchObject({ status: 'error', patchError: expect.stringContaining('Operation 1 failed') })
   })
 
-  it('switches panels and clears the selection when the floor changes', () => {
+  it('applies STATE_DELTA outside a run without touching the transcript', () => {
     let state = appReducer(createAppState(ui), { type: 'selection/set', unitCodes: ['3F-C02'] })
     state = run(state, [
       {
@@ -82,6 +113,27 @@ describe('appReducer: chat event sequence', () => {
     expect(state.ui.panel).toEqual({ type: 'changes', payload: { rev_from: 'R1', rev_to: 'R2' } })
     expect(state.panelSeq).toBe(1)
     expect(state.selection).toEqual([])
+    expect(state.chat.items).toEqual([])
+    expect(state.chat.running).toBe(false)
+  })
+
+  it('accepts journey patches thanks to the journey: null default', () => {
+    let state = run(createAppState(ui), [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/journey', value: journey },
+          { op: 'replace', path: '/floor', value: '1F' },
+          { op: 'replace', path: '/panel', value: { type: 'journey', payload: {} } },
+        ],
+      },
+    ])
+    expect(state.ui.floor).toBe('1F')
+    expect(state.ui.panel).toEqual({ type: 'journey', payload: {} })
+    expect(state.ui.journey?.stops.map((s) => s.unit_code)).toEqual(['1F-C03', '3F-C05'])
+    expect(state.ui.journey?.summary).toMatchObject({ stops: 2, floors: ['1F', '3F'], total_krw: 38500, duration_min: 69 })
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: null }] }])
+    expect(state.ui.journey).toBeNull()
   })
 
   it('normalizes agent-provided values defensively', () => {
@@ -92,29 +144,47 @@ describe('appReducer: chat event sequence', () => {
           { op: 'replace', path: '/highlights', value: ['3F-C01', { color: '#fff' }] },
           { op: 'replace', path: '/panel', value: { type: 'unknown' } },
           { op: 'replace', path: '/heatmap', value: { metric: 'x', values: { a: 0.3, b: 'bad' } } },
+          { op: 'replace', path: '/journey', value: { stops: 'none' } },
         ],
       },
     ])
     expect(state.ui.highlights).toEqual([{ unit_code: '3F-C01' }])
     expect(state.ui.panel).toEqual({ type: 'none', payload: {} })
     expect(state.ui.heatmap).toEqual({ metric: 'x', label: 'x', values: { a: 0.3 } })
+    expect(state.ui.journey).toBeNull()
   })
 
-  it('handles RUN_ERROR, content without START and stream closure', () => {
-    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u', text: 'hi' })
+  it('handles RUN_ERROR, content without START, aborts and streams that end early', () => {
+    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u', text: 'hi', at: 0 })
     state = run(state, [
       { type: 'TEXT_MESSAGE_CONTENT', message_id: 'orphan', delta: '부분 응답' },
       { type: 'TOOL_CALL_START', tool_call_id: 'c', tool_name: 'x', args: {} },
       { type: 'RUN_ERROR', message: '백엔드 오류' },
     ])
     expect(state.chat.running).toBe(false)
-    expect(state.chat.items.map((i) => i.kind)).toEqual(['user', 'assistant', 'tool', 'error'])
-    expect(state.chat.items[1]).toMatchObject({ text: '부분 응답', streaming: false })
-    expect(state.chat.items[2]).toMatchObject({ status: 'done' })
+    expect(lastRun(state)).toMatchObject({ status: 'error', error: '백엔드 오류', answer: '부분 응답' })
+    expect(lastRun(state).steps[0].status).toBe('error')
 
-    const aborted = appReducer(appReducer(state, { type: 'chat/user', id: 'u2', text: 'again' }), { type: 'chat/closed', aborted: true })
+    const aborted = appReducer(appReducer(state, { type: 'chat/user', id: 'u2', text: 'again', at: 10 }), { type: 'chat/closed', aborted: true, at: 20 })
     expect(aborted.chat.running).toBe(false)
-    expect(aborted.chat.items.at(-1)).toMatchObject({ kind: 'notice' })
+    expect(aborted.chat.items.map((i) => i.kind)).toEqual(['user', 'run', 'user', 'run'])
+    expect(lastRun(aborted)).toMatchObject({ status: 'stopped', endedAt: 20 })
+
+    const cut = appReducer(appReducer(state, { type: 'chat/user', id: 'u3', text: 'again', at: 10 }), { type: 'chat/closed', at: 30 })
+    expect(lastRun(cut)).toMatchObject({ status: 'error', endedAt: 30 })
+    // Closing after the run ended changes nothing.
+    expect(appReducer(cut, { type: 'chat/closed' })).toBe(cut)
+  })
+
+  it('opens a run for agent output that arrives without a user message', () => {
+    const state = run(createAppState(ui), [
+      { type: 'TOOL_CALL_END', tool_call_id: 'stray' },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '안내' },
+      { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' },
+    ])
+    expect(state.chat.items.map((i) => i.kind)).toEqual(['run'])
+    expect(lastRun(state)).toMatchObject({ status: 'done', answer: '안내', steps: [] })
+    expect(appReducer(state, { type: 'chat/reset' }).chat).toEqual({ threadId: null, runId: null, running: false, items: [] })
   })
 
   it('applies user-originated patches through the same path', () => {

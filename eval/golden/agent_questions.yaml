@@ -6,9 +6,13 @@
 #   specialists_any                     consult_specialist로 상담한 전문 에이전트 키
 #   answer_any / answer_all / answer_none  답변에 나와야 하거나 나오면 안 되는 문구
 #   consult_not_regex                   전문 에이전트(예: 웹 조사)에 넘긴 요청에 내부 수치가 없는지
+# defaults.expect는 모든 사례에 적용한다. 사례에 같은 점검이 있으면 사례 값을 쓰고, *_none 목록은 합친다.
 version: 1
 defaults:
   ui_state: {rev: R2, floor: 3F, selection: []}
+  expect:
+    # 답변은 대화체여야 한다. 도구 이름이나 JSON이 답변에 나오면 실패다.
+    answer_none: ["analytics_", "spatial_", "registry_", "revision_diff", "ui_show", "ui_set", "ui_highlight", "ui_draw", "consult_specialist", "{\"", "```json"]
 cases:
   - id: rev-ss-changes
     scenario: 개정 반영
@@ -62,6 +66,13 @@ cases:
     expect:
       tools_any: [analytics_floor_transitions]
       answer_any: ["샤워"]
+
+  - id: journey-vip-path
+    scenario: 고객 동선
+    question: 40대 VIP 고객 한 명의 하루 쇼핑 동선을 도면에 보여줘.
+    expect:
+      ui_any: [ui_show_journey]
+      answer_any: ["추정", "결제 순서", "구매 순서"]
 
   - id: md-relayout-before-after
     scenario: 개편 효과

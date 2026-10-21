@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -53,9 +55,20 @@ def foundry_runtime_factory(toolkit: Toolkit) -> AgentRuntime:
         else DefaultAzureCredential()
     )
     handler = UiActionHandler(
-        heatmap_provider=lambda metric, rev, floor: metrics.unit_metric(toolkit, metric, rev, floor)
+        heatmap_provider=lambda metric, rev, floor: metrics.unit_metric(toolkit, metric, rev, floor),
+        journey_provider=lambda **params: toolkit.customer_journey(**params, with_routes=True),
     )
     return AgentRuntime.from_project(endpoint, credential, ui_handler=handler)
+
+
+def warm_up(toolkit: Toolkit) -> None:
+    """Load transactions and build caches so the first analytics question answers quickly."""
+    started = time.monotonic()
+    try:
+        toolkit._journey_rows()
+        logger.info("analytics caches warmed in %.1fs", time.monotonic() - started)
+    except Exception:  # warm-up is best effort; requests compute the same caches on demand
+        logger.exception("analytics warm-up failed")
 
 
 def create_app(
@@ -72,6 +85,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if os.environ.get("ATLAS_WARMUP", "1") == "1":
+            threading.Thread(target=warm_up, args=(toolkit,), name="analytics-warmup", daemon=True).start()
         async with server.session_manager.run():
             yield
 

@@ -3,6 +3,7 @@ import DeckGL from '@deck.gl/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
+import { JourneyCard } from '../components/JourneyCard'
 import { Legend } from '../components/Legend'
 import { LayerToolbar } from '../components/LayerToolbar'
 import { TablePanel } from '../components/TablePanel'
@@ -10,22 +11,25 @@ import { UnitDetailsCard } from '../components/UnitDetailsCard'
 import { useCachedResource } from '../hooks/useCachedResource'
 import { useElementSize } from '../hooks/useElementSize'
 import { CHANGE_LABELS } from '../lib/colors'
-import { formatArea } from '../lib/format'
-import { buildFloorModel, fitViewState, unionBBox, MAX_ZOOM, MIN_ZOOM, type OrthoViewState, type UnitInfo } from '../lib/geometry'
+import { formatArea, formatManwon } from '../lib/format'
+import { buildFloorModel, fitViewStateBeside, unionBBox, MAX_ZOOM, MIN_ZOOM, type OrthoViewState, type UnitInfo } from '../lib/geometry'
 import { useAppDispatch, useAppState } from '../state/store'
 import { heatmapActive, sortedFloors } from '../state/uiState'
 import { replaceOp } from '../state/reducer'
+import type { Journey } from '../types/api'
 import { buildLayers, type UnitPart } from './layers'
 import {
   categoryColorMap,
   changeMarksForFloor,
   crossFloorTargets,
   layoutFloorBadges,
+  prepareJourney,
   removedUnits,
   resolveEdges,
   resolveHighlights,
   unitDisplayName,
   type EdgeRender,
+  type JourneyStopRender,
   type UnitStyleContext,
 } from './prepare'
 
@@ -34,6 +38,8 @@ type ViewState = OrthoViewState & { transitionDuration?: number; transitionInter
 const VIEW = new OrthographicView({ id: 'floor', flipY: false })
 const INTERPOLATOR = new LinearInterpolator({ transitionProps: ['target', 'zoom'] })
 const CONTROLLER = { doubleClickZoom: true, keyboard: true, inertia: true, scrollZoom: { speed: 0.02, smooth: false } }
+/** Width of the journey card (.journey-card) plus its margins, in pixels. */
+const JOURNEY_CARD_INSET = 354
 
 export function FloorCanvas() {
   const { source, meta } = useData()
@@ -70,33 +76,65 @@ export function FloorCanvas() {
   const [viewState, setViewState] = useState<ViewState | null>(null)
   const fittedFloor = useRef<string | null>(null)
   const appliedFocus = useRef(0)
+  /** Journey last fitted beside the open journey card (null while the card is closed). */
+  const fittedJourney = useRef<Journey | null>(null)
   const ready = size.width > 0 && size.height > 0 && !!base.data && !!model.bbox
+  // The journey card floats over the left of the canvas: fit floors and focus to the area beside it.
+  const leftInset = ui.journey && ui.panel?.type === 'journey' && size.width >= 720 ? JOURNEY_CARD_INSET : 0
+  const previousInset = useRef(leftInset)
 
   useEffect(() => {
+    // Inset that applied before this run (to pan back when the card closes).
+    const closedInset = previousInset.current
+    previousInset.current = leftInset
     if (!ready || !model.bbox) return
     const codes = (ui.focus?.unit_codes ?? []).filter((c) => model.units.has(c))
     if (focusSeq !== appliedFocus.current && codes.length) {
       appliedFocus.current = focusSeq
       fittedFloor.current = ui.floor
+      fittedJourney.current = leftInset ? ui.journey : null
       const bbox = unionBBox(codes.map((c) => model.units.get(c)!.bbox))!
       setViewState({
-        ...fitViewState(bbox, size.width, size.height, { padding: 90, maxZoom: 4.5, minSpan: 20 }),
+        ...fitViewStateBeside(bbox, size.width, size.height, leftInset, { padding: 90, maxZoom: 4.5, minSpan: 20 }),
         transitionDuration: 700,
         transitionInterpolator: INTERPOLATOR,
       })
       return
     }
-    if (fittedFloor.current !== ui.floor) {
+    const journeyToFit = leftInset > 0 && fittedJourney.current !== ui.journey
+    if (fittedFloor.current !== ui.floor || journeyToFit) {
+      const sameFloor = fittedFloor.current === ui.floor
       fittedFloor.current = ui.floor
-      setViewState(fitViewState(model.bbox, size.width, size.height, { padding: 28 }))
+      fittedJourney.current = leftInset ? ui.journey : null
+      const view = fitViewStateBeside(model.bbox, size.width, size.height, leftInset, { padding: 28 })
+      setViewState(sameFloor ? { ...view, transitionDuration: 400, transitionInterpolator: INTERPOLATOR } : view)
+      return
     }
-  }, [ready, model, focusSeq, ui.focus, ui.floor, size.width, size.height])
+    if (!leftInset) fittedJourney.current = null
+    // The card closed: pan back by the offset it caused (zoom and the user's own panning are kept).
+    if (closedInset > 0 && leftInset === 0) {
+      setViewState((prev) =>
+        prev
+          ? {
+              ...prev,
+              target: [prev.target[0] + closedInset / 2 / 2 ** prev.zoom, prev.target[1], 0],
+              transitionDuration: 300,
+              transitionInterpolator: INTERPOLATOR,
+            }
+          : prev,
+      )
+    }
+  }, [ready, model, focusSeq, ui.focus, ui.floor, ui.journey, leftInset, size.width, size.height])
 
   const fitAll = useCallback(() => {
     if (model.bbox && size.width) {
-      setViewState({ ...fitViewState(model.bbox, size.width, size.height, { padding: 28 }), transitionDuration: 400, transitionInterpolator: INTERPOLATOR })
+      setViewState({
+        ...fitViewStateBeside(model.bbox, size.width, size.height, leftInset, { padding: 28 }),
+        transitionDuration: 400,
+        transitionInterpolator: INTERPOLATOR,
+      })
     }
-  }, [model.bbox, size.width, size.height])
+  }, [model.bbox, size.width, size.height, leftInset])
 
   const zoomBy = useCallback((delta: number) => {
     setViewState((prev) =>
@@ -121,6 +159,7 @@ export function FloorCanvas() {
     [badgeTargets, floors, viewState, size.width, size.height],
   )
   const edges: EdgeRender[] = useMemo(() => resolveEdges(ui.edges, ui.floor, model.units, badges), [ui.edges, ui.floor, model.units, badges])
+  const journey = useMemo(() => prepareJourney(ui.journey, ui.floor, floors), [ui.journey, ui.floor, floors])
 
   const layers = useMemo(
     () =>
@@ -135,20 +174,24 @@ export function FloorCanvas() {
         highlights,
         selection: selectedUnits,
         edges,
+        journey,
         zoom: labelZoom,
       }),
-    [model, compareModel, removed, changeMarks, style, styleKey, ui.layers, highlights, selectedUnits, edges, labelZoom],
+    [model, compareModel, removed, changeMarks, style, styleKey, ui.layers, highlights, selectedUnits, edges, journey, labelZoom],
   )
 
   const onClick = useCallback(
     (info: PickingInfo) => {
       if (info.layer?.id === 'units' && info.object) {
         dispatch({ type: 'selection/set', unitCodes: [(info.object as UnitPart).unit.code] })
+      } else if (info.layer?.id === 'journey-stops' && info.object) {
+        const code = (info.object as JourneyStopRender).stop.unit_code
+        if (model.units.has(code)) dispatch({ type: 'selection/set', unitCodes: [code] })
       } else if (!info.object) {
         dispatch({ type: 'selection/set', unitCodes: [] })
       }
     },
-    [dispatch],
+    [dispatch, model.units],
   )
 
   const categoryNames = useMemo(() => new Map(meta.categories.map((c) => [c.code, c.name_ko])), [meta.categories])
@@ -172,6 +215,13 @@ export function FloorCanvas() {
       if (info.layer?.id === 'edges') {
         const edge = (object as unknown as EdgeRender).edge
         return { text: `${edge.from} → ${edge.to}${edge.label ? `\n${edge.label}` : ''}`, style }
+      }
+      if (info.layer?.id === 'journey-stops') {
+        const { stop } = object as unknown as JourneyStopRender
+        const category = stop.category_name || categoryNames.get(String(stop.category)) || ''
+        const lines = [`${stop.order}번째 결제 · ${stop.time}`, `${stop.brand_name ?? stop.unit_code}${category ? ` · ${category}` : ''}`]
+        lines.push(`${stop.unit_code}${stop.amount_krw !== null ? ` · ${formatManwon(stop.amount_krw)}` : ''}`)
+        return { text: lines.join('\n'), style }
       }
       return null
     },
@@ -215,7 +265,7 @@ export function FloorCanvas() {
           </div>
         )}
         <p className="visually-hidden" aria-live="polite">
-          {`${ui.floor} 도면: 매장 ${model.units.size}개, 강조 ${highlights.length}개, 연결선 ${edges.length}개${heatValues ? ', heatmap 표시 중' : ''}${compareRev ? `, ${compareRev} 대비 비교 중` : ''}`}
+          {`${ui.floor} 도면: 매장 ${model.units.size}개, 강조 ${highlights.length}개, 연결선 ${edges.length}개${heatValues ? ', heatmap 표시 중' : ''}${compareRev ? `, ${compareRev} 대비 비교 중` : ''}${ui.journey ? `, 고객 동선 표시 중(이 층 결제 ${journey.stops.length}곳)` : ''}`}
         </p>
         {badges.map((badge) => (
           <button
@@ -233,6 +283,7 @@ export function FloorCanvas() {
         ))}
         {selectedUnit && <UnitDetailsCard unit={selectedUnit} changeType={changeMarks?.get(selectedUnit.code) ?? null} />}
         {ui.panel?.type === 'table' && <TablePanel payload={ui.panel.payload} />}
+        {ui.journey && ui.panel?.type === 'journey' && <JourneyCard journey={ui.journey} />}
         {(base.loading || !viewState) && !loadingError && <div className="canvas-status">도면을 불러오는 중…</div>}
         {loadingError && (
           <div className="canvas-status error" role="alert">
@@ -251,6 +302,9 @@ export function FloorCanvas() {
         rev={ui.rev}
         highlights={highlights}
         edgeCount={ui.edges.length}
+        journey={ui.journey}
+        journeyStopsOnFloor={journey.stops.length}
+        journeyCardOpen={ui.panel?.type === 'journey'}
       />
     </section>
   )

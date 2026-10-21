@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
+import { failedUiSteps, type ChatRun } from '../lib/chatRun'
 import { QUICK_PROMPTS } from '../lib/prompts'
-import { appReducer, createAppState, type AppState } from '../state/reducer'
+import { appReducer, createAppState, type AppState, type ChatItem } from '../state/reducer'
 import { createInitialUiState } from '../state/uiState'
 import type { AgUiEvent, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
-import { buildMockScript, chunkText, playScript, setMockSpeed } from './chatScripts'
+import { buildMockScript, chunkText, playScript, segmentFromMessage, setMockSpeed } from './chatScripts'
 import { buildMockFloor, buildMockMeta } from './floors'
+import { JOURNEY_REV, MOCK_JOURNEY_COUNT, corridorAccess, mockJourney, segmentLabelKo, unitEntrance } from './journey'
 import { createMockSource } from './mockSource'
 import { buildWorld, changesBetween } from './world'
 
@@ -22,8 +24,11 @@ async function collect(req: ChatRequest): Promise<AgUiEvent[]> {
 }
 
 function reduce(events: AgUiEvent[]): AppState {
-  return events.reduce((s, event) => appReducer(s, { type: 'chat/event', event }), createAppState(createInitialUiState(meta)))
+  const start = appReducer(createAppState(createInitialUiState(meta)), { type: 'chat/user', id: 'u', text: 'q', at: 0 })
+  return events.reduce((s, event, i) => appReducer(s, { type: 'chat/event', event, at: i + 1 }), start)
 }
+
+const runOf = (state: AppState): ChatRun => (state.chat.items.at(-1) as Extract<ChatItem, { kind: 'run' }>).run
 
 beforeAll(() => setMockSpeed(0))
 afterAll(() => setMockSpeed(1))
@@ -113,7 +118,7 @@ describe('scripted mock chat streams', () => {
   it('splits text into small chunks without losing characters', () => {
     const text = '3F 평효율 하위 매장은 3F-E01(Quorelle)입니다.\n- 원인: 저노출'
     expect(chunkText(text).join('')).toBe(text)
-    expect(Math.max(...chunkText(text).map((c) => [...c].length))).toBeLessThanOrEqual(7)
+    expect(Math.max(...chunkText(text).map((c) => [...c].length))).toBeLessThanOrEqual(5)
   })
 
   it('low-efficiency prompt sets a heatmap, highlights 2 units, draws 3 edges and focuses', async () => {
@@ -135,20 +140,105 @@ describe('scripted mock chat streams', () => {
     const events = await collect(request(prompt))
     expect(events[0].type).toBe('RUN_STARTED')
     expect(events.at(-1)?.type).toBe('RUN_FINISHED')
-    const started = events.filter((e) => e.type === 'TOOL_CALL_START').map((e) => (e as { tool_call_id: string }).tool_call_id)
+    const starts = events.filter((e): e is Extract<AgUiEvent, { type: 'TOOL_CALL_START' }> => e.type === 'TOOL_CALL_START')
     const ended = events.filter((e) => e.type === 'TOOL_CALL_END').map((e) => (e as { tool_call_id: string }).tool_call_id)
-    expect(ended.sort()).toEqual(started.sort())
+    expect(ended.sort()).toEqual(starts.map((e) => e.tool_call_id).sort())
+    // Every call carries a user-facing label; the answer is one message streamed in small deltas.
+    for (const start of starts) expect(start.label?.length).toBeGreaterThan(2)
+    expect(events.filter((e) => e.type === 'TEXT_MESSAGE_START')).toHaveLength(1)
+    const deltas = events.flatMap((e) => (e.type === 'TEXT_MESSAGE_CONTENT' ? [e.delta] : []))
+    expect(deltas.length).toBeGreaterThan(10)
+    expect(Math.max(...deltas.map((d) => [...d].length))).toBeLessThanOrEqual(5)
     const state = reduce(events)
-    expect(state.chat.items.filter((i) => i.kind === 'state' && i.error)).toEqual([])
-    expect(state.chat.items.some((i) => i.kind === 'assistant' && i.text.length > 20)).toBe(true)
+    const run = runOf(state)
+    expect(run.status).toBe('done')
+    expect(failedUiSteps(run)).toEqual([])
+    expect(run.answer.length).toBeGreaterThan(20)
     expect(state.chat.running).toBe(false)
   })
 
   it('revision prompt switches to S/S (R1) and opens the changes panel in compare mode', async () => {
-    const state = reduce(await collect(request('S/S 개편 도면 변경점과 재생성 대상 알려줘')))
+    const state = reduce(await collect(request('S/S 개편 도면에서 뭐가 바뀌었는지 알려줘')))
     expect(state.ui).toMatchObject({ rev: 'R1', compareRev: 'R0', panel: { type: 'changes', payload: { rev_from: 'R0', rev_to: 'R1' } } })
     expect(state.ui.highlights.length).toBeGreaterThan(0)
     expect(state.panelSeq).toBe(1)
+    expect(runOf(state).steps.map((s) => s.label)).toEqual([
+      'S/S MD 개편(R1) 도면 변경 내역 확인',
+      '다시 만들 산출물 확인',
+      'R0 → R1 비교 표시',
+      `3층 변경 매장 ${state.ui.highlights.length}곳 강조`,
+      '변경 구역으로 확대',
+      '변경 목록 열기',
+    ])
+  })
+
+  it('answers questions about floors the mock lacks on 3F and says so', async () => {
+    const productivity = reduce(await collect(request('4층에서 효율이 낮은 매장과 이유를 보여줘', 'R2', '1F')))
+    expect(productivity.ui.floor).toBe('3F')
+    expect(runOf(productivity).answer.startsWith('모의 데이터에는 4층 도면이 없어서 3층으로 대신 보여 드릴게요.')).toBe(true)
+    const layout = reduce(await collect(request('4층 재배치안 3개 만들어 비교해줘')))
+    expect(layout.ui.panel).toMatchObject({ type: 'layout', payload: { floors: ['3F'] } })
+    expect(runOf(layout).answer).toContain('| ALT-3F-A |')
+  })
+
+  it('nests the specialist agent calls under consult_specialist', async () => {
+    const events = await collect(request('3층 저효율 zone과 원인'))
+    const starts = events.filter((e): e is Extract<AgUiEvent, { type: 'TOOL_CALL_START' }> => e.type === 'TOOL_CALL_START')
+    const consult = starts.find((e) => e.tool_name === 'consult_specialist')!
+    const nested = starts.filter((e) => e.parent_tool_call_id === consult.tool_call_id)
+    expect(nested.map((e) => e.tool_name)).toEqual(['analytics_productivity', 'analytics_drivers', 'analytics_cross_shopping'])
+    expect(nested.every((e) => e.agent === 'space-productivity-analyst')).toBe(true)
+    const steps = runOf(reduce(events)).steps
+    expect(steps.filter((s) => s.parentId === consult.tool_call_id).map((s) => s.label)).toEqual([
+      '3층 공간 생산성 계산',
+      '효율 저하 원인 분석',
+      '저효율 매장 교차구매 확인',
+    ])
+  })
+
+  it('cosmetics cross-shopping prompt centers the relationships on 1F cosmetics stores', async () => {
+    const state = reduce(await collect(request('40대 VIP 고객은 화장품이랑 뭘 같이 사?')))
+    expect(state.ui.floor).toBe('1F')
+    expect(state.ui.edges).toHaveLength(5)
+    expect(state.ui.highlights.map((h) => h.unit_code)).toEqual(['1F-C03', '1F-W01', '1F-N03'])
+    expect(runOf(state).answer).toContain('화장품')
+  })
+
+  it('journey prompt draws one customer path across floors and opens the journey card', async () => {
+    const events = await collect(request('VIP 고객 한 명의 쇼핑 동선을 보여줘'))
+    const state = reduce(events)
+    const run = runOf(state)
+    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+      ['고객 동선 찾기', 'analytics_customer_journey'],
+      ['이전 분석 표시 지우기', 'ui_clear'],
+      ['도면에 고객 동선 그리기', 'ui_show_journey'],
+    ])
+    expect(run.steps[2].patchKeys).toEqual(['journey', 'floor', 'panel'])
+    const journey = state.ui.journey!
+    expect(state.ui).toMatchObject({ heatmap: null, highlights: [], edges: [], compareRev: null })
+    expect(state.ui.panel).toEqual({ type: 'journey', payload: {} })
+    expect(state.ui.floor).toBe(journey.stops[0].floor)
+    expect(journey.query).toEqual({ segment: { tier: 'VIP' }, rank: 1 })
+    expect(journey.summary.floors).toEqual(['1F', '3F'])
+    // Stops are real units of the journey revision, located at their entrances.
+    const floors = world.revisions.get(JOURNEY_REV)!.floors
+    for (const stop of journey.stops) {
+      const unit = floors[stop.floor].units.find((u) => u.code === stop.unit_code)!
+      expect(unit).toBeTruthy()
+      expect([stop.x, stop.y]).toEqual(unitEntrance(unit))
+    }
+    // Each floor change is split at an escalator; interior points follow the corridor centerlines.
+    expect(journey.transitions.map((t) => `${t.from_floor}>${t.to_floor}:${t.via}`)).toEqual(['1F>3F:ESC-B', '3F>1F:ESC-B'])
+    expect(journey.segments).toHaveLength(journey.stops.length - 1 + journey.transitions.length)
+    for (const segment of journey.segments) {
+      expect(segment.points.length).toBeGreaterThanOrEqual(2)
+      for (const p of segment.points.slice(1, -1)) {
+        const q = corridorAccess(p)
+        expect(Math.hypot(q[0] - p[0], q[1] - p[1])).toBeLessThan(1e-6)
+      }
+    }
+    expect(journey.summary.walk_m).toBeGreaterThan(100)
+    expect(run.answer).toContain('↑ 3층으로 이동 (에스컬레이터 B)')
   })
 
   it('table prompt opens a table panel with one row per occupied unit', async () => {
@@ -157,6 +247,38 @@ describe('scripted mock chat streams', () => {
     const payload = state.ui.panel?.payload as { columns: string[]; rows: unknown[][] }
     expect(payload.columns).toHaveLength(6)
     expect(payload.rows).toHaveLength(19)
+  })
+
+  it('reads a customer segment from the question', () => {
+    expect(segmentFromMessage('40대 여성 VIP 고객 동선')).toEqual({ age_band: '40s', gender: 'F', tier: 'VIP' })
+    expect(segmentFromMessage('60대 남성 VVIP')).toEqual({ age_band: '60s+', gender: 'M', tier: 'VVIP' })
+    expect(segmentFromMessage('고객 한 명')).toEqual({})
+    expect(segmentLabelKo('age_band:40s;gender:F;tier:VIP|VVIP')).toBe('40대 여성 VIP·VVIP')
+  })
+})
+
+describe('mock journeys', () => {
+  it('ranks customer-days and returns 404 past the last one', async () => {
+    const source = createMockSource()
+    const customers = []
+    for (let rank = 1; rank <= MOCK_JOURNEY_COUNT; rank += 1) {
+      const journey = await source.getJourney({ segment: 'tier:VIP', rank })
+      expect(journey.query).toEqual({ segment: 'tier:VIP', rank })
+      expect(journey.stops.length).toBeGreaterThanOrEqual(4)
+      expect(journey.weekday).toBe('토')
+      customers.push(journey.customer?.id)
+    }
+    expect(new Set(customers).size).toBe(MOCK_JOURNEY_COUNT)
+    await expect(source.getJourney({ segment: 'tier:VIP', rank: MOCK_JOURNEY_COUNT + 1 })).rejects.toMatchObject({ status: 404 })
+    expect((await source.getJourney({ customer_id: 'C010877' })).query?.rank).toBe(2)
+    await expect(source.getJourney({ customer_id: 'NOPE' })).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('computes gaps, totals and durations from the scripted purchases', () => {
+    const journey = mockJourney(world, { rank: 1 })!
+    expect(journey.stops.map((s) => s.gap_min)).toEqual([null, 26, 43, 39, 45, 32])
+    expect(journey.summary).toMatchObject({ stops: 6, total_krw: 2_335_500, duration_min: 185 })
+    expect(journey.title).toBe('40대 여성 VIP 고객의 쇼핑 동선')
   })
 })
 

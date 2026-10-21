@@ -43,4 +43,11 @@ describe('RichText', () => {
     expect(html).toContain('<strong>1</strong>')
     expect(html).not.toContain('<b>')
   })
+
+  it('puts a trailing node (the streaming cursor) at the end of the last block', () => {
+    const cursor = <i className="cursor" />
+    expect(renderToStaticMarkup(<RichText text={'첫 문단\n\n둘째 문단'} trailing={cursor} />)).toBe('<p>첫 문단</p><p>둘째 문단<i class="cursor"></i></p>')
+    expect(renderToStaticMarkup(<RichText text={'- 하나\n- 둘'} trailing={cursor} />)).toBe('<ul><li>하나</li><li>둘<i class="cursor"></i></li></ul>')
+    expect(renderToStaticMarkup(<RichText text="" trailing={cursor} />)).toBe('<i class="cursor"></i>')
+  })
 })

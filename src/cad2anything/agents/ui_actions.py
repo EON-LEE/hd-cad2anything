@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from cad2anything.agents.labels import floor_ko
 from cad2anything.services.errors import ToolError
 
 HeatmapProvider = Callable[[str, str, str], dict[str, float]]
@@ -33,6 +34,19 @@ TABLE_SHAPE_ERROR = (
     "table payload에는 행이 필요합니다. 형식: {title, columns: [열 이름], rows: [[값, ...], ...]}. "
     "도구 결과의 실제 값을 rows에 넣어 다시 호출하세요."
 )
+JOURNEY_ARGS = ("customer_id", "date", "segment", "rank")
+JOURNEY_STOP_FIELDS = (
+    "order",
+    "time",
+    "floor",
+    "unit_code",
+    "brand_name",
+    "category_name",
+    "amount_krw",
+    "gap_min",
+)
+# Per-run ui_state flag: this answer drew a journey, so its other overlays keep it on screen.
+JOURNEY_DRAWN = "_journey_drawn"
 
 
 @dataclass
@@ -43,6 +57,13 @@ class UiActionResult:
 
 def _replace(path: str, value: Any) -> dict[str, Any]:
     return {"op": "replace", "path": path, "value": value}
+
+
+def _drop_earlier_journey(patches: list[dict[str, Any]], ui_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """A new heatmap, highlight, relation or comparison replaces a journey drawn by an earlier answer."""
+    if not ui_state.get(JOURNEY_DRAWN):
+        patches.append(_replace("/journey", None))
+    return patches
 
 
 def normalize(values: dict[str, float], invert: bool = False) -> dict[str, float]:
@@ -94,10 +115,15 @@ def table_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 class UiActionHandler:
-    """Executes client-side UI tools. The heatmap provider computes metric values deterministically."""
+    """Executes client-side UI tools. Providers compute heatmap values and journeys deterministically."""
 
-    def __init__(self, heatmap_provider: HeatmapProvider | None = None):
+    def __init__(
+        self,
+        heatmap_provider: HeatmapProvider | None = None,
+        journey_provider: Callable[..., dict[str, Any]] | None = None,
+    ):
         self.heatmap_provider = heatmap_provider
+        self.journey_provider = journey_provider
 
     def handle(self, name: str, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         method = getattr(self, f"_{name}", None)
@@ -132,6 +158,7 @@ class UiActionHandler:
         if floor and floor != ui_state.get("floor"):
             patches.insert(0, _replace("/floor", floor))
             ui_state["floor"] = floor
+        _drop_earlier_journey(patches, ui_state)
         output = {"ok": True, "metric": metric, "rev": rev, "floor": floor, "units": len(values)}
         ranked = sorted((v, k) for k, v in raw.items() if v is not None and v == v)
         if metric == "low_efficiency":
@@ -141,22 +168,72 @@ class UiActionHandler:
             output["highest_units"] = [k for _, k in ranked[-3:][::-1]]
         return UiActionResult(json.dumps(output, ensure_ascii=False), patches)
 
+    def _ui_show_journey(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
+        if self.journey_provider is None:
+            return UiActionResult(json.dumps({"ok": False, "error": "journey provider unavailable"}))
+        params = {k: args[k] for k in JOURNEY_ARGS if args.get(k) not in (None, "", {})}
+        if not (params.get("customer_id") or params.get("date")) and ui_state.get("rev"):
+            # Pick a day when the revision on screen was the store layout, so stops match the drawing.
+            params["rev"] = ui_state["rev"]
+        try:
+            journey = self.journey_provider(**params)
+        except (ToolError, KeyError, ValueError) as exc:  # let the model see the reason and recover
+            return UiActionResult(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        # The path stands alone: overlays from earlier answers would hide it.
+        patches = [
+            _replace("/heatmap", None),
+            _replace("/highlights", []),
+            _replace("/edges", []),
+            _replace("/compareRev", None),
+            _replace("/journey", journey),
+        ]
+        ui_state[JOURNEY_DRAWN] = True
+        shown = []
+        journey_rev = journey.get("rev")
+        if journey_rev and journey_rev != ui_state.get("rev"):
+            patches.append(_replace("/rev", journey_rev))
+            ui_state["rev"] = journey_rev
+            shown.append(f"구매 날짜에 맞춰 도면을 {journey_rev} 개정으로 바꿨습니다.")
+        first_floor = next((stop["floor"] for stop in journey.get("stops", []) if stop.get("floor")), None)
+        if first_floor:
+            patches.append(_replace("/floor", first_floor))
+            ui_state["floor"] = first_floor
+        patches.append(_replace("/panel", {"type": "journey", "payload": {}}))
+        shown.insert(
+            0,
+            f"{floor_ko(first_floor) + ' ' if first_floor else ''}도면에 결제 순서와 추정 경로를 그리고, "
+            "도면 왼쪽 위에 동선 카드(시간표)를 열었습니다. 층 버튼의 주황색 숫자는 층별 결제 수입니다.",
+        )
+        output = {
+            "ok": True,
+            "customer": journey.get("customer"),
+            "date": journey.get("date"),
+            "weekday": journey.get("weekday"),
+            "rev": journey_rev,
+            "stops": [{k: stop.get(k) for k in JOURNEY_STOP_FIELDS} for stop in journey.get("stops", [])],
+            "transitions": journey.get("transitions", []),
+            "summary": journey.get("summary"),
+            "caveat": journey.get("caveat"),
+            "shown": " ".join(shown),
+        }
+        return UiActionResult(json.dumps(output, ensure_ascii=False, default=str), patches)
+
     def _ui_highlight_units(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         color = args.get("color") or "#e53935"
         highlights = [
             {"unit_code": code, "color": color, "reason": args.get("reason", "")}
             for code in args["unit_codes"]
         ]
-        return UiActionResult(
-            json.dumps({"ok": True, "highlighted": len(highlights)}), [_replace("/highlights", highlights)]
-        )
+        patches = _drop_earlier_journey([_replace("/highlights", highlights)], ui_state)
+        return UiActionResult(json.dumps({"ok": True, "highlighted": len(highlights)}), patches)
 
     def _ui_draw_edges(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         edges = [
             {"from": e["from"], "to": e["to"], "weight": e.get("weight", 1.0), "label": e.get("label", "")}
             for e in args["edges"]
         ]
-        return UiActionResult(json.dumps({"ok": True, "edges": len(edges)}), [_replace("/edges", edges)])
+        patches = _drop_earlier_journey([_replace("/edges", edges)], ui_state)
+        return UiActionResult(json.dumps({"ok": True, "edges": len(edges)}), patches)
 
     def _ui_focus(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         return UiActionResult(
@@ -166,7 +243,7 @@ class UiActionHandler:
     def _ui_compare(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         ui_state["rev"], ui_state["compareRev"] = args["rev_to"], args["rev_from"]
         patches = [_replace("/rev", args["rev_to"]), _replace("/compareRev", args["rev_from"])]
-        return UiActionResult(json.dumps({"ok": True}), patches)
+        return UiActionResult(json.dumps({"ok": True}), _drop_earlier_journey(patches, ui_state))
 
     def _ui_show_panel(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         panel_type = args["type"]
@@ -185,7 +262,12 @@ class UiActionHandler:
 
     def _ui_clear(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         what = args["what"]
-        targets = {"heatmap": ("/heatmap", None), "highlights": ("/highlights", []), "edges": ("/edges", [])}
+        targets = {
+            "heatmap": ("/heatmap", None),
+            "highlights": ("/highlights", []),
+            "edges": ("/edges", []),
+            "journey": ("/journey", None),
+        }
         selected = list(targets.values()) if what == "all" else [targets[what]]
         patches = [_replace(path, value) for path, value in selected]
         if what == "all":

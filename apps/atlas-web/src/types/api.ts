@@ -226,6 +226,79 @@ export interface LayoutResponse {
 }
 
 // ---------------------------------------------------------------------------------------------
+// GET /api/analytics/journey  (one customer's purchase sequence on one day; also UI state `journey`)
+// ---------------------------------------------------------------------------------------------
+
+export interface JourneyStop {
+  order: number
+  /** "HH:MM" of the purchase. */
+  time: string
+  unit_code: string
+  floor: string
+  brand_name: string | null
+  category: string | null
+  category_name: string | null
+  amount_krw: number | null
+  /** Minutes since the previous stop (null for the first stop). */
+  gap_min: number | null
+  /** Store entrance (where the unit meets the walkway), local meters; null when unknown. */
+  x: number | null
+  y: number | null
+  [key: string]: unknown
+}
+
+export interface JourneySegment {
+  floor: string
+  points: [number, number][]
+  from_order: number | null
+  to_order: number | null
+}
+
+export interface JourneyTransition {
+  from_order: number | null
+  to_order: number | null
+  from_floor: string
+  to_floor: string
+  /** Vertical link used (e.g. "ESC-A"); null when unknown. */
+  via: string | null
+}
+
+export interface JourneySummary {
+  stops: number
+  floors: string[]
+  total_krw: number | null
+  duration_min: number | null
+  walk_m: number | null
+}
+
+/** Segment filter as an object (`{age_band: "40s", tier: ["VIP", "VVIP"]}`) or the string form. */
+export type SegmentFilter = Record<string, unknown> | string
+
+export interface Journey {
+  title: string
+  customer: { id: string; segment: string } | null
+  date: string | null
+  weekday: string | null
+  rev: string | null
+  query: { segment: SegmentFilter | null; rank: number; rev?: string | null } | null
+  stops: JourneyStop[]
+  segments: JourneySegment[]
+  transitions: JourneyTransition[]
+  summary: JourneySummary
+  caveat: string | null
+  [key: string]: unknown
+}
+
+export interface JourneyParams {
+  customer_id?: string | null
+  date?: string | null
+  segment?: SegmentFilter | null
+  rank?: number | null
+  /** Choose among days when this revision was the store layout. */
+  rev?: string | null
+}
+
+// ---------------------------------------------------------------------------------------------
 // POST /api/chat (AG-UI compatible SSE)
 // ---------------------------------------------------------------------------------------------
 
@@ -246,8 +319,26 @@ export type AgUiEvent =
   | { type: 'TEXT_MESSAGE_START'; message_id: string }
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
   | { type: 'TEXT_MESSAGE_END'; message_id: string }
-  | { type: 'TOOL_CALL_START'; tool_call_id: string; tool_name: string; args?: unknown }
-  | { type: 'TOOL_CALL_END'; tool_call_id: string; summary?: string }
+  | {
+      type: 'TOOL_CALL_START'
+      tool_call_id: string
+      tool_name: string
+      args?: unknown
+      /** User-facing Korean description (e.g. "4층 공간 생산성 계산"). */
+      label?: string
+      /** Set for calls made inside a specialist agent (the specialist's consult call). */
+      parent_tool_call_id?: string
+      agent?: string
+    }
+  | {
+      type: 'TOOL_CALL_END'
+      tool_call_id: string
+      /** Raw developer text; never shown by default. */
+      summary?: string
+      /** Replaces the label from TOOL_CALL_START when present. */
+      label?: string
+      ok?: boolean
+    }
   | { type: 'STATE_DELTA'; delta: PatchOperation[] }
   | { type: 'RUN_FINISHED'; thread_id: string; run_id: string }
   | { type: 'RUN_ERROR'; message: string }
@@ -258,7 +349,7 @@ export type AgUiEventType = AgUiEvent['type']
 // UI state model (target of STATE_DELTA patches)
 // ---------------------------------------------------------------------------------------------
 
-export type PanelType = 'changes' | 'artifact' | 'layout' | 'table' | 'none'
+export type PanelType = 'changes' | 'artifact' | 'layout' | 'table' | 'journey' | 'none'
 
 export interface Highlight {
   unit_code: string
@@ -305,4 +396,6 @@ export interface UiState {
   edges: GraphEdge[]
   focus: { unit_codes: string[] } | null
   panel: { type: PanelType; payload: Record<string, unknown> } | null
+  /** One customer's shopping path (drawn on the floors it visits); null when off. */
+  journey: Journey | null
 }
