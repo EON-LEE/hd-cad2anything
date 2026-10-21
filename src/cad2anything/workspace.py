@@ -1,6 +1,6 @@
 """Data workspace shared by the MCP tools and the Atlas API.
 
-Layout under the root directory (mirrored to Azure Blob Storage when configured)::
+Layout under the root directory (mirrored to PostgreSQL or Azure Blob Storage when configured)::
 
     drawings/{rev}/{variant}/manifest.json, *.dxf   CAD inputs
     models/{rev}.json                                SpatialModel.to_dict() plus a "meta" block

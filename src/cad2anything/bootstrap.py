@@ -107,15 +107,19 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path("data/workspace"))
     parser.add_argument("--mode", choices=["auto", "parse", "truth"], default="auto")
     parser.add_argument("--variant", choices=["clean", "messy"], default="clean")
-    parser.add_argument("--push", action="store_true", help="upload the workspace to Blob Storage afterwards")
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="upload the workspace to the configured mirror (WORKSPACE_MIRROR=postgres|blob) afterwards",
+    )
     args = parser.parse_args()
     summary = bootstrap(args.source, args.root, args.mode, args.variant)
     if args.push:
-        from cad2anything.store.blob import BlobMirror
+        from cad2anything.store.pgmirror import mirror_from_env
 
-        mirror = BlobMirror.from_env()
+        mirror = mirror_from_env()
         if mirror is None:
-            raise SystemExit("DATA_STORAGE_ACCOUNT is not set")
+            raise SystemExit("No workspace mirror is configured (set WORKSPACE_MIRROR and its settings)")
         summary["uploaded"] = mirror.push_tree(args.root)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

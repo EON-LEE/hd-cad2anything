@@ -17,6 +17,12 @@ from cad2anything.agents.ui_actions import UiActionHandler
 MAX_ROUNDS = 8
 SPECIALIST_OUTPUT_LIMIT = 6000
 TEXT_CHUNK = 80
+# Tool calls that Foundry runs server-side; the value names tools whose items carry no `name`.
+HOSTED_TOOL_ITEMS = {
+    "mcp_call": None,
+    "web_search_call": "web_search",
+    "code_interpreter_call": "code_interpreter",
+}
 
 
 def agent_reference(name: str) -> dict[str, Any]:
@@ -40,6 +46,32 @@ def _message_text(item: Any) -> str:
 def _short(value: Any, limit: int = 300) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def hosted_tool_call(item: Any) -> dict[str, Any] | None:
+    """Describe a server-side tool call item (MCP, web search, code interpreter), else None."""
+    item_type = _get(item, "type")
+    if item_type not in HOSTED_TOOL_ITEMS:
+        return None
+    if item_type == "web_search_call":
+        query = _get(_get(item, "action"), "query")
+        args: dict[str, Any] = {"query": query} if query else {}
+    elif item_type == "code_interpreter_call":
+        args = {"code": _short(_get(item, "code", "") or "", 500)}
+    else:
+        args = _safe_json(_get(item, "arguments"))
+    error = _get(item, "error")
+    if error:
+        summary = f"오류: {_short(error)}"
+    else:
+        summary = _short(_get(item, "output", "") or _get(item, "status", "") or "")
+    return {
+        "id": _get(item, "id"),
+        "tool_name": _get(item, "name") or HOSTED_TOOL_ITEMS[item_type],
+        "args": args,
+        "summary": summary,
+        "error": bool(error),
+    }
 
 
 class AgentRuntime:
@@ -66,16 +98,21 @@ class AgentRuntime:
         project = AIProjectClient(endpoint=project_endpoint, credential=credential)
         return cls(project.get_openai_client(), **kwargs)
 
-    def consult(self, agent_key: str, request: str) -> str:
+    def consult(self, agent_key: str, request: str) -> tuple[str, list[dict[str, Any]]]:
+        """Run a specialist agent; return its answer and the server-side tool calls it made."""
         name = self.specialists.get(agent_key)
         if name is None:
-            return json.dumps({"ok": False, "error": f"unknown specialist {agent_key}"}, ensure_ascii=False)
+            error = json.dumps({"ok": False, "error": f"unknown specialist {agent_key}"}, ensure_ascii=False)
+            return error, []
         conversation = self.client.conversations.create()
         response = self.client.responses.create(
             conversation=_get(conversation, "id"), input=request, extra_body=agent_reference(name)
         )
+        calls = [
+            call for call in map(hosted_tool_call, _get(response, "output", []) or []) if call is not None
+        ]
         text = _get(response, "output_text", "") or ""
-        return text[:SPECIALIST_OUTPUT_LIMIT]
+        return text[:SPECIALIST_OUTPUT_LIMIT], calls
 
     def run(
         self, message: str, ui_state: dict[str, Any], conversation_id: str | None = None
@@ -94,17 +131,16 @@ class AgentRuntime:
                 outputs: list[dict[str, Any]] = []
                 for item in _get(response, "output", []) or []:
                     item_type = _get(item, "type")
-                    if item_type == "mcp_call":
-                        call_id = _get(item, "id") or self._new_id()
+                    hosted = hosted_tool_call(item)
+                    if hosted is not None:
+                        call_id = hosted["id"] or self._new_id()
                         yield {
                             "type": "TOOL_CALL_START",
                             "tool_call_id": call_id,
-                            "tool_name": _get(item, "name"),
-                            "args": _safe_json(_get(item, "arguments")),
+                            "tool_name": hosted["tool_name"],
+                            "args": hosted["args"],
                         }
-                        error = _get(item, "error")
-                        summary = f"오류: {_short(error)}" if error else _short(_get(item, "output", ""))
-                        yield {"type": "TOOL_CALL_END", "tool_call_id": call_id, "summary": summary}
+                        yield {"type": "TOOL_CALL_END", "tool_call_id": call_id, "summary": hosted["summary"]}
                     elif item_type == "function_call":
                         events: list[dict[str, Any]] = []
                         outputs.append(self._handle_function(item, ui_state, events))
@@ -145,8 +181,24 @@ class AgentRuntime:
         args = _safe_json(_get(item, "arguments"))
         events.append({"type": "TOOL_CALL_START", "tool_call_id": call_id, "tool_name": name, "args": args})
         if name == "consult_specialist":
-            output = self.consult(args.get("agent", ""), args.get("request", ""))
-            summary = f"{args.get('agent')} 응답 {len(output)}자"
+            agent_key = args.get("agent", "")
+            output, nested = self.consult(agent_key, args.get("request", ""))
+            for call in nested:
+                nested_id = call["id"] or self._new_id()
+                events.append(
+                    {
+                        "type": "TOOL_CALL_START",
+                        "tool_call_id": nested_id,
+                        "tool_name": call["tool_name"],
+                        "args": call["args"],
+                        "parent_tool_call_id": call_id,
+                        "agent": self.specialists.get(agent_key, agent_key),
+                    }
+                )
+                events.append(
+                    {"type": "TOOL_CALL_END", "tool_call_id": nested_id, "summary": call["summary"]}
+                )
+            summary = f"{agent_key} 응답 {len(output)}자, 도구 호출 {len(nested)}회"
         else:
             result = self.ui_handler.handle(name, args, ui_state)
             output = result.output

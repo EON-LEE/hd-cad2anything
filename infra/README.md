@@ -35,10 +35,12 @@ az deployment sub create --location koreacentral --template-file infra/main.bice
 
 기반 리소스를 만든 뒤 Atlas 서비스를 배포한다. Atlas는 컨테이너 앱 하나에서 웹, REST·채팅 API, MCP 엔드포인트(`/mcp`)를 함께 제공한다.
 
-1. 작업공간을 만들어 Blob Storage의 `data` 컨테이너에 올린다. 앱은 시작할 때 이 컨테이너에서 작업공간을 내려받는다.
+1. 작업공간을 만들어 PostgreSQL 미러(테이블 `workspace_file`)에 올린다. 앱은 시작할 때 이 미러에서 작업공간을 내려받는다. 이 구독은 정책으로 Storage의 공용 네트워크 접근을 막기 때문에, VNet이 없는 앱은 Blob Storage를 쓸 수 없다.
 
    ```powershell
-   $env:DATA_STORAGE_ACCOUNT = '<storage 계정 이름>'
+   $env:WORKSPACE_MIRROR = 'postgres'
+   $env:POSTGRES_HOST = '<PostgreSQL 서버 FQDN>'
+   $env:POSTGRES_USER = (az account show --query user.name -o tsv)
    uv run --no-sync python -m cad2anything.bootstrap --push
    ```
 

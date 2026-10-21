@@ -86,8 +86,8 @@ resource atlasApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: [
             { name: 'AZURE_CLIENT_ID', value: appIdentity.properties.clientId }
             { name: 'WORKSPACE_DIR', value: '/tmp/workspace' }
-            { name: 'DATA_STORAGE_ACCOUNT', value: 'st${token}' }
-            { name: 'DATA_CONTAINER', value: 'data' }
+            // Blob Storage allows only private endpoints under the subscription policy; mirror to PostgreSQL.
+            { name: 'WORKSPACE_MIRROR', value: 'postgres' }
             { name: 'FOUNDRY_PROJECT_ENDPOINT', value: 'https://${foundry.name}.services.ai.azure.com/api/projects/${project.name}' }
             { name: 'CHAT_MODEL_DEPLOYMENT', value: chatModelName }
             { name: 'MINI_MODEL_DEPLOYMENT', value: miniModelName }
@@ -95,6 +95,8 @@ resource atlasApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'POSTGRES_DATABASE', value: 'cad2anything' }
             { name: 'POSTGRES_USER', value: appIdentity.name }
             { name: 'MCP_API_KEY', secretRef: 'mcp-api-key' }
+            // Changes with the key so a rotated secret always starts a new revision.
+            { name: 'MCP_KEY_VERSION', value: uniqueString(mcpApiKey) }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
           ]
           probes: [

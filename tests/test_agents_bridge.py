@@ -100,6 +100,53 @@ def test_runtime_handles_mcp_ui_and_specialist_calls():
     assert specialist_call["extra_body"]["agent_reference"]["name"] == SPECIALISTS["researcher"]
 
 
+def test_specialist_tool_calls_are_streamed_under_the_consult_call():
+    scripted = {
+        "atlas-orchestrator": [
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "consult_specialist",
+                        "arguments": '{"agent":"space_productivity_analyst","request":"4층 진단"}',
+                    }
+                ]
+            },
+            {"output": [_message("진단 완료")]},
+        ],
+        "space-productivity-analyst": [
+            {
+                "output": [
+                    {"type": "mcp_call", "id": "s1", "name": "analytics_productivity", "arguments": "{}"},
+                    {"type": "web_search_call", "id": "s2", "action": {"query": "백화점 평효율"}},
+                    {"type": "code_interpreter_call", "id": "s3", "code": "print(1)", "status": "completed"},
+                    {"type": "mcp_call", "id": "s4", "name": "analytics_drivers", "error": "boom"},
+                    _message("4F-E01 저효율"),
+                ],
+                "output_text": "4F-E01 저효율",
+            }
+        ],
+    }
+    runtime = AgentRuntime(FakeClient(scripted), id_factory=lambda: "id")
+
+    events = list(runtime.run("4층 진단", {}))
+
+    nested = [e for e in events if e["type"] == "TOOL_CALL_START" and e.get("parent_tool_call_id") == "c1"]
+    assert [e["tool_name"] for e in nested] == [
+        "analytics_productivity",
+        "web_search",
+        "code_interpreter",
+        "analytics_drivers",
+    ]
+    assert {e["agent"] for e in nested} == {"space-productivity-analyst"}
+    assert nested[1]["args"] == {"query": "백화점 평효율"}
+    ends = {e["tool_call_id"]: e["summary"] for e in events if e["type"] == "TOOL_CALL_END"}
+    assert ends["s4"].startswith("오류") and ends["c1"].endswith("도구 호출 4회")
+    starts = [e["tool_call_id"] for e in events if e["type"] == "TOOL_CALL_START"]
+    assert starts == ["c1", "s1", "s2", "s3", "s4"]
+
+
 def test_ui_clear_all_resets_overlays():
     result = UiActionHandler().handle("ui_clear", {"what": "all"}, {})
     paths = [patch["path"] for patch in result.patches]

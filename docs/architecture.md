@@ -32,21 +32,20 @@ flowchart TB
     end
     subgraph DATA["데이터"]
         WS[("작업공간<br/>메모리 내 사본")]
-        PG[("PostgreSQL + PostGIS")]
-        BLOB[("Blob Storage")]
+        PG[("PostgreSQL + PostGIS<br/>작업공간 미러 · 공간 질의")]
     end
     UI <--> API <--> BR <--> ORC
     BR -->|consult_specialist| A1 & A2 & A3 & A4 & A5 & A6
     A1 & A2 & A3 & A4 & A6 -->|MCP 도구 · 프로젝트 연결 키| MCP
     API & MCP --> WS
-    WS <-->|시작 시 내려받기 · 동기화| BLOB
-    WS -->|공간 질의용 동기화| PG
+    WS <-->|시작 시 내려받기 · 쓰기 미러| PG
 ```
 
 **구현 메모**
 
 - Orchestrator는 prompt agent다. 화면 제어와 전문 에이전트 상담은 클라이언트 측 함수 도구로 정의하고, Atlas의 에이전트 브리지가 실행한다. 필요하면 hosted agent로 바꿀 수 있다.
 - 전문 에이전트는 Foundry 프로젝트 연결(`RemoteTool`, 사용자 지정 키)을 통해 Atlas의 `/mcp`를 호출한다. 에이전트별로 허용 도구를 제한한다.
+- 작업공간 파일은 PostgreSQL 테이블 `workspace_file`에 미러한다. 구독 정책이 Storage의 공용 네트워크 접근을 막기 때문이다. VNet 통합과 프라이빗 엔드포인트를 갖춘 환경에서는 `WORKSPACE_MIRROR=blob`으로 Blob Storage를 쓸 수 있다.
 - 개정 업로드 이벤트의 자동 처리는 아직 연결하지 않았다. 현재는 API(`POST /api/revisions/{rev}/process`)로 처리한다.
 
 ## 3. 에이전트
@@ -91,7 +90,7 @@ flowchart TB
 | AI | Foundry 리소스·프로젝트, 모델 배포, prompt agent, MCP 프로젝트 연결, Tracing·Evaluation |
 | 컴퓨팅 | Container Apps: `atlas` 1개(웹·API·MCP). 작업공간을 메모리에 두므로 복제본을 1개로 고정한다. |
 | 데이터 | Azure Database for PostgreSQL flexible server(PostGIS) |
-| 저장소·이벤트 | Storage(Blob, Queue). Event Grid 시스템 토픽은 만들었지만 구독은 아직 없다. |
+| 저장소·이벤트 | Storage(Blob, Queue)와 Event Grid 시스템 토픽. 구독 정책이 공용 네트워크 접근을 막으므로 현재 앱은 쓰지 않는다. |
 | 보안·운영 | Container Registry, Key Vault, Application Insights, Managed Identity, Entra ID |
 | 배포 | Bicep + Azure Developer CLI |
 

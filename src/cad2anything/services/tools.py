@@ -561,10 +561,7 @@ def apply_moves(
 
 
 def workspace_from_env() -> Workspace:
-    root = Path(os.environ.get("WORKSPACE_DIR", "data/workspace"))
-    mirror = None
-    if os.environ.get("DATA_STORAGE_ACCOUNT"):
-        from cad2anything.store.blob import BlobMirror
+    from cad2anything.store.pgmirror import mirror_from_env
 
-        mirror = BlobMirror.from_env()
-    return Workspace(root, mirror=mirror)
+    root = Path(os.environ.get("WORKSPACE_DIR", "data/workspace"))
+    return Workspace(root, mirror=mirror_from_env())
