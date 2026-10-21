@@ -66,8 +66,19 @@ class ChatRequest(BaseModel):
 
 class LayoutRequest(BaseModel):
     rev: str
-    floors: list[str]
+    floors: list[str] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
+
+
+LAYOUT_OPTIONS = {
+    "keep_anchors",
+    "area_tolerance",
+    "max_moves",
+    "n_alternatives",
+    "movable_categories",
+    "allow_cross_floor",
+    "save",
+}
 
 
 def _round_coords(geometry: dict[str, Any]) -> dict[str, Any]:
@@ -245,12 +256,64 @@ def create_api(
     def productivity(
         rev: str, floor: str | None = None, level: str = "unit", top: int | None = None
     ) -> dict[str, Any]:
-        if level != "unit":
-            raise HTTPException(status_code=400, detail="현재 level=unit만 지원합니다.")
         try:
-            return metrics.productivity_rows(toolkit, rev, floor, top)
+            return metrics.productivity_rows(toolkit, rev, floor, top, level=level)
         except ToolError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/analytics/cross-shopping")
+    def cross_shopping(
+        level: str = "category",
+        focal: str | None = None,
+        segment: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        top: int = Query(20, ge=1, le=50),
+    ) -> dict[str, Any]:
+        try:
+            result = toolkit.analytics_cross_shopping(
+                level=level, focal=focal, segment=segment, start=start, end=end, top=top
+            )
+        except ToolError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if focal:
+            pairs = [
+                {
+                    "a": result["focal"],
+                    "b": p["partner"],
+                    "a_name": result.get("focal_name") or result["focal"],
+                    "b_name": p["partner_name"],
+                    "lift": p["lift"],
+                    "jaccard": p["jaccard"],
+                    "confidence_ab": p["confidence"],
+                    "n_customers": p["n_customers"],
+                }
+                for p in result.pop("partners")
+            ]
+        else:
+            pairs = [
+                {
+                    "a": p["item_a"],
+                    "b": p["item_b"],
+                    "a_name": p["name_a"],
+                    "b_name": p["name_b"],
+                    "lift": p["lift"],
+                    "jaccard": p["jaccard"],
+                    "confidence_ab": p["confidence_a_b"],
+                    "n_customers": p["n_customers"],
+                }
+                for p in result.pop("pairs")
+            ]
+        return result | {"pairs": pairs}
+
+    @app.get("/api/analytics/transitions")
+    def transitions(
+        segment: str | None = None, start: str | None = None, end: str | None = None
+    ) -> dict[str, Any]:
+        try:
+            return toolkit.analytics_floor_transitions(segment=segment, start=start, end=end)
+        except ToolError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/chat")
     def chat(request: ChatRequest) -> StreamingResponse:
@@ -265,13 +328,48 @@ def create_api(
 
     @app.post("/api/layout/alternatives")
     def layout_alternatives(request: LayoutRequest) -> dict[str, Any]:
-        handler = getattr(toolkit, "layout_generate_alternatives", None)
-        if handler is None:
-            raise HTTPException(status_code=503, detail="레이아웃 엔진을 사용할 수 없습니다.")
+        unknown = sorted(set(request.constraints) - LAYOUT_OPTIONS)
+        if unknown:
+            raise HTTPException(
+                status_code=400, detail=f"지원하지 않는 제약 조건입니다: {', '.join(unknown)}"
+            )
         try:
-            return handler(rev=request.rev, floors=request.floors, **request.constraints)
+            result = toolkit.layout_generate_alternatives(
+                rev=request.rev, floors=request.floors or None, **request.constraints
+            )
         except ToolError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        alternatives = []
+        for alt in result["alternatives"]:
+            before = alt["objective_before"]
+            alternatives.append(
+                {
+                    "id": alt["alt_id"],
+                    "rev_id": alt.get("rev_id"),
+                    "summary": alt["summary"],
+                    "moves": alt["moves"],
+                    # Expected annual sales in 억원 so the UI can show compact objective values.
+                    "objective_before": round(before / 1e8, 2),
+                    "objective_after": round(alt["objective_after"] / 1e8, 2),
+                    "kpi_delta": {
+                        "sales_krw": alt["delta_krw"],
+                        "low": alt["objective_low"] - before,
+                        "high": alt["objective_high"] - before,
+                    },
+                    "constraints": [
+                        {
+                            "name": c.get("constraint"),
+                            "ok": bool(c.get("satisfied")),
+                            "detail": c.get("detail"),
+                        }
+                        for c in alt["constraint_checks"]
+                    ],
+                    "kpi_by_floor": alt["kpi_deltas"],
+                    "explanations": alt["explanations"],
+                }
+            )
+        keys = ("rev", "fit_rev", "period", "constraints", "label", "caveats", "note")
+        return {key: result.get(key) for key in keys} | {"alternatives": alternatives}
 
     web_dir = web_dir or (Path(os.environ["ATLAS_WEB_DIR"]) if os.environ.get("ATLAS_WEB_DIR") else None)
     if web_dir and web_dir.exists():

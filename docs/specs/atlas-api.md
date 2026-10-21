@@ -13,10 +13,10 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | GET | `/api/artifacts/{rev}/{generator}/{file}` | 파일 본문(svg, xlsx, csv) |
 | POST | `/api/artifacts/{rev}/{generator}/review` | 본문 `{decision:"approve"\|"reject", reviewer, note}` → 갱신된 artifact |
 | POST | `/api/revisions/{rev}/process` | 파싱, diff, 영향 분석, 재생성을 실행하고 요약을 반환한다. |
-| GET | `/api/analytics/productivity?rev=&floor=&level=unit` | `{rows:[{unit_code, brand_name, category, sales_krw, sales_per_m2, sales_per_pyeong, percentile, low_efficiency, driver}], metric:{name, label, min, max}}` |
-| GET | `/api/analytics/cross-shopping?level=brand&focal=&segment=age_band:40s;tier:VIP\|VVIP` | `{pairs:[{a, b, a_name, b_name, lift, jaccard, confidence_ab, n_customers}]}` |
-| GET | `/api/analytics/transitions?segment=` | `{floors:[...], matrix:[[...]], fountain, shower}` |
-| POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints}` → `{alternatives:[{id, moves:[{brand_id, brand_name, from_unit, to_unit}], objective_before, objective_after, kpi_delta:{sales_krw, low, high}, constraints:[{name, ok}], explanations:[...]}]}` |
+| GET | `/api/analytics/productivity?rev=&floor=&level=unit&top=` | `{rev, level, floor, period:{start, end, days}, summary, metric:{name, label, min, max}, rows:[{unit_code, floor, zone_code, brand_id, brand_name, category, category_name, area_m2, sales_krw, receipts, aov_krw, sales_per_m2, sales_per_pyeong, gmrof, percentile(0~100), floor_percentile, low_efficiency, driver}], low_efficiency:[...], note}`. 금액은 연환산 전체 규모 값이다. `level`은 `unit`·`zone`·`floor`·`category`. 가상 개정은 404 |
+| GET | `/api/analytics/cross-shopping?level=category&focal=&segment=age_band:40s;tier:VIP\|VVIP` | `{level, segment, basket, period, n_baskets, n_customers, caveat, pairs:[{a, b, a_name, b_name, lift, jaccard, confidence_ab, n_customers}]}`. `focal`을 주면 `a`가 focal이다. |
+| GET | `/api/analytics/transitions?segment=` | `{floors:[...], matrix:[[...]], top_transitions, fountain:{base_floor, share, customer_days}, shower:{top_floor, share, customer_days}, caveat}` |
+| POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints:{keep_anchors, area_tolerance, max_moves, n_alternatives, movable_categories, allow_cross_floor, save}}` → `{rev, period, label, caveats, alternatives:[{id, rev_id, summary, moves:[{brand_id, brand_name, from_unit, to_unit, delta, delta_low, delta_high, explanation}], objective_before, objective_after(억원), kpi_delta:{sales_krw, low, high}, constraints:[{name, ok, detail}], kpi_by_floor, explanations}]}`. 대안마다 가상 개정 `rev_id`가 저장된다. |
 
 ## 2. 채팅(AG-UI 호환 SSE)
 

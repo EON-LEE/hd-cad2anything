@@ -26,21 +26,15 @@ from cad2anything.model import (
     RevisionKind,
     SpatialModel,
 )
+from cad2anything.services.analytics_tools import AnalyticsTools
+from cad2anything.services.errors import ToolError
 from cad2anything.workspace import Workspace
 
 DEFAULT_LIMIT = 50
 BUSINESS_TABLES = ("tenancies", "pos_terminals", "transactions")
 ADHOC_KINDS = {k.value for k in EntityKind}
 
-
-try:  # MCP surfaces only its own ToolError messages to the model; other exceptions become generic errors.
-    from mcp.server.mcpserver.exceptions import ToolError as _BaseToolError
-except ImportError:  # pragma: no cover - the toolkit also runs without the MCP extra
-    _BaseToolError = ValueError
-
-
-class ToolError(_BaseToolError):
-    """Raised for invalid tool arguments; the message is shown to the agent."""
+__all__ = ["DEFAULT_LIMIT", "ToolError", "Toolkit", "apply_moves", "workspace_from_env"]
 
 
 def _round(value: Any, digits: int = 2) -> Any:
@@ -51,11 +45,12 @@ def _category_name(code: str | None) -> str:
     return CATEGORIES[code].name_ko if code in CATEGORIES else (code or "")
 
 
-class Toolkit:
+class Toolkit(AnalyticsTools):
     def __init__(self, workspace: Workspace, use_postgis: bool | None = None):
         self.ws = workspace
         self.use_postgis = bool(os.environ.get("POSTGRES_HOST")) if use_postgis is None else use_postgis
         self._features: dict[tuple[str, float], pd.DataFrame] = {}
+        self._init_analytics()
 
     # Helpers ---------------------------------------------------------------------------------------
     def _model(self, rev: str) -> SpatialModel:

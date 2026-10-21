@@ -7,10 +7,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from cad2anything.services.errors import ToolError
+
 HeatmapProvider = Callable[[str, str, str], dict[str, float]]
 METRIC_LABELS = {
-    "sales_per_m2": "평효율(원/㎡)",
-    "sales_krw": "매출(원)",
+    "sales_per_m2": "연환산 ㎡당 매출(원)",
+    "sales_krw": "연환산 매출(원)",
     "aov_krw": "객단가(원)",
     "gmrof": "GMROF",
     "walk_to_escalator_m": "에스컬레이터까지 거리(m)",
@@ -64,7 +66,11 @@ class UiActionHandler:
         metric = args["metric"]
         rev = args.get("rev") or ui_state.get("rev")
         floor = args.get("floor") or ui_state.get("floor")
-        raw = self.heatmap_provider(metric, rev, floor)
+        try:
+            raw = self.heatmap_provider(metric, rev, floor)
+        except (ToolError, KeyError, ValueError) as exc:  # let the model see the reason and recover
+            error = {"ok": False, "error": str(exc), "metric": metric, "rev": rev, "floor": floor}
+            return UiActionResult(json.dumps(error, ensure_ascii=False))
         values = normalize(raw, invert=metric == "walk_to_escalator_m")
         heatmap = {"metric": metric, "label": METRIC_LABELS.get(metric, metric), "values": values}
         patches = [_replace("/heatmap", heatmap)]

@@ -1,14 +1,11 @@
 import json
 
-import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from cad2anything.mockgen.drawings import build_all
 from cad2anything.services.app import create_app
 from cad2anything.services.atlas_api import create_api
 from cad2anything.services.tools import Toolkit
-from cad2anything.workspace import Workspace
 
 
 class ScriptedRuntime:
@@ -23,43 +20,9 @@ class ScriptedRuntime:
         yield {"type": "RUN_FINISHED", "thread_id": "conv-1", "run_id": "r1"}
 
 
-def _business_tables(model) -> dict[str, pd.DataFrame]:
-    units = [u for u in model.units() if not u.attributes.get("vacant")]
-    tenancies = pd.DataFrame(
-        [
-            [u.attributes["brand_id"], u.attributes["unit_code"], "R1", "2025-03-01", "2025-08-31", 0.3]
-            for u in units
-        ],
-        columns=["brand_id", "unit_code", "rev_id", "valid_from", "valid_to", "commission_rate"],
-    )
-    terminals = pd.DataFrame(
-        [
-            [f"P{i:04d}", u.attributes["brand_id"], u.attributes["unit_code"], "2024-10-01", "2026-09-30"]
-            for i, u in enumerate(units)
-        ],
-        columns=["pos_id", "brand_id", "unit_code", "valid_from", "valid_to"],
-    )
-    rows = []
-    for i in range(len(units)):
-        amount = 100_000 + (i % 7) * 10_000
-        for day in (2, 3):
-            rows.append([f"T{i}-{day}", f"2025-03-{day:02d} 12:00:00", f"P{i:04d}", amount, 50.0])
-    transactions = pd.DataFrame(rows, columns=["txn_id", "ts", "pos_id", "amount_krw", "weight"])
-    return {"tenancies": tenancies, "pos_terminals": terminals, "transactions": transactions}
-
-
 @pytest.fixture(scope="module")
-def toolkit(tmp_path_factory) -> Toolkit:
-    root = tmp_path_factory.mktemp("atlas-ws")
-    workspace = Workspace(root)
-    _, models, changes = build_all(42)
-    for model in models.values():
-        workspace.save_model(model, {"source": "truth"})
-    for change_set in changes.values():
-        workspace.save_change_set(change_set, {"source": "truth"})
-    for name, frame in _business_tables(models["R1"]).items():
-        frame.to_csv(root / "business" / f"{name}.csv", index=False)
-    return Toolkit(workspace, use_postgis=False)
+def toolkit(tmp_path_factory, populate) -> Toolkit:
+    return Toolkit(populate(tmp_path_factory.mktemp("atlas-ws")), use_postgis=False)
 
 
 @pytest.fixture(scope="module")
@@ -112,15 +75,62 @@ def test_artifacts_list_download_and_review(client, toolkit):
     assert client.post("/api/artifacts/R1/fixture_schedule/review", json=review).status_code == 409
 
 
-def test_productivity_uses_weights_and_ranks_within_floor(client):
+def test_productivity_is_annualized_with_drivers_for_low_units(client):
     body = client.get("/api/analytics/productivity", params={"rev": "R1", "floor": "3F"}).json()
+    assert body["period"] == {"start": "2025-03-01", "end": "2025-08-31", "days": 184}
     rows = body["rows"]
-    assert body["window"] == ["2025-03-01", "2025-08-31"]
-    assert rows == sorted(rows, key=lambda row: -row["sales_per_m2"])
-    occupied = [row for row in rows if not row["vacant"]]
-    assert occupied[0]["sales_krw"] % 50 == 0 and occupied[0]["aov_krw"] >= 100_000
-    assert any(row["low_efficiency"] for row in occupied)
+    assert rows == sorted(rows, key=lambda row: -(row["sales_per_m2"] or 0))
+    web_fields = {"unit_code", "brand_name", "category", "sales_krw", "sales_per_m2", "sales_per_pyeong"}
+    assert all(web_fields | {"percentile", "low_efficiency", "driver"} <= set(row) for row in rows)
+    low = [row for row in rows if row["low_efficiency"]]
+    assert low and all(row["driver"] for row in low)
+    assert 0 <= min(row["percentile"] for row in rows) <= max(row["percentile"] for row in rows) <= 100
+    assert body["metric"]["min"] <= body["metric"]["max"]
     assert client.get("/api/analytics/productivity", params={"rev": "H1"}).status_code == 404
+
+
+def test_cross_shopping_and_transitions_follow_the_contract(client):
+    pairs = client.get(
+        "/api/analytics/cross-shopping",
+        params={"level": "category", "segment": "age_band:40s;tier:VIP|VVIP"},
+    ).json()["pairs"]
+    assert pairs and {"a", "b", "a_name", "b_name", "lift", "jaccard", "confidence_ab", "n_customers"} <= set(
+        pairs[0]
+    )
+    focal = client.get(
+        "/api/analytics/cross-shopping", params={"level": "category", "focal": "화장품"}
+    ).json()
+    assert all(pair["a"] == "COSMETICS" for pair in focal["pairs"])
+    flows = client.get("/api/analytics/transitions").json()
+    assert len(flows["matrix"]) == len(flows["floors"]) and {"share", "base_floor"} <= set(flows["fountain"])
+    assert client.get("/api/analytics/cross-shopping", params={"level": "aisle"}).status_code == 400
+
+
+def test_layout_alternatives_become_hypothetical_revisions(client, toolkit):
+    request = {"rev": "R2", "floors": ["4F"], "constraints": {"area_tolerance": 0.25, "n_alternatives": 2}}
+    body = client.post("/api/layout/alternatives", json=request).json()
+    alternatives = body["alternatives"]
+    assert 1 <= len(alternatives) <= 2
+    first = alternatives[0]
+    assert {
+        "id",
+        "rev_id",
+        "moves",
+        "objective_before",
+        "objective_after",
+        "kpi_delta",
+        "constraints",
+    } <= set(first)
+    assert first["kpi_delta"]["low"] <= first["kpi_delta"]["sales_krw"] <= first["kpi_delta"]["high"]
+    assert all(move["to_unit"].startswith("4F-") for move in first["moves"])
+    assert all(check["ok"] for check in first["constraints"])
+    assert toolkit.ws.model_meta(first["rev_id"])["source"] == "hypothetical"
+    floor = client.get(f"/api/floors/{first['rev_id']}/4F").json()
+    assert any(f["properties"]["kind"] == "unit" for f in floor["features"])
+    bad = client.post(
+        "/api/layout/alternatives", json={"rev": "R2", "floors": ["4F"], "constraints": {"x": 1}}
+    )
+    assert bad.status_code == 400
 
 
 def test_chat_streams_sse_events(client, runtime):

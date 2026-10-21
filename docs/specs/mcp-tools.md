@@ -25,15 +25,17 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | registry | `registry_run` | `generator`, `rev`, `floors?` | 산출물 기록(상태, 파일, 요약, 이슈) |
 | registry | `registry_validate` | `rev`, `generator` | 검증 이슈 |
 | render | `render_adhoc_table` | `rev`, `entity_kind`, `fields`, `floor?`, `group_by?`, `title` | 즉석 표 산출물(초안)과 레지스트리 등록안 |
-| analytics | `analytics_productivity` | `rev`, `floor?`, `level?`, `start?`, `end?`, `top?` | 면적당 매출, 백분위, 저효율 플래그, 원인 |
-| analytics | `analytics_drivers` | `rev`, `floor?` | 회귀 계수, 설명력, 해석(추정치) |
-| analytics | `analytics_cross_shopping` | `level`, `focal?`, `segment?`, `start?`, `end?`, `top?` | lift, Jaccard, confidence |
-| analytics | `analytics_floor_transitions` | `segment?` | 층간 전이 행렬, 분수·샤워효과 지표 |
-| analytics | `analytics_adjacency_effect` | `rev`, `neighbor_category` | 단순 추정 vs 노출 통제 추정, 공통 원인 의심 여부 |
-| analytics | `analytics_before_after` | `change_date`, `unit_codes`, `window_days?` | 전후 비교(인과 아님) |
-| analytics | `analytics_time_patterns` | `by`, `floor?`, `category?` | 시간대·요일·카테고리 패턴 |
-| layout | `layout_generate_alternatives` | `rev`, `floors`, `keep_anchors?`, `area_tolerance?`, `max_moves?`, `n_alternatives?` | 대안별 이동, KPI 변화 범위, 제약 충족표, 설명 |
+| analytics | `analytics_productivity` | `rev`, `floor?`, `level?`, `start?`, `end?`, `top?` | 연환산 ㎡당 매출, 백분위, 저효율 플래그, 저효율 원인 |
+| analytics | `analytics_drivers` | `rev`, `floor?` | 회귀 계수, 설명력, 저효율 매장별 주요 요인(추정치) |
+| analytics | `analytics_cross_shopping` | `level?`, `focal?`, `segment?`, `start?`, `end?`, `top?`, `basket?`, `min_customers?` | lift, Jaccard, confidence |
+| analytics | `analytics_floor_transitions` | `segment?`, `start?`, `end?` | 층간 전이 행렬, 분수·샤워효과 지표 |
+| analytics | `analytics_adjacency_effect` | `rev`, `neighbor_category`, `neighborhood?`(`near`·`wall`), `radius_m?` | 단순 추정 vs 노출 통제 추정, 공통 원인 의심 여부 |
+| analytics | `analytics_before_after` | `change_date`, `unit_codes`, `window_days?`, `key?` | 전후 비교(인과 아님) |
+| analytics | `analytics_time_patterns` | `by`, `floor?`, `category?`, `start?`, `end?`, `limit?` | 시간대·요일·카테고리 패턴 |
+| layout | `layout_generate_alternatives` | `rev`, `floors?`, `keep_anchors?`, `area_tolerance?`, `max_moves?`, `n_alternatives?`, `movable_categories?`, `allow_cross_floor?`, `save?` | 대안별 이동, KPI 변화 범위, 제약 충족표, 설명, 가상 개정 ID |
 | layout | `whatif_score_moves` | `rev`, `moves` | 이동안의 예상 영향(추정치) |
+
+금액은 합성 표본 거래에 표본 가중치를 곱한 전체 규모 값이다. 실적 지표는 개정 적용 기간의 합계를 연 단위로 환산한다. 실제 개정의 분석 기간은 그 개정의 적용일부터 다음 실제 개정 적용일 전날까지다.
 
 ## 3. 에이전트별 허용 도구
 

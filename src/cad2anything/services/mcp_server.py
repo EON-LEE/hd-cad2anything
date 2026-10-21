@@ -32,6 +32,15 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "registry_run": "생성기를 실행해 산출물 초안을 만든다. 같은 입력이면 기존 결과를 재사용한다. 승인은 하지 않는다.",
     "registry_validate": "생성된 산출물의 검증 결과(오류, 경고)를 반환한다.",
     "render_adhoc_table": "등록되지 않은 산출물을 즉석 표로 만들고(초안), 레지스트리 등록안을 함께 만든다.",
+    "analytics_productivity": "실제 개정의 적용 기간 실적으로 매장·구역·층·카테고리별 연환산 ㎡당 매출, 평당 매출, GMROF, 백분위, 저효율 여부와 저효율 원인을 반환한다. 가상 개정은 지원하지 않는다.",
+    "analytics_drivers": "매장 ㎡당 매출을 노출(에스컬레이터 보행거리), 통로 접면, 면적, 카테고리로 분해한 회귀 결과와 저효율 매장별 주요 하락 요인을 반환한다(추정치, 인과 아님).",
+    "analytics_cross_shopping": "교차구매 lift, Jaccard, confidence를 반환한다. segment(age_band, gender, tier, home_area)로 고객군을 거르고, focal을 주면 함께 사는 상위 항목을 반환한다. 기본 장바구니는 같은 고객의 같은 날 구매다.",
+    "analytics_floor_transitions": "같은 날 결제 순서로 본 층간 전이 확률 행렬과 분수효과(지하 식품 → 위층), 샤워효과(최상층 → 아래층) 지표를 반환한다. 실제 이동 경로가 아니다.",
+    "analytics_adjacency_effect": "특정 카테고리 매장 근처(neighborhood=near: 경계 사이 radius_m 이내, 통로 건너편 포함. wall: 벽 공유) 매장의 ㎡당 매출 차이를 단순 비교와 노출 통제 추정으로 함께 보여주고, 공통 원인(노출) 의심 여부를 판정한다(추정치).",
+    "analytics_before_after": "변경일 전후 같은 기간의 일평균 매출을 대상 매장(또는 key=brand_id로 브랜드)과 같은 층 비교군으로 비교한다. 인과 효과가 아니다.",
+    "analytics_time_patterns": "시간대(hour), 요일(weekday), 날짜, 월과 카테고리·층 조합별 매출과 비중을 반환한다.",
+    "layout_generate_alternatives": "실제 개정을 기준으로 제약(층, 앵커 유지, 면적 허용 오차, 최대 이동 수, 이동 가능 카테고리)을 지키며 기대 매출을 높이는 배치 대안을 만들고 가상 개정으로 저장한다. 이동별 기여도, 층별 변화 범위, 제약 충족표를 반환한다(추정치).",
+    "whatif_score_moves": "브랜드 이동안(moves: brand_id 또는 브랜드명, to_unit)의 연간 기대 매출 변화와 범위, 층별 영향, 제약 충족 여부를 추정한다. 가상 개정은 만들지 않는다.",
 }
 
 
