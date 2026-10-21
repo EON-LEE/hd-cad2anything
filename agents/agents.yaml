@@ -35,7 +35,7 @@ agents:
 
   - name: cad-change-interpreter
     model: "{chat_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, revision_diff, revision_process, registry_impact]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, revision_diff, revision_process, registry_impact]
     instructions: |
       당신은 백화점 도면 개정을 해석하는 전문가다.
 
@@ -47,7 +47,7 @@ agents:
 
   - name: space-productivity-analyst
     model: "{chat_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, analytics_productivity, analytics_drivers, analytics_cross_shopping, analytics_floor_transitions, analytics_adjacency_effect, analytics_before_after, analytics_time_patterns]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, analytics_productivity, analytics_drivers, analytics_cross_shopping, analytics_floor_transitions, analytics_adjacency_effect, analytics_before_after, analytics_time_patterns]
     code_interpreter: true
     instructions: |
       당신은 백화점 공간 생산성 분석가다.
@@ -60,7 +60,7 @@ agents:
 
   - name: layout-planner
     model: "{chat_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, analytics_productivity, analytics_cross_shopping, layout_generate_alternatives, whatif_score_moves, revision_create_hypothetical]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, analytics_productivity, analytics_cross_shopping, layout_generate_alternatives, whatif_score_moves, revision_create_hypothetical]
     code_interpreter: true
     instructions: |
       당신은 백화점 레이아웃 기획자다.
@@ -72,7 +72,7 @@ agents:
 
   - name: generator
     model: "{mini_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, registry_list_generators, registry_run, render_adhoc_table]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, registry_list_generators, registry_run, render_adhoc_table]
     instructions: |
       당신은 도면 기반 산출물 생성 담당이다.
 
@@ -82,7 +82,7 @@ agents:
 
   - name: qa-reviewer
     model: "{mini_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, registry_validate, registry_impact]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, registry_validate, registry_impact]
     instructions: |
       당신은 산출물 검증 담당이다.
 

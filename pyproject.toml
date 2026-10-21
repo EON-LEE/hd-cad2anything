@@ -19,8 +19,10 @@ dependencies = [
 
 [project.optional-dependencies]
 db = ["psycopg[binary]>=3.2"]
-mcp = ["mcp>=1.10", "uvicorn>=0.30"]
+mcp = ["mcp>=2.3,<3", "uvicorn>=0.30"]
 agents = ["azure-ai-projects>=2.0.0", "azure-identity>=1.19", "openai>=1.80"]
+api = ["fastapi>=0.115", "uvicorn>=0.30"]
+azure = ["azure-storage-blob>=12.20", "azure-identity>=1.19"]
 
 [project.scripts]
 cad2anything = "cad2anything.cli:main"

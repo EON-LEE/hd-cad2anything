@@ -179,7 +179,10 @@ def _fingerprint(spec: GeneratorSpec, ctx: GeneratorContext) -> str:
     digest.update(json.dumps(ctx.model.to_dict(), sort_keys=True, ensure_ascii=False).encode())
     for key in sorted(ctx.data):
         value = ctx.data[key]
-        if hasattr(value, "to_csv"):
+        cheap = getattr(value, "attrs", {}).get("fingerprint") if hasattr(value, "attrs") else None
+        if cheap:
+            digest.update(f"{key}|{cheap}".encode())
+        elif hasattr(value, "to_csv"):
             digest.update(key.encode())
             digest.update(value.to_csv(index=False).encode())
         else:
