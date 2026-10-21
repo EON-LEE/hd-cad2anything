@@ -8,6 +8,14 @@
 
 모든 데이터는 합성 데이터이고, 브랜드명은 모두 가상이다.
 
+## 현재 구성
+
+- **목데이터:** 9개 층, 약 410개 매장의 합성 DXF 도면(R0·R1·R2 실제 개정, H1 가상 개정)과 24개월 합성 거래 데이터. 거래 데이터에는 분석으로 회수할 수 있는 효과 8종을 심었다.
+- **CAD 이해와 개정 루프:** DXF 파싱, 공간관계 모델, 의미 단위 diff, 생성기 레지스트리, 사람 승인.
+- **분석과 레이아웃:** 공간 생산성, 요인 분해, 교차구매, 층간 이동, 인접 효과, 개편 전후 비교, 레이아웃 대안, what-if.
+- **에이전트:** Foundry prompt agent 7개. 도메인 도구 22개를 MCP로 쓰고, 화면 제어와 전문 에이전트 상담은 함수 도구로 쓴다.
+- **Atlas:** 웹 화면, REST·채팅 API, MCP 엔드포인트를 Container App 하나로 제공한다.
+
 ## 문서
 
 | 문서 | 내용 |
@@ -16,28 +24,44 @@
 | [아키텍처](docs/architecture.md) | 계층, 에이전트, 개정 루프, Azure 구성 |
 | [요구사항 탐색](docs/requirements/discovery.md) | 부서별 가설, 우선순위, 백로그 |
 | [CAD 규약](docs/specs/cad-conventions.md) | 합성 도면과 파싱의 계약 |
+| [CAD 파이프라인](docs/specs/cad-pipeline.md) | 파싱 단계, 레이어 분류, 검토 대기열 |
 | [데이터 배치](docs/specs/data-layout.md) | 생성 데이터의 경로와 형식 |
+| [합성 업무 데이터](docs/data/mock-business-data.md) | 생성기 설계, 보정 근거, 심은 효과 |
+| [MCP 도구](docs/specs/mcp-tools.md) | 도메인 도구 계약과 에이전트별 허용 도구 |
+| [Atlas API](docs/specs/atlas-api.md) | REST·채팅 API와 UI 상태 계약 |
+| [인프라](infra/README.md) | Azure 리소스, 권한, 배포 절차 |
+| [평가](eval/README.md) | 점검표와 에이전트 골든 질문 평가 |
+| [데모 런북](docs/demo/runbook.md) | 데모 준비, 시나리오, 문제 대응, 비용 통제 |
 
 ## 구조
 
 ```text
-src/cad2anything/  Python 패키지: 모델 계약, 목데이터, CAD 이해, 분석, 레이아웃, 도구
+src/cad2anything/  Python 패키지: 모델 계약, 목데이터, CAD 이해, 분석, 레이아웃, 도구, 서비스, 평가
 tests/             pytest
-docs/              조사·설계·규약 문서
+docs/              조사·설계·규약·데모 문서
 infra/             Azure IaC(Bicep, azd)
-agents/            Foundry 에이전트 정의
-services/          MCP 서버, UI 브리지, 개정 워커
-apps/              Atlas 웹앱
-eval/              평가 세트
+agents/            Foundry 에이전트 정의와 UI 함수 도구 정의
+services/atlas/    Atlas 컨테이너 이미지(Dockerfile)
+apps/atlas-web/    Atlas 웹앱(React, deck.gl)
+eval/              골든 질문 세트와 평가 안내
 data/              보정 출처, 소형 샘플. 생성 데이터와 로컬 매핑은 Git에서 제외한다.
 ```
 
 ## 개발 환경
 
 ```powershell
-uv sync
+uv sync --all-extras
 uv run pytest
 uv run ruff check src tests
+```
+
+로컬에서 Atlas를 실행하려면 작업공간을 만든 뒤 서버를 시작한다. 웹앱 개발 서버(`apps/atlas-web`)는 `/api`를 이 서버로 전달한다.
+
+```powershell
+uv run python -m cad2anything.mockgen.drawings --out data/generated --seed 42
+uv run python -m cad2anything.mockgen.business --out data/generated --seed 42
+uv run python -m cad2anything.bootstrap --mode parse
+uv run uvicorn cad2anything.services.app:create_app --factory --port 8000
 ```
 
 PyPI 직접 접근이 막힌 환경에서는 해당 명령에만 조직 미러를 지정한다(`UV_DEFAULT_INDEX`). 이때 생성되는 `uv.lock`은 미러 주소를 기록하므로 커밋하지 않는다.

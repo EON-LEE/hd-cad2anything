@@ -34,6 +34,9 @@ data/workspace/
 data/local/*
 !data/local/README.md
 
+# Evaluation run outputs (model answers); summaries go to docs when needed
+eval/results/
+
 # Real-brand mappings must never be committed
 **/real_brand_mapping*.*
 
