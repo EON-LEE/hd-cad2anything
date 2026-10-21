@@ -1,0 +1,12 @@
+name: fixture_schedule
+version: "1.0"
+title_ko: 매대·집기 목록
+description: 매장별 집기 유형과 수량, 점유 면적을 표로 만든다.
+inputs:
+  entity_kinds: [unit, fixture]
+  data: []
+outputs: [xlsx, csv]
+triggers:
+  change_types: [add, remove, move, reassign, split, merge, resize, fixture_change]
+risk_tier: medium
+approval_mode: pre_publish

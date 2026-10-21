@@ -1,0 +1,43 @@
+"""Shared spatial computations reused by the CAD pipeline, analytics and layout planning."""
+
+from cad2anything.spatial.features import (
+    DEFAULT_CELL_M,
+    MIN_SHARED_M,
+    SHARE_TOL_M,
+    FloorNetwork,
+    access_point,
+    access_points,
+    adjacency_pairs,
+    build_floor_network,
+    build_networks,
+    compute_relations,
+    floor_codes,
+    floor_ordinal,
+    multi_source_dijkstra,
+    shared_length,
+    shared_segments,
+    unit_features,
+    walkable_area,
+    walkway_grid_graph,
+)
+
+__all__ = [
+    "DEFAULT_CELL_M",
+    "MIN_SHARED_M",
+    "SHARE_TOL_M",
+    "FloorNetwork",
+    "access_point",
+    "access_points",
+    "adjacency_pairs",
+    "build_floor_network",
+    "build_networks",
+    "compute_relations",
+    "floor_codes",
+    "floor_ordinal",
+    "multi_source_dijkstra",
+    "shared_length",
+    "shared_segments",
+    "unit_features",
+    "walkable_area",
+    "walkway_grid_graph",
+]

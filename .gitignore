@@ -1,0 +1,48 @@
+# Python
+# uv.lock records the package index URL used locally (possibly a private mirror); CI resolves from PyPI.
+uv.lock
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+apps/**/dist/
+# package-lock.json records the registry used locally (possibly a private mirror).
+package-lock.json
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+
+# Azure Developer CLI environment state (contains resource names and settings)
+.azure/
+
+# Generated data: regenerate with scripts; only small curated samples are committed
+data/generated/
+data/workspace/
+data/local/*
+!data/local/README.md
+
+# Evaluation run outputs (model answers); summaries go to docs when needed
+eval/results/
+
+# Real-brand mappings must never be committed
+**/real_brand_mapping*.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.playwright-mcp/

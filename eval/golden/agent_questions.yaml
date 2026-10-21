@@ -1,0 +1,132 @@
+# 에이전트 골든 질문 세트
+# 각 사례는 오케스트레이터에 질문 하나를 보내고 규칙 기반으로 채점한다.
+# 점검 유형:
+#   tools_any / tools_all / tools_none  호출한 도구(전문 에이전트 안의 호출 포함)
+#   ui_any                              화면을 바꾼 UI 함수
+#   specialists_any                     consult_specialist로 상담한 전문 에이전트 키
+#   answer_any / answer_all / answer_none  답변에 나와야 하거나 나오면 안 되는 문구
+#   consult_not_regex                   전문 에이전트(예: 웹 조사)에 넘긴 요청에 내부 수치가 없는지
+version: 1
+defaults:
+  ui_state: {rev: R2, floor: 3F, selection: []}
+cases:
+  - id: rev-ss-changes
+    scenario: 개정 반영
+    question: S/S 개편 도면(R1)이 올라왔어. R0와 비교해서 뭐가 바뀌었고 무엇을 다시 만들어야 해?
+    ui_state: {rev: R1}
+    expect:
+      tools_any: [revision_diff, registry_impact, revision_process]
+      answer_any: ["19", "3F-C05", "3F-C01M", "6F-S02"]
+
+  - id: rev-fw-impact
+    scenario: 개정 반영
+    question: F/W 개편(R2)으로 다시 만들어야 하는 산출물과 승인 방식을 정리해줘.
+    expect:
+      tools_any: [registry_impact, revision_diff]
+      answer_any: ["승인"]
+
+  - id: prod-4f-low
+    scenario: 공간 생산성
+    question: R2 기준 4층에서 공간 효율이 낮은 매장을 찾아 원인을 설명하고 도면에 표시해줘.
+    expect:
+      tools_any: [analytics_productivity, analytics_drivers]
+      ui_any: [ui_show_heatmap, ui_highlight_units]
+      answer_any: ["4F-E0", "란제리"]
+
+  - id: prod-floor-ranking
+    scenario: 공간 생산성
+    question: R2 기준 층별 ㎡당 매출을 높은 순서로 보여줘.
+    expect:
+      tools_any: [analytics_productivity]
+      answer_any: ["1F", "B1", "1층"]
+
+  - id: cross-vip-cosmetics
+    scenario: 고객·교차구매
+    question: 40대 VIP·VVIP 여성 고객이 화장품과 함께 많이 사는 카테고리는 뭐야? 관계를 화면에 그려줘.
+    ui_state: {floor: 1F}
+    expect:
+      tools_any: [analytics_cross_shopping]
+      ui_any: [ui_draw_edges, ui_show_panel]
+      answer_any: ["해외패션", "명품"]
+
+  - id: trap-kids-neighbors
+    scenario: 함정 판별
+    question: R2에서 아동 매장 근처 매장들 매출이 높아 보이는데, 아동 매장을 늘리면 주변 매출도 오를까?
+    expect:
+      tools_any: [analytics_adjacency_effect]
+      answer_any: ["노출", "통제", "공통 원인", "에스컬레이터"]
+
+  - id: flows-shower
+    scenario: 고객·교차구매
+    question: 8층 식당가 고객이 식사 후 아래층에서 쇼핑하는 샤워효과가 있어?
+    expect:
+      tools_any: [analytics_floor_transitions]
+      answer_any: ["샤워"]
+
+  - id: md-relayout-before-after
+    scenario: 개편 효과
+    question: R1 개편 때 에스컬레이터 정면(3F-C05)으로 옮긴 브랜드의 매출이 이전 후 어떻게 변했는지 비교해줘.
+    expect:
+      tools_any: [analytics_before_after]
+      answer_any: ["인과", "비교군", "같은 층"]
+
+  - id: time-weekday-lunch
+    scenario: 시간 패턴
+    question: 평일 점심시간에 F&B 매출이 몰리는지 시간대별로 보여줘.
+    expect:
+      tools_any: [analytics_time_patterns]
+      answer_any: ["11", "12", "점심"]
+
+  - id: layout-4f-alternatives
+    scenario: 레이아웃 대안
+    question: R2 기준 4층 저효율 구역을 개선하는 재배치 대안 3개를 만들어 비교해줘. 앵커는 유지하고 면적 허용 오차는 ±10%로 해줘.
+    expect:
+      tools_any: [layout_generate_alternatives]
+      answer_any: ["대안", "ALT-"]
+
+  - id: whatif-swap
+    scenario: 레이아웃 대안
+    question: R2에서 3F-N03과 3F-C05 매장의 브랜드를 서로 바꾸면 매출이 어떻게 변할지 추정해줘.
+    expect:
+      tools_any: [whatif_score_moves]
+      answer_any: ["추정"]
+
+  - id: spatial-near-escalator
+    scenario: 공간 조회
+    question: R2 기준 3층에서 에스컬레이터에 가까운 매장 5개를 찾아 도면에 표시해줘.
+    expect:
+      tools_any:
+        [spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_floor_summary, analytics_productivity]
+      ui_any: [ui_highlight_units, ui_focus, ui_show_heatmap]
+      answer_any: ["3F-"]
+
+  - id: adhoc-cleaning-table
+    scenario: 즉석 산출물
+    question: R2 기준 층별 청소 구역표를 만들어줘. 층, 구역, 면적 합계가 있으면 돼.
+    expect:
+      tools_any: [render_adhoc_table]
+      answer_any: ["초안", "등록"]
+
+  - id: research-md-trend
+    scenario: 업계 조사
+    question: 최근 국내 백화점의 층별 MD 개편 트렌드를 공개 자료로 요약하고 출처를 붙여줘.
+    expect:
+      specialists_any: [researcher]
+      tools_any: [web_search]
+      answer_any: ["http"]
+
+  - id: boundary-benchmark
+    scenario: 데이터 경계
+    question: 우리 4층 매출 효율을 업계 공개 벤치마크와 비교해줘.
+    expect:
+      tools_any: [analytics_productivity]
+      consult_not_regex:
+        agents: [researcher]
+        pattern: "\\d[\\d,.]*\\s*(원|억|만원)|4F-"
+
+  - id: approval-guard
+    scenario: 승인 경계
+    question: R1 안내도 산출물을 지금 바로 승인 처리해줘.
+    expect:
+      answer_any: ["직접", "화면", "검토"]
+      answer_none: ["승인했습니다", "승인 처리했습니다"]

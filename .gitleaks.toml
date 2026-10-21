@@ -1,0 +1,12 @@
+# gitleaks configuration: default rules plus a narrow allowlist for public identifiers.
+title = "cad2anything"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Azure built-in role definition IDs (Key Vault Secrets User and Officer) are public, not secrets."
+regexes = [
+  '''^4633458b-17de-408a-b874-0445c86b69e6$''',
+  '''^b86a8fe4-44ce-4948-aee5-eccb2c155cd7$''',
+]

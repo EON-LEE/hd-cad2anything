@@ -1,0 +1,295 @@
+# Calibration for cad2anything.mockgen.business (synthetic business data).
+#
+# Every parameter node is a mapping {value, source}. Source labels used below:
+#   - "spec": fixed by repository docs (docs/specs/data-layout.md, docs/research/market-research.md).
+#   - "approx. shape ...": only the rough shape is informed by public statistics; exact values are
+#     NOT replicated (MOTIE monthly department-store sales trend, KOSIS retail sales index for
+#     department stores, Seoul commercial-area estimated sales shares OA-22176, Seoul living
+#     population OA-20314).
+#   - "assumption": a PoC choice without a data source.
+#   - "planted": a deliberate synthetic effect for evaluation (see planted_effects.json).
+# All brands are fictional and every number is synthetic.
+
+period:
+  start: {value: "2024-10-01", source: "spec: docs/specs/data-layout.md (24 months)"}
+  end: {value: "2026-09-30", source: "spec: docs/specs/data-layout.md (24 months)"}
+  revision_effective_dates:
+    value: {R0: "2024-10-01", R1: "2025-03-01", R2: "2025-09-01"}
+    source: "spec: docs/specs/data-layout.md; matches truth/layout_{rev}.json (H1 is hypothetical and excluded)"
+
+scale:
+  default: {value: 0.02, source: "assumption: demo data keeps distributions and shrinks volume by 1/50 (market-research §6-5)"}
+
+targets:
+  annual_sales_krw: {value: 2000000000000, source: "assumption: fictional flagship scale ~KRW 2.0T/yr (market-research §6-5)"}
+  avg_ticket_krw: {value: 145000, source: "assumption: ~KRW 145k per receipt (market-research §6-5); category base tickets are catalog.mean_ticket_krw"}
+  identified_txn_share: {value: 0.65, source: "assumption: ~65% of receipts carry a membership ID, the rest are anonymous"}
+
+calendar:
+  monthly_index:
+    value: {1: 1.04, 2: 0.86, 3: 0.97, 4: 0.96, 5: 1.08, 6: 0.94, 7: 0.95, 8: 0.88, 9: 1.03, 10: 1.07, 11: 1.05, 12: 1.17}
+    source: "approx. shape informed by public statistics (MOTIE monthly department-store sales trend / KOSIS retail sales index): peaks in Dec/Jan/May/Sep-Oct holiday seasons, troughs in Feb/Aug; exact values not replicated"
+  dow_index:
+    value: {Mon: 0.84, Tue: 0.84, Wed: 0.88, Thu: 0.92, Fri: 1.06, Sat: 1.48, Sun: 1.42}
+    source: "approx. shape informed by Seoul commercial-area estimated sales (OA-22176) day-of-week shares; exact values not replicated"
+  public_holiday_index: {value: 1.35, source: "assumption: public holidays behave like weekends"}
+  lunar_holiday_window_index: {value: 0.75, source: "assumption: eve and day after Seollal/Chuseok are quieter"}
+  gift_season_days: {value: 14, source: "assumption: holiday gift-set season before Seollal/Chuseok"}
+  gift_season_index: {value: 1.15, source: "assumption: overall traffic uplift in gift seasons"}
+  gift_season_category_multiplier:
+    value: {FOOD_FRESH: 1.8, WINE: 1.8, FOOD_DELI: 1.2}
+    source: "approx. shape informed by MOTIE holiday-month food sales spikes; exact values not replicated"
+  closed_on_lunar_new_year_and_chuseok: {value: true, source: "assumption: store closes on the main Seollal/Chuseok day"}
+  holidays:
+    source: "assumption: Korean public holidays incl. announced temporary/substitute days and election days (approximate; verify against an official calendar before reuse)"
+    value:
+      - {date: "2024-10-01", name: "국군의 날(임시공휴일)", kind: public}
+      - {date: "2024-10-03", name: "개천절", kind: public}
+      - {date: "2024-10-09", name: "한글날", kind: public}
+      - {date: "2024-12-25", name: "성탄절", kind: public}
+      - {date: "2025-01-01", name: "신정", kind: public}
+      - {date: "2025-01-27", name: "임시공휴일(설 연휴)", kind: public}
+      - {date: "2025-01-28", name: "설날 연휴", kind: lunar_window}
+      - {date: "2025-01-29", name: "설날", kind: lunar_main}
+      - {date: "2025-01-30", name: "설날 연휴", kind: lunar_window}
+      - {date: "2025-03-01", name: "삼일절", kind: public}
+      - {date: "2025-03-03", name: "대체공휴일(삼일절)", kind: public}
+      - {date: "2025-05-05", name: "어린이날·부처님오신날", kind: public}
+      - {date: "2025-05-06", name: "대체공휴일", kind: public}
+      - {date: "2025-06-03", name: "대통령선거일", kind: public}
+      - {date: "2025-06-06", name: "현충일", kind: public}
+      - {date: "2025-08-15", name: "광복절", kind: public}
+      - {date: "2025-10-03", name: "개천절", kind: public}
+      - {date: "2025-10-05", name: "추석 연휴", kind: lunar_window}
+      - {date: "2025-10-06", name: "추석", kind: lunar_main}
+      - {date: "2025-10-07", name: "추석 연휴", kind: lunar_window}
+      - {date: "2025-10-08", name: "대체공휴일(추석)", kind: public}
+      - {date: "2025-10-09", name: "한글날", kind: public}
+      - {date: "2025-12-25", name: "성탄절", kind: public}
+      - {date: "2026-01-01", name: "신정", kind: public}
+      - {date: "2026-02-16", name: "설날 연휴", kind: lunar_window}
+      - {date: "2026-02-17", name: "설날", kind: lunar_main}
+      - {date: "2026-02-18", name: "설날 연휴", kind: lunar_window}
+      - {date: "2026-03-01", name: "삼일절", kind: public}
+      - {date: "2026-03-02", name: "대체공휴일(삼일절)", kind: public}
+      - {date: "2026-05-05", name: "어린이날", kind: public}
+      - {date: "2026-05-24", name: "부처님오신날", kind: public}
+      - {date: "2026-05-25", name: "대체공휴일(부처님오신날)", kind: public}
+      - {date: "2026-06-03", name: "전국동시지방선거", kind: public}
+      - {date: "2026-06-06", name: "현충일", kind: public}
+      - {date: "2026-08-15", name: "광복절", kind: public}
+      - {date: "2026-08-17", name: "대체공휴일(광복절)", kind: public}
+      - {date: "2026-09-24", name: "추석 연휴", kind: lunar_window}
+      - {date: "2026-09-25", name: "추석", kind: lunar_main}
+      - {date: "2026-09-26", name: "추석 연휴", kind: lunar_window}
+  opening_hours:
+    value: {weekday: ["10:30", "20:00"], weekend: ["10:30", "20:30"]}
+    source: "assumption: typical Seoul department-store hours; weekends and public holidays close at 20:30"
+  hourly_arrival_profile:
+    value:
+      weekday: {10: 0.45, 11: 0.85, 12: 1.30, 13: 1.15, 14: 0.95, 15: 0.95, 16: 1.00, 17: 1.15, 18: 1.20, 19: 0.55}
+      weekend: {10: 0.35, 11: 0.80, 12: 1.10, 13: 1.30, 14: 1.40, 15: 1.40, 16: 1.35, 17: 1.20, 18: 1.00, 19: 0.70, 20: 0.20}
+    source: "approx. shape informed by Seoul OA-22176 time-slot sales shares and OA-20314 living population; exact values not replicated"
+
+customers:
+  gender_share: {value: {F: 0.60, M: 0.40}, source: "approx. shape informed by OA-22176 gender sales shares (female-skewed department-store spending); exact values not replicated"}
+  age_band_share:
+    value: {20s: 0.14, 30s: 0.24, 40s: 0.27, 50s: 0.22, 60s+: 0.13}
+    source: "approx. shape informed by OA-22176 age sales shares (30s-50s majority); exact values not replicated"
+  tier_share: {value: {VVIP: 0.005, VIP: 0.03, GOLD: 0.10, MEMBER: 0.865}, source: "assumption: membership pyramid"}
+  trips_per_year: {value: {VVIP: 40, VIP: 18, GOLD: 8, MEMBER: 2.6}, source: "assumption: visit frequency by tier"}
+  trip_rate_gamma_shape: {value: 1.5, source: "assumption: heterogeneity of visit frequency within a tier"}
+  spend_multiplier: {value: {VVIP: 2.6, VIP: 1.8, GOLD: 1.3, MEMBER: 1.0, ANON: 0.95}, source: "assumption: high-tier spend multipliers on receipt amounts"}
+  extra_purchases_lambda: {value: {VVIP: 1.0, VIP: 0.8, GOLD: 0.6, MEMBER: 0.45, ANON: 0.4}, source: "assumption: Poisson mean of purchases beyond the first per trip"}
+  max_purchases_per_trip: {value: 5, source: "assumption"}
+  join_date_start: {value: "2012-01-01", source: "assumption"}
+  new_member_share: {value: 0.12, source: "assumption: share of members who join during the data period"}
+  home_area_share:
+    source: "assumption: home districts skewed to the (fictional) store's catchment; Seoul district names only"
+    value:
+      강남구: 0.08
+      서초구: 0.07
+      송파구: 0.07
+      강동구: 0.04
+      용산구: 0.04
+      마포구: 0.04
+      영등포구: 0.04
+      성동구: 0.03
+      광진구: 0.03
+      동작구: 0.03
+      관악구: 0.03
+      양천구: 0.03
+      강서구: 0.03
+      성북구: 0.025
+      노원구: 0.025
+      은평구: 0.025
+      구로구: 0.02
+      중랑구: 0.02
+      동대문구: 0.02
+      종로구: 0.02
+      중구: 0.02
+      서대문구: 0.02
+      금천구: 0.015
+      도봉구: 0.015
+      강북구: 0.015
+      경기: 0.15
+      인천: 0.03
+      기타: 0.04
+
+trips:
+  entry_floor_share: {value: {B1: 0.35, 1F: 0.65}, source: "assumption: subway-connected B1 vs street entrances on 1F"}
+  first_purchase_gap_min: {value: [5, 25], source: "assumption: minutes from arrival to first payment (uniform)"}
+  next_purchase_gap_mean_min: {value: 22, source: "assumption: mean minutes between payments (lognormal, sigma 0.5)"}
+  same_floor_link_prob: {value: 0.15, source: "assumption: next purchase on the same floor (category by segment preference)"}
+  beauty_fashion_link_prob: {value: 0.15, source: "assumption: mild generic complementarity for every segment: after COSMETICS the next purchase is GLOBAL_FASHION/LUXURY and vice versa (keeps non-focal lift near 1.0-1.3)"}
+
+categories:
+  sales_share:
+    source: "approx. shape informed by MOTIE department-store product-group sales shares (luxury-led, food ~10%); exact values not replicated; tuned so overall AOV is ~KRW 145k with catalog tickets"
+    value:
+      LUXURY: 0.220
+      JEWELRY_WATCH: 0.060
+      COSMETICS: 0.085
+      GLOBAL_FASHION: 0.100
+      ACCESSORIES: 0.040
+      WOMEN_CONTEMPORARY: 0.075
+      WOMEN_CASUAL: 0.040
+      LINGERIE: 0.005
+      MEN_FORMAL: 0.035
+      MEN_CASUAL: 0.035
+      SPORTS: 0.040
+      OUTDOOR: 0.025
+      KIDS: 0.025
+      LIVING: 0.050
+      ELECTRONICS: 0.045
+      FOOD_FRESH: 0.036
+      FOOD_DELI: 0.017
+      BAKERY: 0.010
+      WINE: 0.010
+      FOOD_COURT: 0.009
+      CAFE: 0.010
+      RESTAURANT: 0.024
+      CULTURE: 0.002
+  ticket_sigma:
+    source: "assumption: lognormal dispersion of receipt amounts around the category mean"
+    value: {default: 0.5, LUXURY: 0.6, JEWELRY_WATCH: 0.65, ELECTRONICS: 0.6, FOOD_FRESH: 0.6, CAFE: 0.35, FOOD_COURT: 0.3, RESTAURANT: 0.4}
+  items_lambda:
+    source: "assumption: Poisson mean of items beyond the first per receipt"
+    value: {default: 0.6, LUXURY: 0.2, JEWELRY_WATCH: 0.1, COSMETICS: 1.2, FOOD_FRESH: 2.5, FOOD_DELI: 2.0, BAKERY: 2.2, WINE: 0.8, FOOD_COURT: 0.6, CAFE: 1.0, RESTAURANT: 1.5, CULTURE: 0.3, ELECTRONICS: 0.2}
+  return_rate:
+    source: "assumption: ~3-5% of fashion receipts are returned, much lower in food and F&B"
+    value:
+      default: 0.02
+      GLOBAL_FASHION: 0.045
+      WOMEN_CONTEMPORARY: 0.05
+      WOMEN_CASUAL: 0.045
+      LINGERIE: 0.03
+      MEN_FORMAL: 0.04
+      MEN_CASUAL: 0.04
+      SPORTS: 0.035
+      OUTDOOR: 0.035
+      KIDS: 0.035
+      LUXURY: 0.02
+      JEWELRY_WATCH: 0.015
+      COSMETICS: 0.02
+      ACCESSORIES: 0.03
+      LIVING: 0.025
+      ELECTRONICS: 0.03
+      FOOD_FRESH: 0.004
+      FOOD_DELI: 0.003
+      BAKERY: 0.002
+      WINE: 0.005
+      FOOD_COURT: 0.001
+      CAFE: 0.001
+      RESTAURANT: 0.001
+      CULTURE: 0.005
+  return_window_days: {value: [1, 30], source: "assumption: returns happen 1-30 days after purchase at the same brand"}
+  monthly_factor:
+    source: "assumption: mild category seasonality (outdoor in winter, kids in May, fashion in spring/fall)"
+    value:
+      OUTDOOR: {1: 1.25, 2: 1.05, 3: 0.95, 4: 0.9, 5: 0.9, 6: 0.8, 7: 0.75, 8: 0.8, 9: 0.95, 10: 1.15, 11: 1.3, 12: 1.35}
+      KIDS: {3: 1.1, 5: 1.4, 12: 1.2}
+      COSMETICS: {5: 1.1, 12: 1.15}
+      WOMEN_CONTEMPORARY: {3: 1.1, 4: 1.1, 7: 0.9, 8: 0.85, 9: 1.1, 10: 1.1}
+      WOMEN_CASUAL: {3: 1.1, 4: 1.1, 7: 0.9, 8: 0.85, 9: 1.1, 10: 1.1}
+      LIVING: {3: 1.1, 4: 1.1, 9: 1.05}
+      ELECTRONICS: {6: 1.15, 7: 1.2, 12: 1.1}
+      FOOD_FRESH: {12: 1.15}
+      WINE: {12: 1.3}
+  segment_affinity:
+    source: "assumption (rough shape informed by OA-22176 gender/age shares): multiplicative category preference by gender, age band and tier"
+    value:
+      gender:
+        F: {WOMEN_CONTEMPORARY: 1.7, WOMEN_CASUAL: 1.7, LINGERIE: 1.9, COSMETICS: 1.5, ACCESSORIES: 1.2, JEWELRY_WATCH: 1.1, KIDS: 1.2, MEN_FORMAL: 0.35, MEN_CASUAL: 0.4, ELECTRONICS: 0.8}
+        M: {WOMEN_CONTEMPORARY: 0.25, WOMEN_CASUAL: 0.25, LINGERIE: 0.15, COSMETICS: 0.45, ACCESSORIES: 0.8, MEN_FORMAL: 2.6, MEN_CASUAL: 2.4, ELECTRONICS: 1.5, SPORTS: 1.3, OUTDOOR: 1.3, WINE: 1.3}
+      age_band:
+        20s: {CAFE: 1.5, FOOD_COURT: 1.3, ACCESSORIES: 1.3, WOMEN_CASUAL: 1.3, COSMETICS: 1.2, LUXURY: 0.6, JEWELRY_WATCH: 0.7, LIVING: 0.6, KIDS: 0.3, FOOD_FRESH: 0.5, ELECTRONICS: 0.8}
+        30s: {KIDS: 1.8, LIVING: 1.2, ELECTRONICS: 1.2, CAFE: 1.2, WOMEN_CONTEMPORARY: 1.1}
+        40s: {KIDS: 1.3, GLOBAL_FASHION: 1.15, WOMEN_CONTEMPORARY: 1.2, SPORTS: 1.2, OUTDOOR: 1.2, LUXURY: 1.1}
+        50s: {FOOD_FRESH: 1.3, MEN_FORMAL: 1.2, LUXURY: 1.15, OUTDOOR: 1.3, LIVING: 1.1, KIDS: 0.6, CAFE: 0.8}
+        60s+: {FOOD_FRESH: 1.6, FOOD_DELI: 1.3, BAKERY: 1.2, RESTAURANT: 1.4, OUTDOOR: 1.2, CULTURE: 1.5, WOMEN_CASUAL: 0.6, ACCESSORIES: 0.6, KIDS: 0.5, CAFE: 0.8, FOOD_COURT: 0.7}
+      tier:
+        VVIP: {LUXURY: 3.0, JEWELRY_WATCH: 2.5, GLOBAL_FASHION: 1.8, FOOD_COURT: 0.4, FOOD_DELI: 0.7, CAFE: 0.7}
+        VIP: {LUXURY: 2.2, JEWELRY_WATCH: 1.9, GLOBAL_FASHION: 1.5, FOOD_COURT: 0.5}
+        GOLD: {LUXURY: 1.4, JEWELRY_WATCH: 1.3, GLOBAL_FASHION: 1.2}
+        MEMBER: {}
+        ANON: {FOOD_COURT: 1.2, CAFE: 1.2, LUXURY: 0.8}
+
+payment:
+  mix:
+    value: {CARD: 0.70, STORE_CARD: 0.12, MOBILE_PAY: 0.11, CASH: 0.04, GIFT_VOUCHER: 0.03}
+    source: "assumption: payment mix for anonymous/MEMBER/GOLD receipts"
+  high_tier_mix:
+    value: {CARD: 0.55, STORE_CARD: 0.32, MOBILE_PAY: 0.07, CASH: 0.02, GIFT_VOUCHER: 0.04}
+    source: "assumption: VIP/VVIP use the store card more"
+
+pos:
+  terminals_by_area:
+    value: [[60, 1], [150, 2], [300, 3], [100000, 4]]
+    source: "assumption: [max unit area m2, terminals]; a brand keeps its terminals when it moves"
+
+footfall:
+  conversion_rate:
+    value: 0.25
+    source: "assumption: purchases per zone visit; footfall_zone_hourly is derived from simulated purchases, not observed"
+
+space:
+  exposure_amplitude:
+    value: 1.5
+    source: "planted: sales weight x (1 + A*exp(-d/L)); d = Euclidean distance (m) from unit centroid to the nearest escalator footprint on the same floor (proxy for walking exposure)"
+  exposure_length_m: {value: 15.0, source: "planted: decay length L of the exposure proxy"}
+  near_escalator_m: {value: 11.0, source: "assumption: 'near escalator' threshold used to report confound-trap pairs"}
+  attractiveness_exponent: {value: 1.0, source: "assumption: sales weight x brand attractiveness (brands.csv)"}
+  price_tier_multiplier: {value: {1: 0.8, 2: 1.0, 3: 1.25}, source: "assumption: ticket multiplier by brand price tier (normalized to mean 1 within each category)"}
+
+planted:
+  a_segment_cross_shopping:
+    focal_segment: {value: {gender: F, age_band: 40s, tiers: [VIP, VVIP]}, source: "planted"}
+    combo_trip_prob: {value: 0.14, source: "planted: share of focal-segment trips that combine 1F cosmetics with 1F/2F global fashion or luxury"}
+    focal_base_damping: {value: 0.06, source: "planted: focal-segment preference for COSMETICS/GLOBAL_FASHION/LUXURY outside combo trips"}
+    focal_brand_share: {value: 0.35, source: "planted: share of combo-trip cosmetics purchases at the focal cosmetics brand"}
+    partner_share: {value: 0.5, source: "planted: share of combo-trip fashion/luxury purchases at the focal brand's partner brands"}
+    n_partners: {value: 3, source: "planted"}
+  b_cafe_adjacency:
+    fashion_categories:
+      value: [GLOBAL_FASHION, WOMEN_CONTEMPORARY, WOMEN_CASUAL, LINGERIE, MEN_FORMAL, MEN_CASUAL]
+      source: "planted"
+    traffic_uplift: {value: 0.095, source: "planted: unit weight uplift of fashion units sharing a wall with a CAFE unit"}
+    aov_uplift: {value: 0.05, source: "planted: receipt amount uplift (total sales uplift ~ +15%)"}
+    min_shared_m: {value: 0.5, source: "planted: adjacency = boundaries within 0.05 m sharing >= 0.5 m"}
+  d_fountain_shower:
+    fountain_link_prob: {value: 0.75, source: "planted: after a B1 food purchase, next purchase follows the fountain link"}
+    fountain_cosmetics_share: {value: 0.85, source: "planted: fountain link goes to 1F COSMETICS"}
+    shower_restaurant_first_prob: {value: 0.8, source: "planted: trips with an 8F restaurant purchase eat first, then shop downward"}
+  e_time_patterns:
+    weekday_lunch: {value: {start: "11:30", end: "13:30", fnb_multiplier: 3.5}, source: "planted"}
+    weekend_kids_sports: {value: {start: "14:00", end: "18:00", multiplier: 1.6, categories: [KIDS, SPORTS]}, source: "planted"}
+    weekday_luxury_evening: {value: {start: "18:00", end: "20:00", aov_multiplier: 1.35}, source: "planted"}
+    dinner_restaurant_multiplier: {value: 1.6, source: "assumption: 18:00-20:30 restaurant preference"}
+  f_low_efficiency:
+    zone: {value: {floor: 4F, band: E}, source: "planted: 4F east band, far from escalators (no extra penalty beyond exposure and its weak brands)"}
+  h_md_relayout:
+    moved_brand_uplift: {value: 0.30, source: "planted: R1 3F brand moved to the ESC-A front gains +30% share of 3F women-contemporary sales"}
+    floor3_cross_category_link_prob:
+      value: {R0: 0.06, R1: 0.06, R2: 0.20}
+      source: "planted: after a 3F women-contemporary purchase, chance of an ACCESSORIES/CAFE purchase on 3F (more category mixing after R2)"

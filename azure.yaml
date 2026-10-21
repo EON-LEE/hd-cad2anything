@@ -1,0 +1,8 @@
+# Azure Developer CLI project. Infrastructure can also be deployed with `az deployment sub create`
+# (see infra/README.md). Application services are added as they are implemented.
+name: cad2anything
+metadata:
+  template: cad2anything@0.1.0
+infra:
+  provider: bicep
+  path: infra

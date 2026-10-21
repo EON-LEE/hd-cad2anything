@@ -1,0 +1,434 @@
+{
+ "generator": "cad2anything.mockgen.business",
+ "seed": 42,
+ "scale": 0.02,
+ "weight": 50.0,
+ "period": {
+  "start": "2024-10-01",
+  "end": "2026-09-30"
+ },
+ "definitions": {
+  "customer_day": "member purchases grouped by customer_id and date (returns excluded)",
+  "exposure_proxy": "Euclidean distance from unit centroid to the nearest escalator footprint on the same floor (m); not a walking distance",
+  "adjacency": "unit boundaries within 0.05 m sharing >= 0.5 m (same as a shared wall)",
+  "pos_mapping": "pos_terminals valid_from/valid_to are inclusive dates; a brand keeps its pos_ids when it moves"
+ },
+ "effects": [
+  {
+   "effect_id": "a_segment_cross_shopping",
+   "title": "세그먼트 교차구매(40대 VIP·VVIP 여성: 1F 화장품 ↔ 1F/2F 해외패션·명품)",
+   "parameters": {
+    "focal_segment": {
+     "gender": "F",
+     "age_band": "40s",
+     "tiers": [
+      "VIP",
+      "VVIP"
+     ]
+    },
+    "combo_trip_prob": 0.14,
+    "focal_base_damping": 0.06,
+    "focal_brand_share": 0.35,
+    "partner_share": 0.5,
+    "n_partners": 3,
+    "focal_brand": {
+     "brand_id": "BR0053",
+     "brand_name": "Gavix Beauty"
+    },
+    "partner_brands": [
+     {
+      "brand_id": "BR0014",
+      "brand_name": "Maison Ilveth"
+     },
+     {
+      "brand_id": "BR0112",
+      "brand_name": "Orlier"
+     },
+     {
+      "brand_id": "BR0118",
+      "brand_name": "Vesen Tovane"
+     }
+    ]
+   },
+   "expected_signal": "member customer-day lift(COSMETICS@1F, GLOBAL_FASHION|LUXURY@1F/2F) >= 2.5 in the focal segment, about 1.0-1.3 elsewhere; the focal brand's top co-purchased fashion/luxury brands are the partner brands",
+   "observed": {
+    "unit": "member customer-day (customer_id + date)",
+    "lift_focal": 3.07,
+    "lift_others": 1.19,
+    "focal_customer_days": 8150,
+    "lift_by_segment": {
+     "F|20s|other tiers": 1.21,
+     "F|20s|VIP+": 1.13,
+     "F|30s|other tiers": 1.21,
+     "F|30s|VIP+": 1.15,
+     "F|40s|other tiers": 1.06,
+     "F|40s|VIP+": 3.07,
+     "F|50s|other tiers": 1.12,
+     "F|50s|VIP+": 1.09,
+     "F|60s+|other tiers": 1.1,
+     "F|60s+|VIP+": 1.17,
+     "M|20s|other tiers": 1.26,
+     "M|20s|VIP+": 1.31,
+     "M|30s|other tiers": 1.19,
+     "M|30s|VIP+": 1.2,
+     "M|40s|other tiers": 1.23,
+     "M|40s|VIP+": 1.21,
+     "M|50s|other tiers": 1.21,
+     "M|50s|VIP+": 1.13,
+     "M|60s+|other tiers": 1.14,
+     "M|60s+|VIP+": 1.12
+    },
+    "focal_brand_top_partners": {
+     "BR0112": 83,
+     "BR0014": 78,
+     "BR0118": 63
+    }
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "b_cafe_adjacency_spillover",
+   "title": "카페 인접 패션 매장 매출·객단가 상승(진짜 인접 효과)",
+   "parameters": {
+    "fashion_categories": [
+     "GLOBAL_FASHION",
+     "WOMEN_CONTEMPORARY",
+     "WOMEN_CASUAL",
+     "LINGERIE",
+     "MEN_FORMAL",
+     "MEN_CASUAL"
+    ],
+    "traffic_uplift": 0.095,
+    "aov_uplift": 0.05,
+    "min_shared_m": 0.5
+   },
+   "expected_signal": "fashion units sharing a wall with a CAFE unit: about +15% sales (traffic x1.095, AOV x1.05); identifiable as a difference-in-differences when the neighbor becomes a cafe",
+   "observed": {
+    "did": [
+     {
+      "unit_code": "3F-S02",
+      "post_revisions": [
+       "R2"
+      ],
+      "sales_ratio_treated": 1.224,
+      "sales_ratio_controls_median": 1.149,
+      "did_uplift": 0.066,
+      "aov_ratio": 1.021,
+      "receipts_pre_post": [
+       208,
+       294
+      ],
+      "approx_se_log": 0.101,
+      "within_2se_of_planted": true,
+      "n_controls": 27
+     }
+    ]
+   },
+   "recovered": true,
+   "note": "현재 도면에서 카페와 벽을 공유하는 패션 매장은 R2의 3F-S02(이웃 3F-S01이 카페로 전환)뿐이다."
+  },
+  {
+   "effect_id": "c_confound_exposure_trap",
+   "title": "함정: 에스컬레이터 노출이 만든 가짜 근접 효과",
+   "parameters": {
+    "exposure_amplitude": 1.5,
+    "exposure_length_m": 15.0,
+    "near_escalator_m": 11.0,
+    "attractiveness_exponent": 1.0,
+    "price_tier_multiplier": {
+     "1": 0.8,
+     "2": 1.0,
+     "3": 1.25
+    },
+    "exposure_definition": "1 + A*exp(-d/L), d = Euclidean distance (m) from unit centroid to the nearest escalator footprint on the same floor"
+   },
+   "expected_signal": "categories whose units both sit near escalators (not adjacent) look associated (sales/m2 rises as distance to the other category falls) but the partial correlation given exposure is ~0; true spillover = 0",
+   "observed": {
+    "pairs": [
+     {
+      "floor": "3F",
+      "category_a": "WOMEN_CONTEMPORARY",
+      "category_b": "CAFE",
+      "near_units_a": [
+       "3F-C06"
+      ],
+      "near_units_b": [
+       "3F-C17",
+       "3F-C18"
+      ],
+      "adjacent": false,
+      "true_spillover": 0.0,
+      "naive_corr_sales_per_m2_vs_distance_to_b": -0.499,
+      "partial_corr_given_exposure": -0.188,
+      "is_trap": true,
+      "n_units_a": 34
+     },
+     {
+      "floor": "6F",
+      "category_a": "KIDS",
+      "category_b": "SPORTS",
+      "near_units_a": [
+       "6F-C11",
+       "6F-C12"
+      ],
+      "near_units_b": [
+       "6F-C03",
+       "6F-C04"
+      ],
+      "adjacent": false,
+      "true_spillover": 0.0,
+      "naive_corr_sales_per_m2_vs_distance_to_b": 0.387,
+      "partial_corr_given_exposure": 0.307,
+      "is_trap": false,
+      "n_units_a": 14
+     },
+     {
+      "floor": "6F",
+      "category_a": "SPORTS",
+      "category_b": "KIDS",
+      "near_units_a": [
+       "6F-C03",
+       "6F-C04"
+      ],
+      "near_units_b": [
+       "6F-C11",
+       "6F-C12"
+      ],
+      "adjacent": false,
+      "true_spillover": 0.0,
+      "naive_corr_sales_per_m2_vs_distance_to_b": -0.283,
+      "partial_corr_given_exposure": -0.073,
+      "is_trap": true,
+      "n_units_a": 11
+     },
+     {
+      "floor": "B1",
+      "category_a": "BAKERY",
+      "category_b": "FOOD_COURT",
+      "near_units_a": [
+       "B1-C12",
+       "B1-C13",
+       "B1-C14"
+      ],
+      "near_units_b": [
+       "B1-C27",
+       "B1-C28",
+       "B1-C29",
+       "B1-C30",
+       "B1-C31",
+       "B1-C37"
+      ],
+      "adjacent": false,
+      "true_spillover": 0.0,
+      "naive_corr_sales_per_m2_vs_distance_to_b": -0.822,
+      "partial_corr_given_exposure": 0.498,
+      "is_trap": true,
+      "n_units_a": 14
+     },
+     {
+      "floor": "B1",
+      "category_a": "FOOD_COURT",
+      "category_b": "BAKERY",
+      "near_units_a": [
+       "B1-C27",
+       "B1-C28",
+       "B1-C29",
+       "B1-C30",
+       "B1-C31",
+       "B1-C37"
+      ],
+      "near_units_b": [
+       "B1-C12",
+       "B1-C13",
+       "B1-C14"
+      ],
+      "adjacent": false,
+      "true_spillover": 0.0,
+      "naive_corr_sales_per_m2_vs_distance_to_b": -0.426,
+      "partial_corr_given_exposure": 0.244,
+      "is_trap": true,
+      "n_units_a": 22
+     }
+    ]
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "d_fountain_shower",
+   "title": "분수·샤워 효과(B1 식품 → 1F 화장품, 8F 식당 → 하층 쇼핑)",
+   "parameters": {
+    "fountain_link_prob": 0.75,
+    "fountain_cosmetics_share": 0.85,
+    "shower_restaurant_first_prob": 0.8
+   },
+   "expected_signal": ">= 40% of B1-food member customer-days with another-floor purchase include 1F COSMETICS; >= 60% of 8F-restaurant customer-days with other-floor purchases buy there after the 8F purchase",
+   "observed": {
+    "fountain_share_cosmetics": 0.603,
+    "fountain_customer_days": 51638,
+    "shower_share_after_8f": 0.828,
+    "shower_customer_days": 9671
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "e_time_patterns",
+   "title": "시간 패턴(평일 점심 F&B, 주말 오후 아동·스포츠, 평일 저녁 명품 객단가)",
+   "parameters": {
+    "weekday_lunch": {
+     "start": "11:30",
+     "end": "13:30",
+     "fnb_multiplier": 3.5
+    },
+    "weekend_kids_sports": {
+     "start": "14:00",
+     "end": "18:00",
+     "multiplier": 1.6,
+     "categories": [
+      "KIDS",
+      "SPORTS"
+     ]
+    },
+    "weekday_luxury_evening": {
+     "start": "18:00",
+     "end": "20:00",
+     "aov_multiplier": 1.35
+    },
+    "dinner_restaurant_multiplier": 1.6
+   },
+   "expected_signal": "weekday 11:30-13:30 share of F&B receipts >> non-F&B; weekend 14:00-18:00 share of KIDS/SPORTS receipts > others; weekday 18:00-20:00 LUXURY AOV ~1.35x",
+   "observed": {
+    "weekday_lunch_share_fnb": 0.297,
+    "weekday_lunch_share_non_fnb": 0.171,
+    "weekend_afternoon_share_kids_sports": 0.603,
+    "weekend_afternoon_share_others": 0.512,
+    "weekday_luxury_aov_evening_ratio": 1.349
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "f_low_efficiency_zone",
+   "title": "저효율 존: 4F 동측 밴드(4F-E01..)",
+   "parameters": {
+    "zone": {
+     "floor": "4F",
+     "band": "E"
+    },
+    "cause": "low exposure (far from escalators) plus weak brands; no extra hidden penalty"
+   },
+   "expected_signal": "zone units sit in the bottom decile of floor sales per m2 (median <= floor P10); after controlling for exposure and category the mean residual is ~0",
+   "observed": {
+    "units": [
+     "4F-E01",
+     "4F-E02",
+     "4F-E03",
+     "4F-E04",
+     "4F-E05",
+     "4F-E06"
+    ],
+    "percentiles": {
+     "4F-E01": 0.118,
+     "4F-E02": 0.039,
+     "4F-E03": 0.098,
+     "4F-E04": 0.059,
+     "4F-E05": 0.02,
+     "4F-E06": 0.196
+    },
+    "share_in_bottom_decile": 0.833,
+    "median_spm_band_vs_floor_p10": 0.932,
+    "floor_units": 51,
+    "band_mean_residual_after_exposure_and_category": 0.051
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "g_space_elasticity",
+   "title": "면적 탄력성(매출 ∝ 면적^β, catalog space_beta)",
+   "parameters": {
+    "LUXURY": 0.18,
+    "JEWELRY_WATCH": 0.15,
+    "COSMETICS": 0.35,
+    "GLOBAL_FASHION": 0.2,
+    "ACCESSORIES": 0.08,
+    "WOMEN_CONTEMPORARY": 0.22,
+    "WOMEN_CASUAL": 0.2,
+    "LINGERIE": 0.15,
+    "MEN_FORMAL": 0.18,
+    "MEN_CASUAL": 0.2,
+    "SPORTS": 0.22,
+    "OUTDOOR": 0.2,
+    "KIDS": 0.2,
+    "LIVING": 0.25,
+    "ELECTRONICS": 0.18,
+    "FOOD_FRESH": 0.2,
+    "FOOD_DELI": 0.2,
+    "BAKERY": 0.2,
+    "WINE": 0.15,
+    "FOOD_COURT": 0.1,
+    "CAFE": 0.1,
+    "RESTAURANT": 0.12,
+    "CULTURE": 0.05
+   },
+   "expected_signal": "OLS log(sales/day) ~ log(area) + log(exposure) + log(attractiveness) + floor FE recovers beta: COSMETICS 0.35, ACCESSORIES 0.08 (planted focal/partner brands excluded)",
+   "observed": {
+    "COSMETICS": {
+     "beta_hat": 0.319,
+     "se": 0.044,
+     "beta_true": 0.35,
+     "n_unit_revisions": 123
+    },
+    "ACCESSORIES": {
+     "beta_hat": 0.04,
+     "se": 0.097,
+     "beta_true": 0.08,
+     "n_unit_revisions": 103
+    }
+   },
+   "recovered": true
+  },
+  {
+   "effect_id": "h_md_relayout",
+   "title": "MD 개편 효과(R1 에스컬레이터 정면 이동, R2 3F 카테고리 믹스)",
+   "parameters": {
+    "moved_brand_uplift": 0.3,
+    "floor3_cross_category_link_prob": {
+     "R0": 0.06,
+     "R1": 0.06,
+     "R2": 0.2
+    }
+   },
+   "expected_signal": "the R1 relocated 3F brand gains +30% (planted; +25-35% band) share of its floor-category receipts vs R0, seasonality-free (expected shares from the planted weights are listed); at scale 0.02 a single brand has ~+/-15% sampling error (approx_se_log) and sales-based ratios are noisier because receipt amounts are heavy-tailed. The share of 3F member customer-days with >= 2 categories on 3F rises in R2",
+   "observed": {
+    "moved_brand": {
+     "brand_id": "BR0218",
+     "unit_from": "3F-W04",
+     "unit_to": "3F-C05",
+     "expected_receipt_share_of_category": {
+      "R0": 0.0195,
+      "R1": 0.0253,
+      "R2": 0.0271
+     },
+     "observed_receipt_share_of_category": {
+      "R0": 0.0162,
+      "R1": 0.0279,
+      "R2": 0.0267
+     },
+     "receipt_share_ratio_r1_vs_r0": 1.723,
+     "sales_share_ratio_r1_vs_r0": 1.883,
+     "receipts": {
+      "R0": 67,
+      "R1": 129,
+      "R2": 290
+     },
+     "approx_se_log": 0.149,
+     "within_2se_of_planted": true
+    },
+    "floor3_multi_category_share": {
+     "R0": 0.0566,
+     "R1": 0.056,
+     "R2": 0.0871
+    }
+   },
+   "recovered": true
+  }
+ ]
+}

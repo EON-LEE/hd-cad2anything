@@ -1,0 +1,12 @@
+name: floor_directory_svg
+version: "1.0"
+title_ko: 층별 안내도
+description: 층마다 매장, 카테고리, 수직동선, 편의시설을 표시한 안내도 SVG를 만든다.
+inputs:
+  entity_kinds: [exterior, unit, walkway, vertical_link, amenity, opening]
+  data: []
+outputs: [svg]
+triggers:
+  change_types: [add, remove, move, reassign, split, merge, resize, walkway_change]
+risk_tier: low
+approval_mode: post_publish
