@@ -30,6 +30,7 @@ package-lock.json
 
 # Generated data: regenerate with scripts; only small curated samples are committed
 data/generated/
+data/workspace/
 data/local/*
 !data/local/README.md
 
