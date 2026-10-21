@@ -65,7 +65,7 @@ def test_runtime_handles_mcp_ui_and_specialist_calls():
                         "type": "function_call",
                         "call_id": "f2",
                         "name": "consult_specialist",
-                        "arguments": '{"agent":"researcher","request":"층 MD 트렌드"}',
+                        "arguments": '{"agent":"researcher","request":"최근 국내 백화점 층별 MD 트렌드를 조사해줘"}',
                     },
                 ]
             },
@@ -109,7 +109,7 @@ def test_specialist_tool_calls_are_streamed_under_the_consult_call():
                         "type": "function_call",
                         "call_id": "c1",
                         "name": "consult_specialist",
-                        "arguments": '{"agent":"space_productivity_analyst","request":"4층 진단"}',
+                        "arguments": '{"agent":"space_productivity_analyst","request":"R2 4F 저효율 매장의 원인을 진단해줘"}',
                     }
                 ]
             },
@@ -151,6 +151,73 @@ def test_ui_clear_all_resets_overlays():
     result = UiActionHandler().handle("ui_clear", {"what": "all"}, {})
     paths = [patch["path"] for patch in result.patches]
     assert paths == ["/heatmap", "/highlights", "/edges", "/focus"]
+
+
+def test_table_panels_are_normalized_or_rejected():
+    handler = UiActionHandler()
+    as_objects = {"title": "저효율", "rows": [{"매장": "4F-E01", "㎡당 매출": 100}, {"매장": "4F-E02"}]}
+    result = handler.handle("ui_show_panel", {"type": "table", "payload": as_objects}, {})
+    panel = result.patches[0]["value"]["payload"]
+    assert panel["columns"] == ["매장", "㎡당 매출"] and panel["rows"] == [["4F-E01", 100], ["4F-E02", None]]
+    assert json.loads(result.output) == {"ok": True, "panel": "table", "rows": 2}
+
+    columnar = {"data": {"층": ["3F", "4F"], "매출": [1, 2]}}
+    panel = handler.handle("ui_show_panel", {"type": "table", "payload": columnar}, {}).patches[0]["value"]
+    assert panel["payload"]["columns"] == ["층", "매출"] and panel["payload"]["rows"] == [
+        ["3F", 1],
+        ["4F", 2],
+    ]
+
+    empty = handler.handle("ui_show_panel", {"type": "table", "payload": {"title": "빈 표"}}, {})
+    assert not empty.patches and json.loads(empty.output)["ok"] is False
+
+    changes = handler.handle(
+        "ui_show_panel", {"type": "changes", "payload": {"rev_from": "R0", "rev_to": "R1"}}, {}
+    )
+    assert changes.patches[0]["value"] == {"type": "changes", "payload": {"rev_from": "R0", "rev_to": "R1"}}
+
+
+def test_heatmaps_carry_legend_hints_for_non_scalar_metrics():
+    handler = UiActionHandler(heatmap_provider=lambda metric, rev, floor: {"4F-E01": 1.0, "4F-N02": 0.0})
+    result = handler.handle("ui_show_heatmap", {"metric": "low_efficiency", "rev": "R2", "floor": "4F"}, {})
+    heatmap = next(p["value"] for p in result.patches if p["path"] == "/heatmap")
+    assert heatmap["legend"]["binary"] is True and json.loads(result.output)["flagged_units"] == ["4F-E01"]
+    sales = handler.handle("ui_show_heatmap", {"metric": "sales_per_m2", "rev": "R2", "floor": "4F"}, {})
+    assert "legend" not in next(p["value"] for p in sales.patches if p["path"] == "/heatmap")
+
+
+def test_consult_rejects_empty_requests_and_reuses_repeated_ones():
+    consult = {
+        "type": "function_call",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"space_productivity_analyst","request":"R2 4F 저효율 매장의 원인을 진단해줘"}',
+    }
+    junk = {
+        "type": "function_call",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"아니오"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [
+            {"output": [consult | {"call_id": "a"}, consult | {"call_id": "b"}, junk | {"call_id": "c"}]},
+            {"output": [_message("완료")]},
+        ],
+        "space-productivity-analyst": [{"output_text": "진단 결과"}],
+    }
+    client = FakeClient(scripted)
+    events = list(AgentRuntime(client, id_factory=lambda: "id").run("4층 진단", {}))
+
+    specialist_calls = [
+        c
+        for c in client.responses.calls
+        if c["extra_body"]["agent_reference"]["name"] != "atlas-orchestrator"
+    ]
+    assert len(specialist_calls) == 1
+    outputs = {item["call_id"]: item["output"] for item in client.responses.calls[-1]["input"]}
+    assert outputs["a"] == outputs["b"] == "진단 결과"
+    assert json.loads(outputs["c"])["ok"] is False
+    summaries = {e["tool_call_id"]: e["summary"] for e in events if e["type"] == "TOOL_CALL_END"}
+    assert "재사용" in summaries["b"] and "상담하지 않음" in summaries["c"]
 
 
 def _documented_mcp_tools() -> set[str]:

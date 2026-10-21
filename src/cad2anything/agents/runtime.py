@@ -20,6 +20,12 @@ TEXT_CHUNK = 80
 # Token-rate limits (429) are retried with the SDK's backoff, which honors retry-after headers.
 CLIENT_MAX_RETRIES = 6
 CLIENT_TIMEOUT_S = 180
+# Specialist requests shorter than this (for example "아니오") carry no task and are rejected unsent.
+MIN_CONSULT_REQUEST = 10
+CONSULT_REQUEST_ERROR = (
+    "request가 비어 있거나 너무 짧아 전문 에이전트를 호출하지 않았습니다. 개정, 층, 대상, 원하는 결과를 담은 "
+    "작업 지시 문장을 쓰세요. 단순 조회는 MCP 도구로 직접 처리하세요."
+)
 # Tool calls that Foundry runs server-side; the value names tools whose items carry no `name`.
 HOSTED_TOOL_ITEMS = {
     "mcp_call": None,
@@ -133,6 +139,7 @@ class AgentRuntime:
                 conversation=conversation_id, input=prompt, extra_body=agent_reference(self.orchestrator)
             )
             texts: list[str] = []
+            consults: dict[tuple[str, str], str] = {}
             for _ in range(MAX_ROUNDS):
                 outputs: list[dict[str, Any]] = []
                 for item in _get(response, "output", []) or []:
@@ -149,7 +156,7 @@ class AgentRuntime:
                         yield {"type": "TOOL_CALL_END", "tool_call_id": call_id, "summary": hosted["summary"]}
                     elif item_type == "function_call":
                         events: list[dict[str, Any]] = []
-                        outputs.append(self._handle_function(item, ui_state, events))
+                        outputs.append(self._handle_function(item, ui_state, events, consults))
                         yield from events
                     elif item_type == "message":
                         text = _message_text(item)
@@ -180,31 +187,46 @@ class AgentRuntime:
             raise
 
     def _handle_function(
-        self, item: Any, ui_state: dict[str, Any], events: list[dict[str, Any]]
+        self,
+        item: Any,
+        ui_state: dict[str, Any],
+        events: list[dict[str, Any]],
+        consults: dict[tuple[str, str], str] | None = None,
     ) -> dict[str, Any]:
         name = _get(item, "name")
         call_id = _get(item, "call_id")
         args = _safe_json(_get(item, "arguments"))
         events.append({"type": "TOOL_CALL_START", "tool_call_id": call_id, "tool_name": name, "args": args})
         if name == "consult_specialist":
-            agent_key = args.get("agent", "")
-            output, nested = self.consult(agent_key, args.get("request", ""))
-            for call in nested:
-                nested_id = call["id"] or self._new_id()
-                events.append(
-                    {
-                        "type": "TOOL_CALL_START",
-                        "tool_call_id": nested_id,
-                        "tool_name": call["tool_name"],
-                        "args": call["args"],
-                        "parent_tool_call_id": call_id,
-                        "agent": self.specialists.get(agent_key, agent_key),
-                    }
-                )
-                events.append(
-                    {"type": "TOOL_CALL_END", "tool_call_id": nested_id, "summary": call["summary"]}
-                )
-            summary = f"{agent_key} 응답 {len(output)}자, 도구 호출 {len(nested)}회"
+            agent_key = str(args.get("agent", ""))
+            request = str(args.get("request", "")).strip()
+            key = (agent_key, request)
+            if len(request) < MIN_CONSULT_REQUEST:
+                output = json.dumps({"ok": False, "error": CONSULT_REQUEST_ERROR}, ensure_ascii=False)
+                summary = "요청 내용이 없어 상담하지 않음"
+            elif consults is not None and key in consults:
+                output = consults[key]
+                summary = f"{agent_key} 같은 요청의 앞선 응답 재사용"
+            else:
+                output, nested = self.consult(agent_key, request)
+                if consults is not None:
+                    consults[key] = output
+                for call in nested:
+                    nested_id = call["id"] or self._new_id()
+                    events.append(
+                        {
+                            "type": "TOOL_CALL_START",
+                            "tool_call_id": nested_id,
+                            "tool_name": call["tool_name"],
+                            "args": call["args"],
+                            "parent_tool_call_id": call_id,
+                            "agent": self.specialists.get(agent_key, agent_key),
+                        }
+                    )
+                    events.append(
+                        {"type": "TOOL_CALL_END", "tool_call_id": nested_id, "summary": call["summary"]}
+                    )
+                summary = f"{agent_key} 응답 {len(output)}자, 도구 호출 {len(nested)}회"
         else:
             result = self.ui_handler.handle(name, args, ui_state)
             output = result.output

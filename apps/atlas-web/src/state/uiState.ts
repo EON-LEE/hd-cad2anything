@@ -1,5 +1,5 @@
 // UI state model (the target of STATE_DELTA patches): defaults and defensive normalization.
-import type { GraphEdge, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
+import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
 
 export const DEFAULT_LAYERS: LayerToggles = { fixtures: false, walkways: true, labels: true }
 
@@ -90,7 +90,13 @@ function normalizeHeatmap(value: unknown): UiState['heatmap'] {
       if (typeof v === 'number' && Number.isFinite(v)) values[code] = v
     }
   }
-  return { ...value, metric: String(value.metric ?? ''), label: String(value.label ?? value.metric ?? ''), values }
+  return {
+    ...value,
+    metric: String(value.metric ?? ''),
+    label: String(value.label ?? value.metric ?? ''),
+    values,
+    legend: isRecord(value.legend) ? (value.legend as HeatmapLegend) : undefined,
+  }
 }
 
 function normalizeFocus(value: unknown): UiState['focus'] {

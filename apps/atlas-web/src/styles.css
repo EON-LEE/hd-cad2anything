@@ -741,6 +741,60 @@ th {
   padding-left: 18px;
 }
 
+.msg.assistant ol {
+  margin: 4px 0 6px;
+  padding-left: 20px;
+}
+
+.msg.assistant .rich-heading {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.msg.assistant .rich-heading:first-child {
+  margin-top: 0;
+}
+
+.msg.assistant hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 8px 0;
+}
+
+.msg.assistant code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.rich-table {
+  overflow-x: auto;
+  margin: 4px 0 8px;
+}
+
+.rich-table table {
+  border-collapse: collapse;
+  font-size: 12px;
+  background: var(--panel);
+}
+
+.rich-table th,
+.rich-table td {
+  border: 1px solid var(--line);
+  padding: 3px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.rich-table th {
+  background: #e9edf2;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .msg.error {
   background: #fde8e8;
   color: var(--danger);
