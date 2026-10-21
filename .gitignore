@@ -42,3 +42,4 @@ data/local/*
 Thumbs.db
 .vscode/
 .idea/
+.playwright-mcp/
