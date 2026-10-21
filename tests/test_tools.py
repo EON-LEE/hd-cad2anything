@@ -77,6 +77,8 @@ def test_adhoc_table_groups_and_proposes_spec(toolkit: Toolkit):
     assert result["status"] == "draft" and "proposed_spec.yaml" in result["files"]
     assert result["columns"] == ["floor", "count", "area_m2"]
     assert len(result["preview"]) == 9
+    with pytest.raises(ToolError, match="사용 가능한 필드"):
+        toolkit.render_adhoc_table("R2", "zone", ["floor", "zone_label"], "구역표")
 
 
 def test_hypothetical_move_and_swap(toolkit: Toolkit):

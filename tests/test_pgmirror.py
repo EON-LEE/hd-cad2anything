@@ -24,6 +24,18 @@ class MemoryMirror(PgMirror):
         self.upserts.append(name)
         self.rows[name] = data
 
+    def delete(self, name):
+        del self.rows[name]
+
+
+def test_prune_removes_files_missing_locally(tmp_path):
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "R0.json").write_text("{}", encoding="utf-8")
+    mirror = MemoryMirror()
+    mirror.rows = {"models/R0.json": b"{}", "models/H2.json": b"{}", "other/keep.txt": b"x"}
+    assert mirror.prune(tmp_path) == 1
+    assert sorted(mirror.rows) == ["models/R0.json", "other/keep.txt"]
+
 
 def test_push_tree_uploads_only_changed_files_within_prefixes(tmp_path):
     (tmp_path / "models").mkdir()

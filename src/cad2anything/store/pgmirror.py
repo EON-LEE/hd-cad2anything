@@ -126,6 +126,20 @@ class PgMirror:
             count += 1
         return count
 
+    def delete(self, name: str) -> None:
+        self._execute("DELETE FROM workspace_file WHERE path = %s", (name,))
+
+    def prune(self, root: Path, prefixes: tuple[str, ...] = DEFAULT_PREFIXES) -> int:
+        """Delete mirrored files that no longer exist under ``root`` (for example after a demo reset)."""
+        stale = [
+            name
+            for name in self.remote_index()
+            if name.startswith(prefixes) and not (Path(root) / name).is_file()
+        ]
+        for name in stale:
+            self.delete(name)
+        return len(stale)
+
 
 def mirror_from_env() -> Any | None:
     """Pick the workspace mirror: WORKSPACE_MIRROR=postgres|blob|none, else Blob when configured."""

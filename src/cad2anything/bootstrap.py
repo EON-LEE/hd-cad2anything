@@ -112,7 +112,13 @@ def main() -> None:
         action="store_true",
         help="upload the workspace to the configured mirror (WORKSPACE_MIRROR=postgres|blob) afterwards",
     )
+    parser.add_argument("--clean", action="store_true", help="delete the workspace root before building")
+    parser.add_argument(
+        "--prune", action="store_true", help="with --push, delete mirrored files missing from the workspace"
+    )
     args = parser.parse_args()
+    if args.clean and args.root.exists():
+        shutil.rmtree(args.root)
     summary = bootstrap(args.source, args.root, args.mode, args.variant)
     if args.push:
         from cad2anything.store.pgmirror import mirror_from_env
@@ -121,6 +127,8 @@ def main() -> None:
         if mirror is None:
             raise SystemExit("No workspace mirror is configured (set WORKSPACE_MIRROR and its settings)")
         summary["uploaded"] = mirror.push_tree(args.root)
+        if args.prune:
+            summary["pruned"] = mirror.prune(args.root)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

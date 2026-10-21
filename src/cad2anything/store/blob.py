@@ -61,3 +61,13 @@ class BlobMirror:
                     handle.write(self.container.download_blob(blob.name).readall())
                 count += 1
         return count
+
+    def prune(self, root: Path, prefixes: tuple[str, ...] = DEFAULT_PREFIXES) -> int:
+        """Delete blobs that no longer exist under ``root``."""
+        count = 0
+        for prefix in prefixes:
+            for blob in self.container.list_blobs(name_starts_with=prefix):
+                if not (Path(root) / blob.name).is_file():
+                    self.container.delete_blob(blob.name)
+                    count += 1
+        return count

@@ -102,7 +102,28 @@
 | 앱 로그에 `/mcp` 401 응답이 있다. | 앱 비밀과 Foundry 프로젝트 연결의 MCP 키 | `infra/services.bicep`을 다시 배포한다. 이 배포는 두 값을 함께 바꾼다. |
 | 히트맵이 비어 있다. | 개정과 층, 지표 | 가상 개정에서는 `sales_per_m2`와 `sales_krw`만 기대 매출 추정치로 표시된다. |
 
-## 6. 비용 통제와 정리
+## 6. 데모 초기화
+
+데모 중 만든 가상 개정(H2 이후)과 산출물 승인 상태는 미러에 저장되어 앱을 다시 시작해도 남는다. 다음 데모를 처음 상태에서 시작하려면 아래 절차를 실행한다.
+
+> **주의:** 이 절차는 미러에서 기준 데이터에 없는 파일을 모두 삭제한다. 보존할 가상 개정이나 산출물이 있으면 먼저 내려받는다.
+
+1. 3절 3단계의 미러 설정을 지정한다.
+2. 작업공간을 처음부터 다시 만들고, 미러에 올리고, 기준 데이터에 없는 미러 파일을 삭제한다.
+
+   ```powershell
+   uv run --no-sync python -m cad2anything.bootstrap --mode parse --clean --push --prune
+   ```
+
+3. Container App 리비전을 다시 시작한다. 새 컨테이너가 미러에서 작업공간을 내려받는다.
+
+   ```powershell
+   az containerapp revision restart --resource-group <리소스 그룹> --name <Container App 이름> --revision <활성 리비전 이름>
+   ```
+
+4. `GET <atlas-url>/healthz`의 `revisions`가 `["R0","R1","R2","H1"]`인지 확인한다.
+
+## 7. 비용 통제와 정리
 
 **상시 비용이 드는 리소스:** Container App(복제본 1개 상시 실행), PostgreSQL(B1ms), Container Registry(Basic), Log Analytics, Storage, Key Vault. 모델 배포(GlobalStandard)는 사용한 토큰만큼 과금된다.
 
@@ -124,7 +145,7 @@
 az group delete --name <리소스 그룹>
 ```
 
-## 7. 알려진 한계
+## 8. 알려진 한계
 
 - 실제 도면과 거래 데이터로 검증하지 않았다. 고객 도면으로 파싱 규칙을 확인해야 한다.
 - DXF만 지원한다. DWG 변환 경로와 외부 DWG 테스트 도면은 라이선스를 확인한 뒤 결정한다.

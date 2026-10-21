@@ -438,8 +438,16 @@ class Toolkit(AnalyticsTools):
         if entity_kind not in ADHOC_KINDS:
             raise ToolError(f"entity_kind는 {sorted(ADHOC_KINDS)} 중 하나여야 합니다.")
         model = self._model(rev)
+        entities = sorted(model.by_kind(EntityKind(entity_kind), floor), key=lambda e: e.entity_id)
+        available = {"entity_id", "floor", "label", "area_m2", "length_m"}
+        available |= {key for entity in entities for key in entity.attributes}
+        unknown = [name for name in fields if name not in available]
+        if unknown:
+            raise ToolError(
+                f"{entity_kind}에 없는 필드입니다: {unknown}. 사용 가능한 필드: {sorted(available)}"
+            )
         rows = []
-        for entity in sorted(model.by_kind(EntityKind(entity_kind), floor), key=lambda e: e.entity_id):
+        for entity in entities:
             base = {
                 "entity_id": entity.entity_id,
                 "floor": entity.floor,
