@@ -78,6 +78,12 @@ class UiActionHandler:
             patches.insert(0, _replace("/floor", floor))
             ui_state["floor"] = floor
         output = {"ok": True, "metric": metric, "rev": rev, "floor": floor, "units": len(values)}
+        ranked = sorted((v, k) for k, v in raw.items() if v is not None and v == v)
+        if metric == "low_efficiency":
+            output["flagged_units"] = [k for v, k in ranked if v > 0]
+        elif ranked:
+            output["lowest_units"] = [k for _, k in ranked[:3]]
+            output["highest_units"] = [k for _, k in ranked[-3:][::-1]]
         return UiActionResult(json.dumps(output, ensure_ascii=False), patches)
 
     def _ui_highlight_units(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:

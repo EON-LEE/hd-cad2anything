@@ -20,12 +20,12 @@ param clientIpAddress string = ''
 @description('Primary reasoning model deployment.')
 param chatModelName string = 'gpt-6.1-sol'
 param chatModelVersion string = '2026-09-29'
-param chatModelCapacity int = 100
+param chatModelCapacity int = 250
 
 @description('Lightweight model deployment for simple steps.')
 param miniModelName string = 'gpt-5.4-mini'
 param miniModelVersion string = '2026-03-17'
-param miniModelCapacity int = 50
+param miniModelCapacity int = 150
 
 @description('Embedding model deployment for file search.')
 param embeddingModelName string = 'text-embedding-3-small'

@@ -17,6 +17,9 @@ from cad2anything.agents.ui_actions import UiActionHandler
 MAX_ROUNDS = 8
 SPECIALIST_OUTPUT_LIMIT = 6000
 TEXT_CHUNK = 80
+# Token-rate limits (429) are retried with the SDK's backoff, which honors retry-after headers.
+CLIENT_MAX_RETRIES = 6
+CLIENT_TIMEOUT_S = 180
 # Tool calls that Foundry runs server-side; the value names tools whose items carry no `name`.
 HOSTED_TOOL_ITEMS = {
     "mcp_call": None,
@@ -96,7 +99,10 @@ class AgentRuntime:
         from azure.ai.projects import AIProjectClient
 
         project = AIProjectClient(endpoint=project_endpoint, credential=credential)
-        return cls(project.get_openai_client(), **kwargs)
+        client = project.get_openai_client().with_options(
+            max_retries=CLIENT_MAX_RETRIES, timeout=CLIENT_TIMEOUT_S
+        )
+        return cls(client, **kwargs)
 
     def consult(self, agent_key: str, request: str) -> tuple[str, list[dict[str, Any]]]:
         """Run a specialist agent; return its answer and the server-side tool calls it made."""

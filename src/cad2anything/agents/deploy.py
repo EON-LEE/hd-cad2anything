@@ -104,7 +104,11 @@ def deploy(dry_run: bool = False) -> dict[str, Any]:
         )
         plan.append((agent, specs))
     summary = {
-        agent["name"]: {"model": agent["model"], "tools": [s.get("name", s["kind"]) for s in specs]}
+        agent["name"]: {
+            "model": agent["model"],
+            "reasoning_effort": agent.get("reasoning_effort"),
+            "tools": [s.get("name", s["kind"]) for s in specs],
+        }
         for agent, specs in plan
     }
     if dry_run:
@@ -113,17 +117,23 @@ def deploy(dry_run: bool = False) -> dict[str, Any]:
         raise SystemExit("MCP_SERVER_URL is required to deploy agents")
 
     from azure.ai.projects import AIProjectClient
-    from azure.ai.projects.models import PromptAgentDefinition
+    from azure.ai.projects.models import PromptAgentDefinition, Reasoning
     from azure.identity import DefaultAzureCredential
 
     project = AIProjectClient(
         endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"], credential=DefaultAzureCredential()
     )
     for agent, specs in plan:
+        options: dict[str, Any] = {}
+        if agent.get("reasoning_effort"):
+            options["reasoning"] = Reasoning(effort=agent["reasoning_effort"])
         created = project.agents.create_version(
             agent_name=agent["name"],
             definition=PromptAgentDefinition(
-                model=agent["model"], instructions=agent["instructions"], tools=[build_tool(s) for s in specs]
+                model=agent["model"],
+                instructions=agent["instructions"],
+                tools=[build_tool(s) for s in specs],
+                **options,
             ),
         )
         summary[agent["name"]]["version"] = getattr(created, "version", None)
