@@ -21,7 +21,7 @@ export function SidePanel() {
   const [visited, setVisited] = useState<ReadonlySet<TabId>>(() => new Set<TabId>(['chat']))
   const [unread, setUnread] = useState(false)
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const seenItems = useRef(chat.items.length)
+  const wasRunning = useRef(chat.running)
 
   useEffect(() => {
     setVisited((prev) => (prev.has(active) ? prev : new Set([...prev, active])))
@@ -40,12 +40,11 @@ export function SidePanel() {
     if (composer.seq > 0) setActive('chat')
   }, [composer.seq])
 
+  // An answer that finished while another tab was open is marked as unread.
   useEffect(() => {
-    if (chat.items.length !== seenItems.current) {
-      seenItems.current = chat.items.length
-      if (active !== 'chat') setUnread(true)
-    }
-  }, [chat.items.length, active])
+    if (wasRunning.current && !chat.running && active !== 'chat') setUnread(true)
+    wasRunning.current = chat.running
+  }, [chat.running, active])
 
   const select = (id: TabId) => {
     setActive(id)

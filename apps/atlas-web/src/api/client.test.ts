@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgUiEvent } from '../types/api'
-import { ApiError, createHttpSource, facilityName, normalizeMeta } from './client'
+import { ApiError, createHttpSource, facilityName, journeyQuery, normalizeMeta } from './client'
 
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder()
@@ -78,6 +78,29 @@ describe('createHttpSource', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect(error).toMatchObject({ status: 409 })
     expect((error as Error).message).toContain('artifact is published')
+  })
+
+  it('requests one customer journey with the segment string and normalizes it', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({ title: '40대 여성 VIP 고객의 쇼핑 동선', stops: [{ order: 1, time: '11:32', unit_code: 'B1-C05', floor: 'B1', x: 52.4, y: 31 }] }),
+      )
+      .mockResolvedValueOnce(json({ detail: 'no journey' }, 404))
+      .mockResolvedValueOnce(json({ title: 'empty', stops: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const source = createHttpSource()
+    const journey = await source.getJourney({ segment: { age_band: '40s', gender: 'F', tier: ['VIP', 'VVIP'] }, rank: 2 })
+    expect(journey.stops[0]).toMatchObject({ unit_code: 'B1-C05', floor: 'B1', x: 52.4 })
+    expect(journey.summary.stops).toBe(1)
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url.startsWith('/api/analytics/journey?')).toBe(true)
+    expect(Object.fromEntries(new URL(url, 'http://x').searchParams)).toEqual({ segment: 'age_band:40s;gender:F;tier:VIP|VVIP', rank: '2' })
+    await expect(source.getJourney({ customer_id: 'C1', date: '2025-11-08' })).rejects.toMatchObject({ status: 404 })
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/analytics/journey?customer_id=C1&date=2025-11-08')
+    await expect(source.getJourney({})).rejects.toMatchObject({ status: 404 })
+    expect(journeyQuery({ segment: '', rank: 0 })).toBe('')
+    expect(journeyQuery({ segment: 'tier:VIP', rank: 3, rev: 'R2' })).toBe('?segment=tier%3AVIP&rank=3&rev=R2')
   })
 
   it('derives artifact file URLs when the backend omits them', () => {

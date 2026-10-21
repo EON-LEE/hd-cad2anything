@@ -88,6 +88,7 @@ def test_runtime_handles_mcp_ui_and_specialist_calls():
     delta = next(event["delta"] for event in events if event["type"] == "STATE_DELTA")
     assert delta[0] == {"op": "replace", "path": "/floor", "value": "4F"}
     assert delta[1]["value"]["values"] == {"4F-E01": 0.0, "4F-N02": 1.0}
+    assert delta[2] == {"op": "replace", "path": "/journey", "value": None}
     text = "".join(event["delta"] for event in events if event["type"] == "TEXT_MESSAGE_CONTENT")
     assert text == "4층 동측 zone의 평효율이 가장 낮습니다."
 
@@ -278,14 +279,54 @@ def test_ui_show_journey_draws_the_path_and_reports_stops_to_the_model():
     )
 
     assert calls == [{"segment": {"age_band": "40s"}, "rank": 2}]
-    assert [p["path"] for p in result.patches] == ["/journey", "/floor", "/panel"]
-    assert result.patches[1]["value"] == "B1" and ui_state["floor"] == "B1"
+    cleared = ["/heatmap", "/highlights", "/edges", "/compareRev"]
+    assert [p["path"] for p in result.patches] == [*cleared, "/journey", "/floor", "/panel"]
+    assert [p["value"] for p in result.patches[:4]] == [None, [], [], None]
+    floor_patch = next(p for p in result.patches if p["path"] == "/floor")
+    assert floor_patch["value"] == "B1" and ui_state["floor"] == "B1"
     output = json.loads(result.output)
     assert output["ok"] and [s["unit_code"] for s in output["stops"]] == ["B1-C05", "1F-C11"]
     assert "x" not in output["stops"][0] and "segments" not in output
 
     failing = UiActionHandler(journey_provider=lambda **params: (_ for _ in ()).throw(ValueError("없음")))
     assert json.loads(failing.handle("ui_show_journey", {}, {}).output)["ok"] is False
+
+
+def test_ui_show_journey_uses_the_revision_on_screen_and_switches_when_needed():
+    calls = []
+
+    def provider(**params):
+        calls.append(params)
+        rev = "R0" if params.get("customer_id") else params.get("rev", "R2")
+        return {"rev": rev, "stops": [{"order": 1, "floor": "1F", "unit_code": "1F-C01"}], "caveat": "추정"}
+
+    handler = UiActionHandler(journey_provider=provider)
+    same = handler.handle("ui_show_journey", {"segment": {"tier": ["VIP"]}}, {"rev": "R2", "floor": "3F"})
+    assert calls[-1] == {"segment": {"tier": ["VIP"]}, "rev": "R2"}
+    assert [p["path"] for p in same.patches][-3:] == ["/journey", "/floor", "/panel"]
+    assert "왼쪽" in json.loads(same.output)["shown"]
+
+    ui_state = {"rev": "R2", "floor": "3F"}
+    other = handler.handle("ui_show_journey", {"customer_id": "C0000001"}, ui_state)
+    assert calls[-1] == {"customer_id": "C0000001"}
+    assert [p["path"] for p in other.patches][-4:] == ["/journey", "/rev", "/floor", "/panel"]
+    assert ui_state["rev"] == "R0" and "R0 개정으로 바꿨습니다" in json.loads(other.output)["shown"]
+
+
+def test_other_overlays_replace_a_journey_from_an_earlier_answer_only():
+    handler = UiActionHandler(
+        journey_provider=lambda **params: {"rev": "R2", "stops": [{"order": 1, "floor": "1F"}]}
+    )
+    earlier = handler.handle("ui_highlight_units", {"unit_codes": ["3F-C05"]}, {"rev": "R2"})
+    assert [p["path"] for p in earlier.patches] == ["/highlights", "/journey"]
+    assert earlier.patches[1]["value"] is None
+    compare = handler.handle("ui_compare", {"rev_from": "R0", "rev_to": "R1"}, {})
+    assert [p["path"] for p in compare.patches] == ["/rev", "/compareRev", "/journey"]
+
+    ui_state = {"rev": "R2", "floor": "3F"}
+    handler.handle("ui_show_journey", {}, ui_state)
+    same_answer = handler.handle("ui_draw_edges", {"edges": [{"from": "1F-C01", "to": "3F-C05"}]}, ui_state)
+    assert [p["path"] for p in same_answer.patches] == ["/edges"]
 
 
 def test_tool_labels_are_plain_korean():
@@ -301,6 +342,8 @@ def test_tool_labels_are_plain_korean():
         "analytics_cross_shopping", {"segment": {"age_band": "40s", "tier": ["VIP", "VVIP"]}}
     ) == ("40대 VIP·VVIP 교차구매 분석")
     assert tool_label("web_search", {"query": "백화점 MD"}) == "웹 검색: 백화점 MD"
+    assert tool_label("spatial_floor_summary", {"rev": "R2", "floor": "4F"}) == "4층 정보 확인"
+    assert tool_label("spatial_unit_details", {"rev": "R2", "unit_code": "4F-E05"}) == "4F-E05 매장 확인"
     assert tool_label("something_new", {}) == "작업 중"
 
 

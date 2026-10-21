@@ -112,6 +112,47 @@ describe('AG-UI decoding', () => {
     expect(normalizeAgUiEvent('text')).toBeNull()
   })
 
+  it('keeps user-facing labels, nesting and outcome fields of tool calls', () => {
+    expect(
+      normalizeAgUiEvent({
+        type: 'TOOL_CALL_START',
+        tool_call_id: 'n1',
+        tool_name: 'analytics_productivity',
+        args: { floor: '4F' },
+        label: ' 4층 공간 생산성 계산 ',
+        parent_tool_call_id: 'c1',
+        agent: 'space-productivity-analyst',
+      }),
+    ).toStrictEqual({
+      type: 'TOOL_CALL_START',
+      tool_call_id: 'n1',
+      tool_name: 'analytics_productivity',
+      args: { floor: '4F' },
+      label: '4층 공간 생산성 계산',
+      parent_tool_call_id: 'c1',
+      agent: 'space-productivity-analyst',
+    })
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_START', toolCallId: 'n2', toolCallName: 'x', parentToolCallId: 'c1', label: '' })).toStrictEqual({
+      type: 'TOOL_CALL_START',
+      tool_call_id: 'n2',
+      tool_name: 'x',
+      args: undefined,
+      parent_tool_call_id: 'c1',
+    })
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_END', tool_call_id: 'n1', summary: '{"ok":false}', label: '계산 실패', ok: false })).toStrictEqual({
+      type: 'TOOL_CALL_END',
+      tool_call_id: 'n1',
+      summary: '{"ok":false}',
+      label: '계산 실패',
+      ok: false,
+    })
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_END', tool_call_id: 'n1', ok: 'yes' })).toStrictEqual({
+      type: 'TOOL_CALL_END',
+      tool_call_id: 'n1',
+      summary: undefined,
+    })
+  })
+
   it('uses the SSE event name when the payload has no type', () => {
     expect(decodeAgUiMessage({ event: 'RUN_ERROR', data: '{"message":"boom"}' })).toEqual([{ type: 'RUN_ERROR', message: 'boom' }])
   })

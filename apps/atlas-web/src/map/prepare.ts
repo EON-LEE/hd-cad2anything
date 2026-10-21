@@ -21,7 +21,8 @@ import {
   type Point2,
   type UnitInfo,
 } from '../lib/geometry'
-import type { CategoryInfo, ChangeItem, FloorInfo, GraphEdge, Highlight } from '../types/api'
+import { arrivalLabel, departureLabel } from '../lib/journey'
+import type { CategoryInfo, ChangeItem, FloorInfo, GraphEdge, Highlight, Journey, JourneySegment, JourneyStop } from '../types/api'
 
 export function categoryColorMap(categories: readonly CategoryInfo[]): Map<string, Rgba> {
   return new Map(categories.map((c) => [c.code, hexToRgba(c.color)]))
@@ -241,4 +242,75 @@ export function resolveEdges(
     })
   })
   return result
+}
+
+// --- customer journey ---------------------------------------------------------------------------
+
+export interface JourneyPathRender {
+  key: string
+  path: Point2[]
+}
+
+export interface JourneyStopRender {
+  key: string
+  order: number
+  position: Point2
+  time: string
+  stop: JourneyStop
+}
+
+export interface JourneyNoteRender {
+  key: string
+  position: Point2
+  text: string
+  kind: 'depart' | 'arrive'
+  /** Notes at the same place (e.g. leaving and later returning by one escalator) stack upwards. */
+  stack: number
+}
+
+export interface JourneyRender {
+  paths: JourneyPathRender[]
+  stops: JourneyStopRender[]
+  notes: JourneyNoteRender[]
+}
+
+export const EMPTY_JOURNEY_RENDER: JourneyRender = { paths: [], stops: [], notes: [] }
+
+const stopPoint = (stop: JourneyStop | undefined): Point2 | null =>
+  stop && stop.x !== null && stop.y !== null ? [stop.x, stop.y] : null
+
+/**
+ * What to draw of a journey on one floor: that floor's path segments (2+ points), its numbered stops,
+ * and floor-change notes ("→ 3층 (ESC-A)" where a segment leaves, "1층에서 올라옴" where one arrives).
+ */
+export function prepareJourney(journey: Journey | null | undefined, floor: string, floors?: readonly FloorInfo[]): JourneyRender {
+  if (!journey) return EMPTY_JOURNEY_RENDER
+  const paths = journey.segments.flatMap((segment, i) =>
+    segment.floor === floor && segment.points.length >= 2 ? [{ key: `seg-${i}`, path: segment.points.map(([x, y]): Point2 => [x, y]) }] : [],
+  )
+  const stops = journey.stops.flatMap((stop) => {
+    const position = stop.floor === floor ? stopPoint(stop) : null
+    return position ? [{ key: `stop-${stop.order}`, order: stop.order, position, time: stop.time, stop }] : []
+  })
+  const notes: JourneyNoteRender[] = []
+  const placed: Point2[] = []
+  const addNote = (key: string, position: Point2, text: string, kind: JourneyNoteRender['kind']) => {
+    const stack = placed.filter((p) => Math.hypot(p[0] - position[0], p[1] - position[1]) < 2).length
+    placed.push(position)
+    notes.push({ key, position, text, kind, stack })
+  }
+  journey.transitions.forEach((t, i) => {
+    if (t.from_floor === t.to_floor) return
+    const leg = (onFloor: string) =>
+      journey.segments.find((s: JourneySegment) => s.floor === onFloor && s.from_order === t.from_order && s.to_order === t.to_order && s.points.length > 0)
+    if (t.from_floor === floor) {
+      const position = leg(floor)?.points.at(-1) ?? stopPoint(journey.stops.find((s) => s.order === t.from_order))
+      if (position) addNote(`depart-${i}`, [position[0], position[1]], departureLabel(t), 'depart')
+    }
+    if (t.to_floor === floor) {
+      const position = leg(floor)?.points[0] ?? stopPoint(journey.stops.find((s) => s.order === t.to_order))
+      if (position) addNote(`arrive-${i}`, [position[0], position[1]], arrivalLabel(t, floors), 'arrive')
+    }
+  })
+  return { paths, stops, notes }
 }

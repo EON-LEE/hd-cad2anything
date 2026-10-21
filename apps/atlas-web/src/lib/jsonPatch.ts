@@ -228,3 +228,20 @@ export function applyPatch<T>(doc: T, operations: readonly PatchOperation[]): T 
   })
   return result as T
 }
+
+/** Top-level keys touched by a patch (e.g. "/heatmap/values/3F-N05" -> "heatmap"; the root is "/"). */
+export function touchedKeys(ops: readonly PatchOperation[]): string[] {
+  const keys = new Set<string>()
+  for (const op of ops) {
+    for (const pointer of [op?.path, op && 'from' in op ? op.from : undefined]) {
+      if (typeof pointer !== 'string') continue
+      try {
+        const tokens = parsePointer(pointer)
+        keys.add(tokens[0] ?? '/')
+      } catch {
+        keys.add(pointer)
+      }
+    }
+  }
+  return [...keys]
+}

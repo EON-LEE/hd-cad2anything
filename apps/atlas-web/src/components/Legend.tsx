@@ -3,7 +3,9 @@ import { useData } from '../api/source'
 import { CHANGE_LABELS, CHANGE_ORDER, NO_DATA_COLOR, VACANT_COLOR, changeColor, heatmapColor, heatmapGradientCss, rgbaToCss } from '../lib/colors'
 import type { FloorModel } from '../lib/geometry'
 import type { HighlightRender } from '../map/prepare'
-import type { Heatmap } from '../types/api'
+import { replaceOp } from '../state/reducer'
+import { usePatchUi } from '../state/store'
+import type { Heatmap, Journey } from '../types/api'
 
 interface Props {
   model: FloorModel
@@ -13,10 +15,25 @@ interface Props {
   rev: string
   highlights: HighlightRender[]
   edgeCount: number
+  journey: Journey | null
+  journeyStopsOnFloor: number
+  journeyCardOpen: boolean
 }
 
-export function Legend({ model, heatmap, changeMarks, compareRev, rev, highlights, edgeCount }: Props) {
+export function Legend({
+  model,
+  heatmap,
+  changeMarks,
+  compareRev,
+  rev,
+  highlights,
+  edgeCount,
+  journey,
+  journeyStopsOnFloor,
+  journeyCardOpen,
+}: Props) {
   const { meta } = useData()
+  const patchUi = usePatchUi()
   const categories = useMemo(() => {
     const present = new Set<string>()
     let vacant = false
@@ -40,6 +57,31 @@ export function Legend({ model, heatmap, changeMarks, compareRev, rev, highlight
       <details open>
         <summary>범례</summary>
         <div className="legend-body">
+        {journey && (
+          <section className="legend-journey">
+            <h3>고객 동선</h3>
+            <ul>
+              <li>
+                <span className="swatch journey-line" aria-hidden="true" />
+                이동 경로
+              </li>
+              <li>
+                <span className="swatch journey-marker" aria-hidden="true">
+                  1
+                </span>
+                결제 순서
+              </li>
+            </ul>
+            <p className="hint">
+              결제 순서 기반 추정 경로 · 이 층 결제 {journeyStopsOnFloor}곳 / 전체 {journey.stops.length}곳
+            </p>
+            {!journeyCardOpen && (
+              <button type="button" className="legend-action" onClick={() => patchUi([replaceOp('/panel', { type: 'journey', payload: {} })])}>
+                동선 목록 보기
+              </button>
+            )}
+          </section>
+        )}
         {compareRev && (
           <section>
             <h3>

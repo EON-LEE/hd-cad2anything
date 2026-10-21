@@ -167,6 +167,13 @@ function str(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : value === undefined || value === null ? fallback : String(value)
 }
 
+/** Non-empty trimmed string or undefined (optional display fields). */
+function optionalText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
 /**
  * Normalize one decoded JSON payload to the contract's snake_case event shape.
  * camelCase aliases used by AG-UI SDKs (threadId, messageId, toolCallId, toolCallName) are accepted.
@@ -192,19 +199,30 @@ export function normalizeAgUiEvent(raw: unknown, sseEventName = 'message'): AgUi
       return { type: 'TEXT_MESSAGE_CONTENT', message_id: messageId, delta: str(r.delta) }
     case 'TEXT_MESSAGE_END':
       return { type: 'TEXT_MESSAGE_END', message_id: messageId }
-    case 'TOOL_CALL_START':
+    case 'TOOL_CALL_START': {
+      const label = optionalText(r.label)
+      const parent = optionalText(r.parent_tool_call_id ?? r.parentToolCallId)
+      const agent = optionalText(r.agent)
       return {
         type: 'TOOL_CALL_START',
         tool_call_id: toolCallId,
         tool_name: str(r.tool_name ?? r.toolCallName ?? r.name),
         args: r.args,
+        ...(label ? { label } : {}),
+        ...(parent ? { parent_tool_call_id: parent } : {}),
+        ...(agent ? { agent } : {}),
       }
-    case 'TOOL_CALL_END':
+    }
+    case 'TOOL_CALL_END': {
+      const label = optionalText(r.label)
       return {
         type: 'TOOL_CALL_END',
         tool_call_id: toolCallId,
         summary: r.summary === undefined || r.summary === null ? undefined : str(r.summary),
+        ...(label ? { label } : {}),
+        ...(typeof r.ok === 'boolean' ? { ok: r.ok } : {}),
       }
+    }
     case 'STATE_DELTA':
       return Array.isArray(r.delta) ? { type: 'STATE_DELTA', delta: r.delta } : null
     case 'RUN_ERROR':

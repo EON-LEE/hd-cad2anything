@@ -882,9 +882,14 @@ class AnalyticsTools:
         min_stops: int = 3,
         start: str | None = None,
         end: str | None = None,
+        rev: str | None = None,
         with_routes: bool = True,
     ) -> dict[str, Any]:
-        """One customer's purchase sequence on one day, optionally with estimated walkway routes."""
+        """One customer's purchase sequence on one day, optionally with estimated walkway routes.
+
+        Without ``customer_id``, ``date``, ``start`` and ``end``, ``rev`` limits the candidates to the days
+        when that revision (or, for a hypothetical one, its actual base) was the store layout.
+        """
         from cad2anything.analytics.journey import (
             JOURNEY_CAVEAT,
             filter_rows,
@@ -911,9 +916,15 @@ class AnalyticsTools:
                 day = journey_candidates(own, min_stops=1).iloc[0]["date"]
             query: dict[str, Any] = {"customer_id": customer_id, "date": day.isoformat()}
         else:
-            first, last = (
-                (day, day) if day else (_parse_date(start, "start"), _parse_date(end, "end", end=True))
-            )
+            period_rev = None
+            if day:
+                first, last = day, day
+            elif rev and not (start or end):
+                period_rev = self._fit_revision(rev)
+                period_start, period_end, _ = self.revision_period(period_rev)
+                first, last = _parse_date(period_start, "start"), _parse_date(period_end, "end")
+            else:
+                first, last = _parse_date(start, "start"), _parse_date(end, "end", end=True)
             customers = self._table("customers", required=False)
             key = (
                 "journeys",
@@ -938,6 +949,8 @@ class AnalyticsTools:
             chosen = ranked.iloc[rank - 1]
             customer_id, day = str(chosen["customer_id"]), chosen["date"]
             query = {"segment": parsed, "rank": rank}
+            if period_rev:
+                query["rev"] = period_rev
             alternatives = [
                 {
                     "rank": rank + i + 1,
@@ -1021,9 +1034,10 @@ class AnalyticsTools:
         min_stops: int = 3,
         start: str | None = None,
         end: str | None = None,
+        rev: str | None = None,
     ) -> dict[str, Any]:
         return self.customer_journey(
-            customer_id, date, segment, rank, min_stops, start, end, with_routes=False
+            customer_id, date, segment, rank, min_stops, start, end, rev, with_routes=False
         )
 
     # Layout ------------------------------------------------------------------------------------------

@@ -98,7 +98,13 @@ def tool_label(name: str | None, args: dict[str, Any] | None = None) -> str:
     name = name or ""
     args = args if isinstance(args, dict) else {}
     base = TOOL_LABELS.get(name, "작업 중")
-    if name in ("analytics_productivity", "analytics_drivers", "spatial_find_units", "spatial_floor_summary"):
+    if name == "spatial_floor_summary" and args.get("floor"):
+        return f"{floor_ko(args['floor'])} 정보 확인"
+    if name == "spatial_unit_details" and args.get("unit_code"):
+        return f"{args['unit_code']} 매장 확인"
+    if name == "spatial_nearby_units" and args.get("unit_code"):
+        return f"{args['unit_code']} 주변 매장 찾기"
+    if name in ("analytics_productivity", "analytics_drivers", "spatial_find_units"):
         return _with_floor(base, args)
     if name in ("analytics_cross_shopping", "analytics_customer_journey", "analytics_floor_transitions"):
         segment = _segment_ko(args.get("segment"))

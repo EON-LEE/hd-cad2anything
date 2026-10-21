@@ -322,10 +322,16 @@ def create_api(
         segment: str | None = None,
         rank: int = Query(1, ge=1, le=500),
         min_stops: int = Query(3, ge=1, le=12),
+        rev: str | None = None,
     ) -> dict[str, Any]:
         try:
             return toolkit.customer_journey(
-                customer_id=customer_id, date=date, segment=segment, rank=rank, min_stops=min_stops
+                customer_id=customer_id,
+                date=date,
+                segment=segment,
+                rank=rank,
+                min_stops=min_stops,
+                rev=rev,
             )
         except ToolError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

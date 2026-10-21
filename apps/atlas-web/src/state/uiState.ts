@@ -1,9 +1,10 @@
 // UI state model (the target of STATE_DELTA patches): defaults and defensive normalization.
+import { normalizeJourney } from '../lib/journey'
 import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
 
 export const DEFAULT_LAYERS: LayerToggles = { fixtures: false, walkways: true, labels: true }
 
-export const PANEL_TYPES: readonly PanelType[] = ['changes', 'artifact', 'layout', 'table', 'none']
+export const PANEL_TYPES: readonly PanelType[] = ['changes', 'artifact', 'layout', 'table', 'journey', 'none']
 
 export function sortedFloors(meta: Meta | null | undefined) {
   return [...(meta?.floors ?? [])].sort((a, b) => a.ordinal - b.ordinal)
@@ -39,6 +40,8 @@ export function createInitialUiState(meta: Meta | null | undefined, overrides: P
     edges: [],
     focus: null,
     panel: { type: 'none', payload: {} },
+    // Must exist (as null) so that agent `replace /journey` patches apply.
+    journey: null,
     ...overrides,
   }
 }
@@ -135,6 +138,7 @@ export function normalizeUiState(raw: unknown, fallback: UiState): UiState {
     edges: normalizeEdges(raw.edges),
     focus: normalizeFocus(raw.focus),
     panel: normalizePanel(raw.panel),
+    journey: (raw.journey === fallback.journey ? fallback.journey : normalizeJourney(raw.journey)) ?? null,
   }
 }
 

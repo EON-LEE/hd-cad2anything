@@ -1,7 +1,8 @@
-import { useRef, useState, type KeyboardEvent } from 'react'
+import { useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { facilityName } from '../api/client'
 import { useData } from '../api/source'
 import { REVISION_KIND_LABELS } from '../lib/format'
+import { journeyStopCounts } from '../lib/journey'
 import { replaceOp } from '../state/reducer'
 import { useAppState, usePatchUi } from '../state/store'
 import { parentRevision, sortedFloors } from '../state/uiState'
@@ -11,6 +12,7 @@ export function TopBar() {
   const { ui } = useAppState()
   const patchUi = usePatchUi()
   const floors = sortedFloors(meta)
+  const journeyCounts = useMemo(() => journeyStopCounts(ui.journey), [ui.journey])
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [bannerOpen, setBannerOpen] = useState(true)
 
@@ -91,6 +93,7 @@ export function TopBar() {
           <div role="tablist" aria-label="층" className="floor-tabs">
             {floors.map((f, i) => {
               const selected = f.code === ui.floor
+              const stops = journeyCounts.get(f.code) ?? 0
               return (
                 <button
                   key={f.code}
@@ -102,12 +105,20 @@ export function TopBar() {
                   aria-selected={selected}
                   aria-controls="floor-canvas"
                   tabIndex={selected ? 0 : -1}
-                  title={`${f.code} ${f.name}`}
+                  title={`${f.code} ${f.name}${stops ? ` · 고객 동선 결제 ${stops}곳` : ''}`}
                   className={selected ? 'active' : undefined}
                   onClick={() => patchUi([replaceOp('/floor', f.code)])}
                   onKeyDown={(e) => onTabKey(e, i)}
                 >
                   {f.code}
+                  {stops > 0 && (
+                    <>
+                      <span className="journey-tab-count" aria-hidden="true">
+                        {stops}
+                      </span>
+                      <span className="visually-hidden">(고객 동선 결제 {stops}곳)</span>
+                    </>
+                  )}
                 </button>
               )
             })}

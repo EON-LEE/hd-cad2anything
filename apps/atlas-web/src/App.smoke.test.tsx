@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+import type { AtlasDataSource } from './api/client'
+import { createMockContext, type DataContextValue } from './api/source'
+import { QUICK_PROMPTS } from './lib/prompts'
 import { setMockSpeed } from './mock/chatScripts'
+import type { AgUiEvent } from './types/api'
 
 // jsdom has no WebGL, and importing the full deck.gl module graph is slow under the test runner.
 // Replace deck.gl with light stand-ins: layers keep their props, and <DeckGL> renders a probe that
-// exposes the layer ids and the number of unit polygons.
+// exposes the layer ids, the number of unit polygons and the number of journey stops.
 vi.mock('@deck.gl/core', () => {
   class OrthographicView {
     props: unknown
@@ -36,16 +40,51 @@ vi.mock('@deck.gl/layers', () => {
 vi.mock('@deck.gl/react', async () => {
   const React = await import('react')
   return {
-    default: (props: { layers?: { id: string; props: { data?: unknown[] } }[] }) =>
-      React.createElement('div', {
+    default: (props: { layers?: { id: string; props: { data?: unknown[] } }[] }) => {
+      const count = (id: string) => (props.layers ?? []).find((l) => l.id === id)?.props.data?.length ?? 0
+      return React.createElement('div', {
         'data-testid': 'deck',
         'data-layers': (props.layers ?? []).map((l) => l.id).join(','),
-        'data-units': (props.layers ?? []).find((l) => l.id === 'units')?.props.data?.length ?? 0,
-      }),
+        'data-units': count('units'),
+        'data-journey-stops': count('journey-stops'),
+      })
+    },
   }
 })
 
 const layerIds = () => screen.getByTestId('deck').getAttribute('data-layers')?.split(',') ?? []
+const journeyStops = () => screen.getByTestId('deck').getAttribute('data-journey-stops')
+const log = () => screen.getByRole('log')
+const floorTab = (code: string) => within(screen.getByRole('tablist', { name: '층' })).getByRole('tab', { name: new RegExp(`^${code}`) })
+
+/** A chat stream the test feeds event by event (null ends the stream). */
+function controlledStream() {
+  const queue: (AgUiEvent | null)[] = []
+  let wake: (() => void) | null = null
+  const streamChat: AtlasDataSource['streamChat'] = async (_body, onEvent) => {
+    for (;;) {
+      while (!queue.length) await new Promise<void>((resolve) => (wake = resolve))
+      const event = queue.shift()!
+      if (event === null) return
+      onEvent(event)
+    }
+  }
+  const push = async (...events: (AgUiEvent | null)[]) => {
+    await act(async () => {
+      queue.push(...events)
+      wake?.()
+    })
+  }
+  return { streamChat, push }
+}
+
+async function renderWithStream(streamChat: AtlasDataSource['streamChat']) {
+  const context: DataContextValue = await createMockContext('테스트용 모의 데이터')
+  render(<App context={{ ...context, source: { ...context.source, streamChat } }} />)
+  const input = await screen.findByRole('textbox', { name: '에이전트에게 질문' })
+  fireEvent.change(input, { target: { value: '4층 효율이 낮은 매장' } })
+  fireEvent.keyDown(input, { key: 'Enter' })
+}
 
 describe('Atlas smoke test (mock mode, jsdom)', () => {
   beforeAll(() => {
@@ -64,7 +103,7 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     setMockSpeed(1)
   })
 
-  it('renders the shell, runs scripted agent turns and drives the panels', async () => {
+  it('renders the shell, answers like a chat and drives the panels', async () => {
     render(<App />)
 
     // Shell and fallback to mock mode.
@@ -82,20 +121,51 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     expect(screen.getByTestId('deck').getAttribute('data-units')).toBe('19')
     expect(screen.getByRole('complementary', { name: '범례' }).textContent).toContain('여성 컨템포러리')
 
-    // Quick prompt: low-efficiency analysis -> tool chips, streamed text, heatmap/highlights/edges/focus.
-    fireEvent.click(screen.getByRole('button', { name: '3층 저효율 zone과 원인' }))
-    expect(await screen.findByText('analytics.productivity')).toBeTruthy()
-    await waitFor(() => expect(screen.getByRole('log').textContent).toContain('재배치 대안이 필요하면'))
-    expect(screen.getByRole('log').textContent).toContain('화면 갱신')
+    // Empty chat: intro and suggestion chips.
+    expect(screen.getByRole('heading', { name: '무엇을 도와드릴까요?' })).toBeTruthy()
+    const suggestions = within(screen.getByRole('group', { name: '추천 질문' })).getAllByRole('button')
+    expect(suggestions.map((b) => b.textContent)).toEqual([...QUICK_PROMPTS])
+    expect((screen.getByRole('textbox', { name: '에이전트에게 질문' }) as HTMLTextAreaElement).placeholder).toBe(
+      '무엇이든 물어보세요 (Enter 전송, Shift+Enter 줄바꿈)',
+    )
+
+    // Low-efficiency question (the mock has no 4F, so it answers on 3F).
+    fireEvent.click(screen.getByRole('button', { name: '4층에서 효율이 낮은 매장과 이유를 보여줘' }))
+    await waitFor(() => expect(log().textContent).toContain('재배치 아이디어가 필요하면'))
+    expect(within(log()).getByText('4층에서 효율이 낮은 매장과 이유를 보여줘')).toBeTruthy()
+    // No tool names, raw summaries or patch logs in the conversation.
+    for (const raw of ['analytics_productivity', 'consult_specialist', 'ui_show_heatmap', '화면 갱신', '"ok"']) {
+      expect(log().textContent).not.toContain(raw)
+    }
+    // Collapsed steps above the answer; expanded they show labels with nested specialist calls.
+    const toggle = within(log()).getByRole('button', { name: /^작업 과정 보기 · 8단계 · / })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(within(log()).queryByText('효율 저하 원인 분석')).toBeNull()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(within(log()).getByText('공간 생산성 전문 에이전트에게 확인')).toBeTruthy()
+    expect(within(log()).getByText('효율 저하 원인 분석').closest('ol')?.classList.contains('nested')).toBe(true)
+    expect(within(log()).getByText('저효율 매장 2곳 강조')).toBeTruthy()
+    expect(within(log()).getAllByRole('img', { name: '완료' })).toHaveLength(8)
+    // Technical details only on demand.
+    const tech = within(log()).getByRole('button', { name: '기술 정보' })
+    expect(tech.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(tech)
+    expect(log().textContent).toContain('analytics_productivity')
+    expect(log().textContent).toContain('space-productivity-analyst')
+    fireEvent.click(tech)
+    expect(log().textContent).not.toContain('analytics_productivity')
+    // The screen changed: heatmap, highlights, edges (one to 1F through a floor badge).
     await waitFor(() => expect(layerIds()).toEqual(expect.arrayContaining(['highlights', 'edges', 'edge-labels'])))
     const legend = screen.getByRole('complementary', { name: '범례' })
     expect(within(legend).getByRole('heading', { name: '평효율(원/㎡)' })).toBeTruthy()
-    expect(legend.textContent).toContain('데이터 없음')
-    // One edge goes to a 1F unit, so a floor badge appears at the canvas edge.
     expect(screen.getByRole('button', { name: /1F .*층으로 이동/ })).toBeTruthy()
+    // After the first message the intro is gone and the suggestions shrink to one row.
+    expect(screen.queryByRole('heading', { name: '무엇을 도와드릴까요?' })).toBeNull()
+    expect(within(screen.getByRole('group', { name: '추천 질문' })).getAllByRole('button')).toHaveLength(QUICK_PROMPTS.length)
 
-    // Quick prompt: revision review -> compare mode + review tab with changes, impact and artifacts.
-    fireEvent.click(screen.getByRole('button', { name: 'S/S 개편 도면 변경점과 재생성 대상 알려줘' }))
+    // Revision review -> compare mode + review tab with changes, impact and artifacts.
+    fireEvent.click(screen.getByRole('button', { name: 'S/S 개편 도면에서 뭐가 바뀌었는지 알려줘' }))
     await waitFor(() => expect(screen.getByRole('tab', { name: '개정 검토' }).getAttribute('aria-selected')).toBe('true'))
     expect(await screen.findByRole('heading', { name: /변경 목록/ })).toBeTruthy()
     expect((screen.getByRole('combobox', { name: /^개정/ }) as HTMLSelectElement).value).toBe('R1')
@@ -108,22 +178,22 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     const card = screen.getByRole('article', { name: '매대·집기 목록' })
     expect(within(card).getByText('게시됨')).toBeTruthy()
 
-    // Quick prompt: layout alternatives -> layout tab with three alternatives and a preview button.
+    // Layout alternatives -> layout tab with three alternatives and a preview button.
     fireEvent.click(screen.getByRole('tab', { name: /에이전트/ }))
-    fireEvent.click(screen.getByRole('button', { name: '3층 재배치안 3개 비교' }))
+    fireEvent.click(screen.getByRole('button', { name: '4층 재배치안 3개 만들어 비교해줘' }))
     await waitFor(() => expect(screen.getByRole('tab', { name: '레이아웃 대안' }).getAttribute('aria-selected')).toBe('true'))
     expect(await screen.findByRole('heading', { name: 'ALT-3F-A' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: /미리보기/ })).toHaveLength(3)
     fireEvent.click(screen.getAllByRole('button', { name: /미리보기/ })[1])
     expect(screen.getByRole('button', { name: '미리보는 중' }).getAttribute('aria-pressed')).toBe('true')
 
-    // Quick prompt: cross-shopping -> relationship graph built from state.edges.
+    // Cosmetics cross-shopping -> relationship graph built from state.edges.
     fireEvent.click(screen.getByRole('tab', { name: /에이전트/ }))
-    fireEvent.click(screen.getByRole('button', { name: '40대 VIP 교차구매 보여줘' }))
-    await waitFor(() => expect(screen.getByRole('log').textContent).toContain('교차구매 상위 5쌍'))
+    fireEvent.click(screen.getByRole('button', { name: '40대 VIP 고객은 화장품이랑 뭘 같이 사?' }))
+    await waitFor(() => expect(log().textContent).toContain('화장품과 함께 많이 산 매장들이에요'))
     fireEvent.click(screen.getByRole('tab', { name: '관계 그래프' }))
     const graph = await screen.findByRole('group', { name: '매장 관계 그래프' })
-    expect(within(graph).getAllByRole('button').length).toBe(7)
+    expect(within(graph).getAllByRole('button').length).toBe(8)
     const edgeTable = screen.getByRole('table', { name: '연결 목록' })
     expect(within(edgeTable).getAllByRole('row')).toHaveLength(6)
 
@@ -131,5 +201,130 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     fireEvent.click(within(graph).getByRole('button', { name: /^3F-C01/ }))
     const details = await screen.findByRole('complementary', { name: '3F-C01 매장 상세' })
     await waitFor(() => expect(details.textContent).toContain('평효율'))
+  })
+
+  it('draws one customer path across floors with its card', async () => {
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'VIP 고객 한 명의 쇼핑 동선을 보여줘' }))
+    const journeyCard = await screen.findByRole('region', { name: '40대 여성 VIP 고객의 쇼핑 동선' })
+    await waitFor(() => expect(log().textContent).toContain('결제 기록의 순서로 추정한 경로'))
+    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 3단계 · / })).toBeTruthy()
+
+    // Card: summary chips, the timeline with floor changes, the caveat.
+    const chips = within(within(journeyCard).getByRole('list', { name: '동선 요약' })).getAllByRole('listitem')
+    expect(chips.map((c) => c.textContent).slice(0, 4)).toEqual(['결제 6회', '2개 층', '총 234만원', '3시간 5분'])
+    expect(chips[4].textContent).toMatch(/^추정 이동 \d+m$/)
+    expect(within(journeyCard).getByText('↑ 3층으로 이동 (에스컬레이터 B)')).toBeTruthy()
+    expect(within(journeyCard).getByText('↓ 1층으로 이동 (에스컬레이터 B)')).toBeTruthy()
+    expect(within(journeyCard).getByText('26분 후')).toBeTruthy()
+    expect(journeyCard.textContent).toContain('고객 ID는 가명입니다')
+
+    // Map: the first floor of the path with its stops; floor tabs mark floors with stops.
+    await waitFor(() => expect(floorTab('1F').getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() => expect(layerIds()).toEqual(expect.arrayContaining(['journey-casing', 'journey-path', 'journey-stops', 'journey-times', 'journey-notes'])))
+    expect(journeyStops()).toBe('3')
+    expect(floorTab('1F').textContent).toContain('고객 동선 결제 3곳')
+    expect(floorTab('3F').textContent).toContain('고객 동선 결제 3곳')
+    const legend = screen.getByRole('complementary', { name: '범례' })
+    expect(within(legend).getByRole('heading', { name: '고객 동선' })).toBeTruthy()
+    expect(legend.textContent).toContain('결제 순서 기반 추정 경로')
+
+    // Clicking a stop moves the map to its floor.
+    const third = within(journeyCard).getByRole('button', { name: /^3번째 결제 12:41 3층 Cafe Halune/ })
+    fireEvent.click(third)
+    await waitFor(() => expect(floorTab('3F').getAttribute('aria-selected')).toBe('true'))
+    expect(third.getAttribute('aria-current')).toBe('true')
+    await waitFor(() => expect(journeyStops()).toBe('3'))
+
+    // Other customers until there is none left.
+    fireEvent.click(within(journeyCard).getByRole('button', { name: '다른 고객 보기' }))
+    expect(await within(journeyCard).findByText(/고객 C010877/)).toBeTruthy()
+    fireEvent.click(within(journeyCard).getByRole('button', { name: '다른 고객 보기' }))
+    const third3 = await screen.findByRole('region', { name: '40대 여성 VVIP 고객의 쇼핑 동선' })
+    fireEvent.click(within(third3).getByRole('button', { name: '다른 고객 보기' }))
+    expect(await within(third3).findByText('더 보여 줄 고객이 없어요.')).toBeTruthy()
+
+    // Close keeps the path; the legend reopens the card; clearing removes everything.
+    fireEvent.click(within(third3).getByRole('button', { name: '닫기' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: /쇼핑 동선/ })).toBeNull())
+    expect(layerIds()).toContain('journey-path')
+    fireEvent.click(within(screen.getByRole('complementary', { name: '범례' })).getByRole('button', { name: '동선 목록 보기' }))
+    const reopened = await screen.findByRole('region', { name: '40대 여성 VVIP 고객의 쇼핑 동선' })
+    fireEvent.click(within(reopened).getByRole('button', { name: '동선 지우기' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: /쇼핑 동선/ })).toBeNull())
+    await waitFor(() => expect(layerIds()).not.toContain('journey-path'))
+    expect(within(screen.getByRole('complementary', { name: '범례' })).queryByRole('heading', { name: '고객 동선' })).toBeNull()
+    expect(floorTab('1F').textContent).toBe('1F')
+  })
+
+  it('shows one live status line while working, then streams the answer', async () => {
+    const stream = controlledStream()
+    await renderWithStream(stream.streamChat)
+    const status = await within(log()).findByRole('status')
+    expect(status.textContent).toBe('생각하는 중…')
+    await stream.push(
+      { type: 'RUN_STARTED', thread_id: 't', run_id: 'r' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'consult_specialist', label: '공간 생산성 전문 에이전트에게 확인' },
+    )
+    await waitFor(() => expect(within(log()).getByRole('status').textContent).toBe('공간 생산성 전문 에이전트에게 확인'))
+    // Without a label the local table names the call.
+    await stream.push({ type: 'TOOL_CALL_START', tool_call_id: 'n1', tool_name: 'analytics_productivity', parent_tool_call_id: 'c1' })
+    await waitFor(() => expect(within(log()).getByRole('status').textContent).toBe('공간 생산성 전문 에이전트에게 확인 · 공간 생산성 계산'))
+    expect(screen.getByRole('button', { name: '중지' })).toBeTruthy()
+    // No steps disclosure while only the status line is live.
+    expect(within(log()).queryByRole('button', { name: /작업 과정 보기/ })).toBeNull()
+    await stream.push(
+      { type: 'TOOL_CALL_END', tool_call_id: 'n1' },
+      { type: 'TOOL_CALL_END', tool_call_id: 'c1' },
+      { type: 'TEXT_MESSAGE_START', message_id: 'm' },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '먼저 3층과 비교해 볼게요.' },
+    )
+    // Text streams: the status line is gone and a cursor follows the text.
+    await waitFor(() => expect(within(log()).queryByRole('status')).toBeNull())
+    expect(log().querySelector('.answer .cursor')).not.toBeNull()
+    expect(within(log()).getByRole('button', { name: '작업 과정 보기 · 2단계' })).toBeTruthy()
+    // A tool call between two text parts: the live line comes back below the text, without a cursor.
+    await stream.push({ type: 'TOOL_CALL_START', tool_call_id: 'c2', tool_name: 'ui_show_heatmap', label: '4층 도면에 ㎡당 매출 색칠' })
+    const between = await within(log()).findByRole('status')
+    expect(between.textContent).toBe('4층 도면에 ㎡당 매출 색칠')
+    expect(log().querySelector('.answer')!.compareDocumentPosition(between) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(log().querySelector('.answer .cursor')).toBeNull()
+    expect(within(log()).getByRole('button', { name: '작업 과정 보기 · 3단계' })).toBeTruthy()
+    await stream.push(
+      { type: 'TOOL_CALL_END', tool_call_id: 'c2', ok: true },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '\n\n' },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '4층에서 효율이 낮은 매장은 두 곳이에요.' },
+      { type: 'TEXT_MESSAGE_END', message_id: 'm' },
+    )
+    await stream.push({ type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null)
+    await waitFor(() => expect(log().querySelector('.answer .cursor')).toBeNull())
+    expect([...log().querySelectorAll('.answer p')].map((p) => p.textContent)).toEqual(['먼저 3층과 비교해 볼게요.', '4층에서 효율이 낮은 매장은 두 곳이에요.'])
+    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 3단계 · / })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '보내기' })).toBeTruthy()
+    // "새 대화" clears the conversation.
+    fireEvent.click(screen.getByRole('button', { name: '새 대화' }))
+    expect(screen.getByRole('heading', { name: '무엇을 도와드릴까요?' })).toBeTruthy()
+  })
+
+  it('shows a friendly error with the technical message folded away', async () => {
+    const stream = controlledStream()
+    await renderWithStream(stream.streamChat)
+    await stream.push(
+      { type: 'RUN_STARTED', thread_id: 't', run_id: 'r' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics_productivity', args: { floor: '4F' } },
+      { type: 'TOOL_CALL_END', tool_call_id: 'c1', summary: 'raw summary' },
+      { type: 'RUN_ERROR', message: '에이전트 실행 중 오류가 발생했습니다: RateLimitError' },
+      null,
+    )
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('답변을 만드는 중 문제가 생겼어요. 잠시 후 다시 시도해 주세요.')
+    const details = within(alert).getByText('자세히 보기').closest('details')!
+    expect(details.open).toBe(false)
+    expect(details.textContent).toContain('RateLimitError')
+    expect(within(alert).getByRole('button', { name: '다시 시도' })).toBeTruthy()
+    fireEvent.click(within(log()).getByRole('button', { name: /^작업 과정 보기 · 1단계/ }))
+    expect(within(log()).getByText('공간 생산성 계산')).toBeTruthy()
+    expect(log().textContent).not.toContain('analytics_productivity')
+    expect(log().textContent).not.toContain('raw summary')
   })
 })

@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { CHANGE_COLORS, NO_DATA_COLOR, VACANT_COLOR, hexToRgba, heatmapColor, tint } from '../lib/colors'
 import { buildFloorModel, type UnitInfo } from '../lib/geometry'
+import { normalizeJourney } from '../lib/journey'
 import type { FeatureCollection } from '../types/api'
 import {
+  EMPTY_JOURNEY_RENDER,
   changeMarksForFloor,
   crossFloorTargets,
   fitUnitLabel,
   layoutFloorBadges,
+  prepareJourney,
   removedUnits,
   resolveEdges,
   resolveHighlights,
@@ -144,5 +147,65 @@ describe('highlights, labels, edges and floor badges', () => {
     expect(edges[0]).toMatchObject({ crossFloor: null, label: 'lift 2.4', source: unit('3F-A01').centroid })
     expect(edges[0].width).toBeGreaterThan(edges[1].width)
     expect(edges[1]).toMatchObject({ crossFloor: '1F', target: badges[1].world, label: '1.0' })
+  })
+})
+
+describe('customer journey render data', () => {
+  // 1F -> 3F by ESC-A, two stops on 3F, back to 1F by ESC-A; one 3F stop has no coordinates.
+  const journey = normalizeJourney({
+    stops: [
+      { order: 1, time: '11:32', unit_code: '1F-C03', floor: '1F', x: 90, y: 37 },
+      { order: 2, time: '12:41', unit_code: '3F-C05', floor: '3F', x: 60, y: 50 },
+      { order: 3, time: '13:20', unit_code: '3F-S03', floor: '3F', x: null, y: null },
+      { order: 4, time: '14:37', unit_code: '1F-E01', floor: '1F', x: 108, y: 27.5 },
+    ],
+    segments: [
+      { floor: '1F', points: [[90, 37], [90, 40], [49.5, 40], [51, 40]], from_order: 1, to_order: 2 },
+      { floor: '3F', points: [[51, 40], [49.5, 40], [49.5, 48.5], [60, 50]], from_order: 1, to_order: 2 },
+      { floor: '3F', points: [[60, 50]], from_order: 2, to_order: 3 },
+      { floor: '3F', points: [[70.5, 15], [70.5, 31.5], [49.5, 31.5], [51, 40]], from_order: 3, to_order: 4 },
+      { floor: '1F', points: [[51, 40], [49.5, 31.5], [105, 27.5], [108, 27.5]], from_order: 3, to_order: 4 },
+    ],
+    transitions: [
+      { from_order: 1, to_order: 2, from_floor: '1F', to_floor: '3F', via: 'ESC-A' },
+      { from_order: 3, to_order: 4, from_floor: '3F', to_floor: '1F', via: 'ESC-A' },
+    ],
+  })
+
+  it('keeps only the current floor: paths with 2+ points and stops with coordinates', () => {
+    const f1 = prepareJourney(journey, '1F')
+    expect(f1.paths.map((p) => p.key)).toEqual(['seg-0', 'seg-4'])
+    expect(f1.stops.map((s) => [s.order, s.position, s.time])).toEqual([
+      [1, [90, 37], '11:32'],
+      [4, [108, 27.5], '14:37'],
+    ])
+    const f3 = prepareJourney(journey, '3F')
+    // The one-point segment (no walkway path) is not drawn; the stop without coordinates is skipped.
+    expect(f3.paths.map((p) => p.key)).toEqual(['seg-1', 'seg-3'])
+    expect(f3.stops.map((s) => s.order)).toEqual([2])
+    expect(prepareJourney(journey, '5F')).toEqual({ paths: [], stops: [], notes: [] })
+    expect(prepareJourney(null, '1F')).toBe(EMPTY_JOURNEY_RENDER)
+  })
+
+  it('labels where the path leaves for and arrives from another floor', () => {
+    expect(prepareJourney(journey, '1F').notes).toEqual([
+      { key: 'depart-0', position: [51, 40], text: '→ 3층 (ESC-A)', kind: 'depart', stack: 0 },
+      { key: 'arrive-1', position: [51, 40], text: '3층에서 내려옴', kind: 'arrive', stack: 1 },
+    ])
+    expect(prepareJourney(journey, '3F').notes).toEqual([
+      { key: 'arrive-0', position: [51, 40], text: '1층에서 올라옴', kind: 'arrive', stack: 0 },
+      { key: 'depart-1', position: [51, 40], text: '→ 1층 (ESC-A)', kind: 'depart', stack: 1 },
+    ])
+  })
+
+  it('falls back to the stop position when a floor change has no segment', () => {
+    const sparse = normalizeJourney({
+      stops: [
+        { order: 1, time: '10:00', unit_code: 'B1-C05', floor: 'B1', x: 52.4, y: 31 },
+        { order: 2, time: '10:30', unit_code: '3F-C01', floor: '3F', x: 30, y: 37 },
+      ],
+    })
+    expect(prepareJourney(sparse, 'B1').notes).toEqual([{ key: 'depart-0', position: [52.4, 31], text: '→ 3층', kind: 'depart', stack: 0 }])
+    expect(prepareJourney(sparse, '3F', floors).notes.map((n) => [n.text, n.position])).toEqual([['지하 1층에서 올라옴', [30, 37]]])
   })
 })

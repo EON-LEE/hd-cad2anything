@@ -1,5 +1,6 @@
 // Data access for the Atlas API contract (docs/specs/atlas-api.md).
 import { categoryColorByIndex } from '../lib/colors'
+import { normalizeJourney, segmentParam } from '../lib/journey'
 import { decodeAgUiMessage, readSseStream } from '../lib/sse'
 import type {
   AgUiEvent,
@@ -8,6 +9,8 @@ import type {
   ChangesResponse,
   ChatRequest,
   FeatureCollection,
+  Journey,
+  JourneyParams,
   LayoutRequest,
   LayoutResponse,
   Meta,
@@ -24,6 +27,8 @@ export interface AtlasDataSource {
   reviewArtifact(rev: string, generator: string, body: ReviewRequest): Promise<Artifact>
   getProductivity(rev: string, floor: string): Promise<ProductivityResponse>
   getLayoutAlternatives(body: LayoutRequest): Promise<LayoutResponse>
+  /** GET /api/analytics/journey; rejects with ApiError(404) when no journey matches. */
+  getJourney(params: JourneyParams): Promise<Journey>
   /** POST /api/chat and deliver each AG-UI event; resolves when the stream ends. */
   streamChat(body: ChatRequest, onEvent: (event: AgUiEvent) => void, signal?: AbortSignal): Promise<void>
   artifactFileUrl(rev: string, generator: string, file: ArtifactFile): string | null
@@ -40,6 +45,19 @@ export class ApiError extends Error {
 }
 
 const enc = encodeURIComponent
+
+/** `?customer_id=&date=&segment=&rank=` with empty parameters left out. */
+export function journeyQuery(params: JourneyParams): string {
+  const query = new URLSearchParams()
+  if (params.customer_id) query.set('customer_id', params.customer_id)
+  if (params.date) query.set('date', params.date)
+  const segment = segmentParam(params.segment)
+  if (segment) query.set('segment', segment)
+  if (typeof params.rank === 'number' && Number.isFinite(params.rank) && params.rank >= 1) query.set('rank', String(Math.round(params.rank)))
+  if (params.rev) query.set('rev', params.rev)
+  const text = query.toString()
+  return text ? `?${text}` : ''
+}
 
 async function errorFrom(res: Response): Promise<ApiError> {
   const text = await res.text().catch(() => '')
@@ -75,6 +93,12 @@ export function createHttpSource(baseUrl = ''): AtlasDataSource {
       request<ProductivityResponse>(`/api/analytics/productivity?${new URLSearchParams({ rev, floor, level: 'unit' })}`),
     getLayoutAlternatives: (body) =>
       request<LayoutResponse>('/api/layout/alternatives', { method: 'POST', body: JSON.stringify(body) }),
+    async getJourney(params) {
+      const raw = await request<unknown>(`/api/analytics/journey${journeyQuery(params)}`)
+      const journey = normalizeJourney(raw)
+      if (!journey) throw new ApiError(404, '동선 응답에 표시할 결제 기록이 없습니다.')
+      return journey
+    },
     async streamChat(body, onEvent, signal) {
       const res = await fetch(`${baseUrl}/api/chat`, {
         method: 'POST',

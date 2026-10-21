@@ -53,6 +53,20 @@ def test_journey_picks_a_multi_floor_customer_day_with_routes(toolkit):
         toolkit.customer_journey(segment="tier:VIP", rank=100000)
 
 
+def test_journey_rev_limits_candidates_to_that_layout_period(toolkit):
+    for rev in ("R0", "R1", "R2"):
+        start, end, _ = toolkit.revision_period(rev)
+        journey = toolkit.customer_journey(segment="tier:VIP|VVIP", rev=rev, with_routes=False)
+        assert start <= journey["date"] <= end and journey["rev"] == rev
+        assert journey["query"]["rev"] == rev
+    hypothetical = toolkit.customer_journey(segment="tier:VIP|VVIP", rev="H1", with_routes=False)
+    assert hypothetical["rev"] == "R2" and hypothetical["query"]["rev"] == "R2"
+    by_customer = toolkit.customer_journey(
+        customer_id=hypothetical["customer"]["id"], rev="R0", with_routes=False
+    )
+    assert "rev" not in by_customer["query"]
+
+
 def test_journey_endpoint_returns_the_ui_state_object(toolkit):
     client = TestClient(create_api(toolkit))
     body = client.get("/api/analytics/journey", params={"segment": "age_band:40s", "rank": 1}).json()
