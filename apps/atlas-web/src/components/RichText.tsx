@@ -1,62 +1,74 @@
 import { Fragment, type ReactNode } from 'react'
+import { parseInline, parseRichText } from '../lib/richText'
 
 function inline(text: string, keyPrefix: string): ReactNode[] {
-  // Only **bold** is interpreted; everything else is rendered as plain (escaped) text.
-  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
-    part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (
-      <strong key={`${keyPrefix}-${i}`}>{part.slice(2, -2)}</strong>
-    ) : (
-      <Fragment key={`${keyPrefix}-${i}`}>{part}</Fragment>
-    ),
-  )
+  return parseInline(text).map((segment, i) => {
+    const key = `${keyPrefix}-${i}`
+    if (segment.kind === 'bold') return <strong key={key}>{segment.text}</strong>
+    if (segment.kind === 'code') return <code key={key}>{segment.text}</code>
+    return <Fragment key={key}>{segment.text}</Fragment>
+  })
 }
 
-/** Minimal, safe rendering of assistant text: paragraphs, "- " bullet lists and **bold**. */
+/** Safe rendering of assistant text: headings, paragraphs, lists, pipe tables, rules, **bold**, `code`. */
 export function RichText({ text }: { text: string }) {
-  const blocks: ReactNode[] = []
-  let list: string[] = []
-  let paragraph: string[] = []
-  const flushList = () => {
-    if (!list.length) return
-    const items = list
-    blocks.push(
-      <ul key={`ul-${blocks.length}`}>
-        {items.map((item, i) => (
-          <li key={i}>{inline(item, `li-${blocks.length}-${i}`)}</li>
-        ))}
-      </ul>,
-    )
-    list = []
-  }
-  const flushParagraph = () => {
-    if (!paragraph.length) return
-    const lines = paragraph
-    blocks.push(
-      <p key={`p-${blocks.length}`}>
-        {lines.map((line, i) => (
-          <Fragment key={i}>
-            {i > 0 && <br />}
-            {inline(line, `p-${blocks.length}-${i}`)}
-          </Fragment>
-        ))}
-      </p>,
-    )
-    paragraph = []
-  }
-  for (const line of text.split('\n')) {
-    const bullet = /^\s*[-•]\s+(.*)$/.exec(line)
-    if (bullet) {
-      flushParagraph()
-      list.push(bullet[1])
-    } else if (line.trim() === '') {
-      flushList()
-      flushParagraph()
-    } else {
-      flushList()
-      paragraph.push(line)
-    }
-  }
-  flushList()
-  flushParagraph()
-  return <>{blocks}</>
+  return (
+    <>
+      {parseRichText(text).map((block, b) => {
+        const key = `b${b}`
+        switch (block.kind) {
+          case 'heading':
+            return (
+              <h4 key={key} className="rich-heading">
+                {inline(block.text, key)}
+              </h4>
+            )
+          case 'rule':
+            return <hr key={key} />
+          case 'list': {
+            const items = block.items.map((item, i) => <li key={i}>{inline(item, `${key}-${i}`)}</li>)
+            return block.ordered ? <ol key={key}>{items}</ol> : <ul key={key}>{items}</ul>
+          }
+          case 'table':
+            return (
+              <div key={key} className="rich-table">
+                <table>
+                  {block.header && (
+                    <thead>
+                      <tr>
+                        {block.header.map((cell, i) => (
+                          <th key={i} scope="col">
+                            {inline(cell, `${key}-h${i}`)}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                  )}
+                  <tbody>
+                    {block.rows.map((row, r) => (
+                      <tr key={r}>
+                        {row.map((cell, i) => (
+                          <td key={i}>{inline(cell, `${key}-${r}-${i}`)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          default:
+            return (
+              <p key={key}>
+                {block.lines.map((line, i) => (
+                  <Fragment key={i}>
+                    {i > 0 && <br />}
+                    {inline(line, `${key}-${i}`)}
+                  </Fragment>
+                ))}
+              </p>
+            )
+        }
+      })}
+    </>
+  )
 }

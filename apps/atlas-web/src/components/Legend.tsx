@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { useData } from '../api/source'
-import { CHANGE_LABELS, CHANGE_ORDER, NO_DATA_COLOR, VACANT_COLOR, changeColor, heatmapGradientCss, rgbaToCss } from '../lib/colors'
+import { CHANGE_LABELS, CHANGE_ORDER, NO_DATA_COLOR, VACANT_COLOR, changeColor, heatmapColor, heatmapGradientCss, rgbaToCss } from '../lib/colors'
 import type { FloorModel } from '../lib/geometry'
 import type { HighlightRender } from '../map/prepare'
 import type { Heatmap } from '../types/api'
@@ -63,13 +63,30 @@ export function Legend({ model, heatmap, changeMarks, compareRev, rev, highlight
         {heatmap ? (
           <section>
             <h3>{heatmap.label || heatmap.metric}</h3>
-            <div className="gradient" style={{ background: heatmapGradientCss() }} aria-hidden="true" />
-            <div className="ticks">
-              <span>0 낮음</span>
-              <span>0.5</span>
-              <span>1 높음</span>
-            </div>
-            <p className="hint">진할수록 높음 (0~1 정규화 값)</p>
+            {heatmap.legend?.binary ? (
+              <ul>
+                <li>
+                  <span className="swatch" style={{ background: rgbaToCss(heatmapColor(1)) }} aria-hidden="true" />
+                  {heatmap.legend.high ?? '해당'}
+                </li>
+                <li>
+                  <span className="swatch" style={{ background: rgbaToCss(heatmapColor(0)) }} aria-hidden="true" />
+                  {heatmap.legend.low ?? '해당 없음'}
+                </li>
+              </ul>
+            ) : (
+              <>
+                <div className="gradient" style={{ background: heatmapGradientCss() }} aria-hidden="true" />
+                <div className="ticks">
+                  <span>{heatmap.legend?.low ?? '0 낮음'}</span>
+                  <span>0.5</span>
+                  <span>{heatmap.legend?.high ?? '1 높음'}</span>
+                </div>
+              </>
+            )}
+            {(heatmap.legend?.note || !heatmap.legend?.binary) && (
+              <p className="hint">{heatmap.legend?.note ?? '진할수록 높음 (0~1 정규화 값)'}</p>
+            )}
             <ul>
               <li>
                 <span className="swatch" style={{ background: rgbaToCss(NO_DATA_COLOR) }} aria-hidden="true" />

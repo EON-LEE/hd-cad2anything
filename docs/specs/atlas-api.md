@@ -61,10 +61,11 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | 필드 | 규칙 |
 |---|---|
 | `heatmap`, `heatmap.values` | `values`는 0~1로 정규화한 값이다. `heatmap`이나 `heatmap.values`가 `null`이면 heatmap을 끄고 카테고리 색으로 칠한다. |
+| `heatmap.legend` | 선택 필드 `{low, high, note, binary}`. 색의 의미가 "값이 클수록 진함"이 아닐 때 범례 문구를 지정한다. `binary`가 `true`이면 범례에 두 색만 표시한다. 예: 저효율 플래그, 에스컬레이터 접근성(가까울수록 진함). |
 | `edges` | 다른 층 매장과 이으면 화면 가장자리의 층 배지로 연결해 표시한다. |
 | `focus` | 다른 층 매장에 초점을 맞출 때는 `/floor` 변경을 같은 `STATE_DELTA`에 함께 보낸다. |
 | `panel.type` | `changes`, `artifact`, `layout`, `table`, `none` 중 하나다. |
-| `panel.payload` | `changes`: `{rev_from, rev_to}`, `artifact`: `{generator}`, `layout`: `{rev, floors, alternatives}`, `table`: `{title, columns, rows}` |
+| `panel.payload` | `changes`: `{rev_from, rev_to}`, `artifact`: `{generator}`, `layout`: `{rev, floors, alternatives}`, `table`: `{title, columns, rows}`. 백엔드는 `table`의 객체 행과 열 단위 데이터를 값 배열 행으로 바꾼다. 행이 없으면 패널을 열지 않고 에이전트에게 오류를 돌려준다. |
 
 **표기 규칙**
 

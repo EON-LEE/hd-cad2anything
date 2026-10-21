@@ -274,10 +274,19 @@ export interface GraphEdge {
   color?: string
 }
 
+export interface HeatmapLegend {
+  /** Two-valued metric (for example a low-efficiency flag): show two swatches instead of a gradient. */
+  binary?: boolean
+  low?: string
+  high?: string
+  note?: string
+}
+
 export interface Heatmap {
   metric: string
   label: string
   values: Record<string, number> | null
+  legend?: HeatmapLegend
 }
 
 export interface LayerToggles {

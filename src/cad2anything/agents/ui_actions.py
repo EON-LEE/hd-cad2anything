@@ -15,9 +15,24 @@ METRIC_LABELS = {
     "sales_krw": "연환산 매출(원)",
     "aov_krw": "객단가(원)",
     "gmrof": "GMROF",
-    "walk_to_escalator_m": "에스컬레이터까지 거리(m)",
-    "low_efficiency": "저효율 매장",
+    "walk_to_escalator_m": "에스컬레이터 접근성(보행거리)",
+    "low_efficiency": "저효율 매장(층 하위 10%)",
 }
+# Legend hints for metrics whose color does not simply mean "higher value" (see docs/specs/atlas-api.md).
+METRIC_LEGENDS: dict[str, dict[str, Any]] = {
+    "walk_to_escalator_m": {
+        "low": "멀다",
+        "high": "가깝다",
+        "note": "진할수록 에스컬레이터까지 보행거리가 짧습니다.",
+    },
+    "low_efficiency": {"binary": True, "low": "그 외 매장", "high": "저효율 매장(층 하위 10%)"},
+}
+TABLE_ROW_KEYS = ("rows", "data", "items", "records", "table", "units", "values")
+MAX_TABLE_ROWS = 200
+TABLE_SHAPE_ERROR = (
+    "table payload에는 행이 필요합니다. 형식: {title, columns: [열 이름], rows: [[값, ...], ...]}. "
+    "도구 결과의 실제 값을 rows에 넣어 다시 호출하세요."
+)
 
 
 @dataclass
@@ -38,6 +53,44 @@ def normalize(values: dict[str, float], invert: bool = False) -> dict[str, float
     span = high - low or 1.0
     scaled = {k: (v - low) / span for k, v in finite.items()}
     return {k: round(1.0 - v if invert else v, 4) for k, v in scaled.items()}
+
+
+def table_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Coerce an agent's table payload to ``{title, columns, rows}`` with list rows; None if it has no rows.
+
+    Accepts rows as lists or dicts, rows under common alternative keys, and column-oriented dicts.
+    """
+    rows: Any = next((payload[k] for k in TABLE_ROW_KEYS if isinstance(payload.get(k), list | dict)), None)
+    columns = payload.get("columns")
+    if isinstance(rows, dict):
+        series = {str(k): v for k, v in rows.items() if isinstance(v, list)}
+        if series and len({len(v) for v in series.values()}) == 1:
+            columns, rows = list(series), [list(row) for row in zip(*series.values(), strict=True)]
+        elif all(isinstance(v, dict) for v in rows.values()):
+            rows = [{"항목": key, **value} for key, value in rows.items()]
+        else:
+            rows = [{"항목": key, "값": value} for key, value in rows.items()]
+    if not rows:
+        return None
+    if not (isinstance(columns, list) and columns):
+        if all(isinstance(row, dict) for row in rows):
+            columns = list(dict.fromkeys(key for row in rows for key in row))
+        else:
+            width = max(len(row) if isinstance(row, list) else 1 for row in rows)
+            columns = [f"열{i + 1}" for i in range(width)]
+    columns = [str(column) for column in columns]
+    width = len(columns)
+    normalized = []
+    for row in rows[:MAX_TABLE_ROWS]:
+        if isinstance(row, dict):
+            cells = [row.get(column) for column in columns]
+        elif isinstance(row, list):
+            cells = row[:width] + [None] * (width - len(row))
+        else:
+            cells = [row] + [None] * (width - 1)
+        normalized.append(cells)
+    title = str(payload.get("title") or "데이터 표")
+    return {"title": title, "columns": columns, "rows": normalized, "truncated": len(rows) > MAX_TABLE_ROWS}
 
 
 class UiActionHandler:
@@ -73,6 +126,8 @@ class UiActionHandler:
             return UiActionResult(json.dumps(error, ensure_ascii=False))
         values = normalize(raw, invert=metric == "walk_to_escalator_m")
         heatmap = {"metric": metric, "label": METRIC_LABELS.get(metric, metric), "values": values}
+        if metric in METRIC_LEGENDS:
+            heatmap["legend"] = METRIC_LEGENDS[metric]
         patches = [_replace("/heatmap", heatmap)]
         if floor and floor != ui_state.get("floor"):
             patches.insert(0, _replace("/floor", floor))
@@ -114,8 +169,19 @@ class UiActionHandler:
         return UiActionResult(json.dumps({"ok": True}), patches)
 
     def _ui_show_panel(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
-        panel = {"type": args["type"], "payload": args.get("payload") or {}}
-        return UiActionResult(json.dumps({"ok": True, "panel": args["type"]}), [_replace("/panel", panel)])
+        panel_type = args["type"]
+        payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
+        output: dict[str, Any] = {"ok": True, "panel": panel_type}
+        if panel_type == "table":
+            table = table_payload(payload)
+            if table is None:  # opening an empty table would only show "no rows"; let the model retry
+                return UiActionResult(
+                    json.dumps({"ok": False, "error": TABLE_SHAPE_ERROR}, ensure_ascii=False)
+                )
+            payload = table
+            output["rows"] = len(table["rows"])
+        panel = {"type": panel_type, "payload": payload}
+        return UiActionResult(json.dumps(output, ensure_ascii=False), [_replace("/panel", panel)])
 
     def _ui_clear(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         what = args["what"]
