@@ -1,0 +1,96 @@
+# Client-side function tools for the orchestrator. The atlas-api bridge executes them and
+# converts the result into STATE_DELTA events (docs/specs/atlas-api.md).
+tools:
+  - name: ui_set_floor
+    description: Atlas 화면의 층을 바꾼다.
+    parameters:
+      type: object
+      properties:
+        floor: { type: string, description: "층 코드. 예: B1, 1F, 3F" }
+      required: [floor]
+      additionalProperties: false
+  - name: ui_show_heatmap
+    description: 지표로 매장을 색칠한다. 값은 백엔드가 분석 결과로 계산한다.
+    parameters:
+      type: object
+      properties:
+        metric:
+          type: string
+          enum: [sales_per_m2, sales_krw, aov_krw, gmrof, walk_to_escalator_m, low_efficiency]
+        rev: { type: string }
+        floor: { type: string }
+      required: [metric, rev, floor]
+      additionalProperties: false
+  - name: ui_highlight_units
+    description: 매장을 강조 표시한다.
+    parameters:
+      type: object
+      properties:
+        unit_codes: { type: array, items: { type: string } }
+        color: { type: string, description: "CSS 색상. 기본 #e53935" }
+        reason: { type: string }
+      required: [unit_codes]
+      additionalProperties: false
+  - name: ui_draw_edges
+    description: 매장 사이 관계선을 그린다(교차구매, 인접, 이동 등).
+    parameters:
+      type: object
+      properties:
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              from: { type: string }
+              to: { type: string }
+              weight: { type: number }
+              label: { type: string }
+            required: [from, to]
+            additionalProperties: false
+      required: [edges]
+      additionalProperties: false
+  - name: ui_focus
+    description: 매장들이 보이도록 화면을 확대한다.
+    parameters:
+      type: object
+      properties:
+        unit_codes: { type: array, items: { type: string } }
+      required: [unit_codes]
+      additionalProperties: false
+  - name: ui_compare
+    description: 두 개정을 비교해 변경 매장을 색으로 표시한다.
+    parameters:
+      type: object
+      properties:
+        rev_from: { type: string }
+        rev_to: { type: string }
+      required: [rev_from, rev_to]
+      additionalProperties: false
+  - name: ui_show_panel
+    description: 오른쪽 패널을 연다.
+    parameters:
+      type: object
+      properties:
+        type: { type: string, enum: [changes, artifact, layout, table, none] }
+        payload: { type: object }
+      required: [type]
+      additionalProperties: false
+  - name: ui_clear
+    description: 화면 표시를 지운다.
+    parameters:
+      type: object
+      properties:
+        what: { type: string, enum: [heatmap, highlights, edges, all] }
+      required: [what]
+      additionalProperties: false
+  - name: consult_specialist
+    description: 전문 에이전트에게 작업을 맡기고 결과를 받는다.
+    parameters:
+      type: object
+      properties:
+        agent:
+          type: string
+          enum: [cad_change_interpreter, space_productivity_analyst, layout_planner, generator, qa_reviewer, researcher]
+        request: { type: string, description: "전문 에이전트에게 보낼 구체적인 요청" }
+      required: [agent, request]
+      additionalProperties: false
