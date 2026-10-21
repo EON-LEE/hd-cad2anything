@@ -1,0 +1,8 @@
+* text=auto
+*.dxf binary
+*.dwg binary
+*.xlsx binary
+*.svg text eol=lf
+*.json text eol=lf
+*.bicep text eol=lf
+*.sh text eol=lf

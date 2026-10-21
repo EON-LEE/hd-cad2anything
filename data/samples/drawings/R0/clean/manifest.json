@@ -1,0 +1,37 @@
+{
+  "facility": "FLAGSHIP",
+  "facility_name": "가상 플래그십점",
+  "revision": "R0",
+  "kind": "actual",
+  "parent_revision": null,
+  "effective_date": "2024-10-01",
+  "variant": "clean",
+  "units": "m",
+  "levels": [
+    {
+      "floor": "3F",
+      "ordinal": 2,
+      "name": "여성 컨템포러리",
+      "file": "flagship_R0_3F.dxf",
+      "elevation_m": 10.0,
+      "height_m": 5.0
+    }
+  ],
+  "layers": {
+    "exterior": "A-EXTR",
+    "wall": "A-WALL",
+    "unit": "A-UNIT",
+    "unit_label": "A-UNIT-IDEN",
+    "zone": "A-ZONE",
+    "zone_label": "A-ZONE-IDEN",
+    "walkway": "A-CORR",
+    "escalator": "A-VERT-ESCL",
+    "elevator": "A-VERT-ELEV",
+    "stair": "A-VERT-STAI",
+    "opening": "A-DOOR",
+    "amenity": "A-AMEN",
+    "amenity_label": "A-AMEN-IDEN",
+    "fixture": "A-FIXT",
+    "annotation": "A-ANNO"
+  }
+}
