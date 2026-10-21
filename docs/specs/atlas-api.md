@@ -60,6 +60,16 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 | 필드 | 규칙 |
 |---|---|
-| `heatmap.values` | 0~1로 정규화한 값이다. `null`이면 heatmap을 끄고 카테고리 색으로 칠한다. |
+| `heatmap`, `heatmap.values` | `values`는 0~1로 정규화한 값이다. `heatmap`이나 `heatmap.values`가 `null`이면 heatmap을 끄고 카테고리 색으로 칠한다. |
 | `edges` | 다른 층 매장과 이으면 화면 가장자리의 층 배지로 연결해 표시한다. |
+| `focus` | 다른 층 매장에 초점을 맞출 때는 `/floor` 변경을 같은 `STATE_DELTA`에 함께 보낸다. |
 | `panel.type` | `changes`, `artifact`, `layout`, `table`, `none` 중 하나다. |
+| `panel.payload` | `changes`: `{rev_from, rev_to}`, `artifact`: `{generator}`, `layout`: `{rev, floors, alternatives}`, `table`: `{title, columns, rows}` |
+
+**표기 규칙**
+
+- SSE는 `data: {...}` 다음에 빈 줄을 두는 표준 형식을 쓴다.
+- 필드 이름은 snake_case를 기준으로 한다. 클라이언트는 AG-UI의 camelCase 이름도 받아들이고, 모르는 이벤트 유형은 무시한다.
+- `STATE_DELTA`는 전부 적용하거나 전부 버린다. 한 연산이라도 실패하면 화면에 갱신 실패를 표시한다.
+- `percentile`은 0~100 척도다.
+- 전문 에이전트 안에서 일어난 도구 호출은 `TOOL_CALL_START`에 `parent_tool_call_id`와 `agent`를 붙여 보낸다.
