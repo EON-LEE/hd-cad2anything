@@ -64,6 +64,8 @@ def test_floor_transitions_and_time_patterns(toolkit):
     assert abs(sum(first_row) - 1) < 1e-3
     hours = toolkit.analytics_time_patterns(by="hour", category="푸드코트")
     assert {row["hour"] for row in hours["rows"]} <= set(range(24))
+    weekday = toolkit.analytics_time_patterns(by=["weekday", "hour"], category="F&B")
+    assert weekday["rows"] and weekday["category"] == "F&B"
     with pytest.raises(ToolError):
         toolkit.analytics_time_patterns(by="season")
 

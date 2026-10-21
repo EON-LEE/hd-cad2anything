@@ -72,6 +72,16 @@ HYPOTHETICAL_HINT = (
 )
 PAIR_CAVEAT = "같은 고객의 구매가 함께 나타나는 정도입니다. 매장 간 동선이나 인과를 뜻하지 않습니다."
 LAYOUT_NOTE = "검토용 대안입니다. 실제 도면이 아니며, 매출 변화는 모형 추정치입니다."
+# Category groups accepted where a filter may cover several categories (aliases are matched without spaces).
+CATEGORY_GROUPS = {"F&B": tuple(code for code, cat in CATEGORIES.items() if cat.is_food_beverage)}
+GROUP_ALIASES = {
+    "F&B": "F&B",
+    "FNB": "F&B",
+    "F＆B": "F&B",
+    "식음료": "F&B",
+    "식음": "F&B",
+    "식품·음료": "F&B",
+}
 
 
 def _json(value: Any) -> Any:
@@ -319,6 +329,11 @@ class AnalyticsTools:
             return matches[0]
         options = ", ".join(f"{code}({cat.name_ko})" for code, cat in CATEGORIES.items())
         raise ToolError(f"카테고리 '{text}'를 특정할 수 없습니다. 사용 가능한 값: {options}")
+
+    def _resolve_categories(self, text: Any) -> list[str]:
+        """One category, or every category of a group such as F&B (식음료)."""
+        group = GROUP_ALIASES.get(str(text or "").strip().upper().replace(" ", ""))
+        return list(CATEGORY_GROUPS[group]) if group else [self._resolve_category(text)]
 
     def _resolve_brand(self, text: Any) -> str:
         value = str(text or "").strip()
@@ -803,7 +818,7 @@ class AnalyticsTools:
         if floor:
             frame = frame[frame["floor"] == _floor_code(floor)]
         if category:
-            frame = frame[frame["category"] == self._resolve_category(category)]
+            frame = frame[frame["category"].isin(self._resolve_categories(category))]
         if frame.empty:
             raise ToolError("조건에 맞는 거래가 없습니다.")
         table = time_patterns(frame, by=dims, start=s, end=e)

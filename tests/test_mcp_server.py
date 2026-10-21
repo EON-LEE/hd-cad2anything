@@ -42,7 +42,9 @@ def test_tools_over_the_protocol(server):
             assert not ok.is_error and json.loads(ok.content[0].text)["units"] == 42
 
             bad = await client.call_tool("spatial_floor_summary", {"rev": "R7", "floor": "3F"})
-            assert bad.is_error and "R7" in bad.content[0].text and "R0" in bad.content[0].text
+            payload = json.loads(bad.content[0].text)
+            assert not bad.is_error and payload["ok"] is False
+            assert "R7" in payload["error"] and "R0" in payload["error"]
 
     asyncio.run(scenario())
 
