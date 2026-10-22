@@ -2,14 +2,26 @@
 // script sends labelled tool calls (nested calls inside a specialist agent), STATE_DELTA patches for
 // UI function tools and exactly one assistant message streamed in small deltas.
 import { CHANGE_COLORS, CHANGE_LABELS, CHANGE_ORDER, DEFAULT_HIGHLIGHT_COLOR } from '../lib/colors'
-import { APPROVAL_MODE_LABELS, RISK_LABELS, floorLabel, formatKrw, formatManwon, formatMinutes, formatNumber, withEuro } from '../lib/format'
-import { segmentParam, transitionText } from '../lib/journey'
+import {
+  APPROVAL_MODE_LABELS,
+  RISK_LABELS,
+  floorLabel,
+  formatKrw,
+  formatManwon,
+  formatMinutes,
+  formatNumber,
+  formatWalk,
+  withEuro,
+} from '../lib/format'
+import { segmentParam, transitionDirection, transitionText, viaLabel } from '../lib/journey'
 import type { PatchOperation } from '../lib/jsonPatch'
 import { QUICK_PROMPTS } from '../lib/prompts'
-import type { AgUiEvent, ChatRequest, GraphEdge, Highlight } from '../types/api'
+import { routeFloors } from '../lib/route'
+import type { AgUiEvent, ChatRequest, GraphEdge, Highlight, RoutePlace } from '../types/api'
 import { mockLayoutAlternatives, mockProductivityDetails, planImpact } from './analytics'
 import { categoryName } from './catalog'
-import { mockJourney } from './journey'
+import { mockJourney, pathLength } from './journey'
+import { mockRoute, placePhrase, roundWalk } from './route'
 import { changesBetween, type MockWorld } from './world'
 
 export interface ScriptStep {
@@ -144,6 +156,9 @@ class ScriptBuilder {
 
 const replace = (path: string, value: unknown): PatchOperation => ({ op: 'replace', path, value })
 
+/** Later heatmap, highlight, edge and compare displays replace a drawn journey or route (contract §3). */
+const CLEAR_PATHS: readonly PatchOperation[] = [replace('/journey', null), replace('/route', null)]
+
 function detectFloor(message: string, fallback: string): string {
   const basement = /지하\s*(\d+)\s*층/.exec(message)
   if (basement) return `B${basement[1]}`
@@ -237,6 +252,7 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
     replace('/rev', to),
     replace('/compareRev', from),
     replace('/heatmap', null),
+    ...CLEAR_PATHS,
   ])
   b.ui('ui_highlight_units', `${floorLabel(focusFloor)} 변경 매장 ${codes.length}곳 강조`, { unit_codes: codes }, [
     replace('/floor', focusFloor),
@@ -322,6 +338,7 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
     replace('/floor', floor),
     replace('/compareRev', null),
     replace('/heatmap', { metric: 'sales_per_m2', label: '평효율(원/㎡)', values }),
+    ...CLEAR_PATHS,
   ])
   b.ui('ui_highlight_units', `저효율 매장 ${codes.length}곳 강조`, { unit_codes: codes }, [replace('/highlights', highlights)])
   b.ui('ui_draw_edges', `교차구매 관계선 ${edges.length}개 표시`, { edges: edges.length }, [replace('/edges', edges)])
@@ -392,6 +409,7 @@ function crossShoppingScript(world: MockWorld, req: ChatRequest, b: ScriptBuilde
     replace('/heatmap', null),
     replace('/compareRev', null),
     replace('/edges', edges),
+    ...CLEAR_PATHS,
   ])
   b.ui('ui_highlight_units', cosmetics ? `화장품 매장 ${highlights.length}곳 강조` : '중심 브랜드 강조', { unit_codes: centers }, [
     replace('/highlights', highlights),
@@ -465,6 +483,7 @@ function layoutScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scr
       best.moves.map((m) => ({ from: m.from_unit, to: m.to_unit, weight: 2, label: m.brand_name, color: CHANGE_COLORS.move })),
     ),
     replace('/focus', { unit_codes: moved }),
+    ...CLEAR_PATHS,
   ])
 
   const lines = note ? [note, ''] : []
@@ -522,6 +541,7 @@ function journeyScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Sc
     replace('/highlights', []),
     replace('/edges', []),
     replace('/journey', null),
+    replace('/route', null),
     replace('/focus', null),
     replace('/compareRev', null),
   ])
@@ -559,6 +579,115 @@ function journeyScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Sc
   return b.answer(lines.join('\n'))
 }
 
+const UNIT_CODE_PATTERN = /\b(?:B\d|\d{1,2}F)-[A-Z]\d{2}[A-Z]?\b/g
+
+/** Asking the way: "정문에서 3층까지 가는 길 알려줘", "카페 어떻게 가?", "3F-C05까지 경로". */
+const ROUTE_PATTERN = /가는\s*(?:길|방법)|길\s*(?:찾|안내|알려)|찾아\s*가|어떻게\s*가|최단\s*경로|까지\s*(?:의\s*)?(?:경로|길)/
+
+/** Store to walk to when a question names only a floor ("3층 매장까지"). */
+const DEFAULT_ROUTE_DESTINATIONS: Readonly<Record<string, string>> = { '3F': '3F-C05', '1F': '1F-C05' }
+
+/** The last floor named in a question ("1층 정문에서 3층 카페까지" -> 3F); null when none. */
+export function lastFloorMention(message: string): string | null {
+  let floor: string | null = null
+  for (const match of message.matchAll(/지하\s*(\d+)\s*층|(\d+)\s*층|\b(B\d|\d{1,2}F)\b/gi)) {
+    floor = match[1] ? `B${match[1]}` : match[2] ? `${match[2]}F` : match[3].toUpperCase()
+  }
+  return floor
+}
+
+/** Unit of a brand named in the question, if any. */
+function unitByBrand(world: MockWorld, rev: string, message: string): string | null {
+  const text = message.toLowerCase()
+  for (const floor of Object.values(world.revisions.get(rev)?.floors ?? {})) {
+    for (const unit of floor.units) {
+      const name = unit.brandId ? world.brands.get(unit.brandId)?.name : undefined
+      if (name && text.includes(name.toLowerCase())) return unit.code
+    }
+  }
+  return null
+}
+
+/** "정문", "Cafe Halune": a place's name without its code, for step labels. */
+function shortPlaceName(place: RoutePlace): string {
+  if (place.kind === 'entrance') return place.label.split(' ').slice(1).join(' ') || place.label
+  return place.label.replace(/\s*\([^)]*\)$/, '') || place.label
+}
+
+function routeScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
+  const rev = req.ui_state.rev
+  const message = req.message
+  const origin = /서측|서쪽/.test(message) ? 'ENT-2' : /동측|동쪽/.test(message) ? 'ENT-3' : 'ENT-1'
+  const via = /엘리베이터/.test(message) ? 'elevator' : 'escalator'
+  let note = ''
+  let destination =
+    [...new Set(message.toUpperCase().match(UNIT_CODE_PATTERN) ?? [])].find((c) => unitExists(world, rev, c)) ??
+    unitByBrand(world, rev, message)
+  if (!destination) {
+    const resolved = resolveFloor(world, rev, lastFloorMention(message) ?? '3F')
+    note = resolved.note
+    destination = DEFAULT_ROUTE_DESTINATIONS[resolved.floor] ?? null
+  }
+  const route = destination ? mockRoute(world, { rev, origin, destination, via }) : null
+  if (!route) {
+    return b.answer('출발지나 목적지를 도면에서 찾지 못했어요. 매장 코드(예: 3F-C05)나 출입구(정문, 서측 출입구)를 넣어 다시 물어봐 주세요.')
+  }
+  const start = route.origin
+  const end = route.destination
+  const args = { rev, origin: start.ref, destination: end.ref, via }
+  const change = route.transitions[0]
+
+  b.tool(
+    'spatial_route',
+    `${shortPlaceName(start)}에서 ${floorLabel(end.floor)} ${shortPlaceName(end)}까지 경로 계산`,
+    args,
+    json({ ok: true, walk_m: route.walk_m, floors: routeFloors(route), via: change?.via ?? null }),
+    900,
+  )
+  b.ui(
+    'ui_show_route',
+    '도면에 경로 그리기',
+    args,
+    [
+      replace('/heatmap', null),
+      replace('/highlights', []),
+      replace('/edges', []),
+      replace('/compareRev', null),
+      replace('/journey', null),
+      replace('/route', route),
+      replace('/floor', start.floor),
+    ],
+    json({ ok: true, shown: `${start.floor} 도면에 경로와 출발 지점을 표시했습니다.` }),
+  )
+
+  const lines = note ? [note, ''] : []
+  lines.push(
+    `${placePhrase(start)}에서 ${floorLabel(end.floor)} ${placePhrase(end)}까지 가는 길이에요. 걷는 거리는 약 ${formatWalk(route.walk_m)}예요.`,
+    '',
+  )
+  const [leave, arrive] = route.segments
+  if (change && arrive) {
+    const steps: string[] = []
+    const toLink = roundWalk(pathLength(leave.points))
+    if (toLink > 0) steps.push(`${floorLabel(change.from_floor)} ${placePhrase(start)}에서 ${viaLabel(change.via)}(${change.via})까지 약 ${formatWalk(toLink)} 걸어요.`)
+    steps.push(
+      `${via === 'elevator' ? '엘리베이터' : '에스컬레이터'}를 타고 ${withEuro(floorLabel(change.to_floor))} ${transitionDirection(change) < 0 ? '내려가요' : '올라가요'}. (${change.floors}개 층)`,
+    )
+    const fromLink = roundWalk(pathLength(arrive.points))
+    if (fromLink > 0) steps.push(`${floorLabel(change.to_floor)}에서 내려 ${placePhrase(end)}까지 약 ${formatWalk(fromLink)} 더 걸어요.`)
+    steps.forEach((step, i) => lines.push(`${i + 1}. ${step}`))
+  } else {
+    lines.push(`1. ${floorLabel(start.floor)} ${placePhrase(start)}에서 ${placePhrase(end)}까지 약 ${formatWalk(route.walk_m)} 걸어요.`)
+  }
+  lines.push(
+    '',
+    '도면에 경로를 파란 선으로 그렸어요. 초록 원이 출발, 파란 원이 도착 지점이에요. 왼쪽 위 길 찾기 상자에서 층을 누르면 그 층의 경로를 볼 수 있어요.',
+    '',
+    '참고: 통로망 최단 경로로 계산한 거리라서 실제로 걷는 거리와 조금 다를 수 있어요.',
+  )
+  return b.answer(lines.join('\n'))
+}
+
 function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes: string[]): ScriptStep[] {
   const rev = req.ui_state.rev
   const floor = codes[0].split('-')[0]
@@ -569,6 +698,7 @@ function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes:
     replace('/floor', floor),
     replace('/highlights', codes.map((c) => ({ unit_code: c, color: '#1e88e5', reason: '질문 대상 매장' }))),
     replace('/focus', { unit_codes: codes }),
+    ...CLEAR_PATHS,
   ])
   const lines = rows.length
     ? rows.map(
@@ -623,12 +753,11 @@ export function buildMockScript(world: MockWorld, req: ChatRequest, threadId: st
   if (/변경|재생성|개정|바뀌|S\/S|F\/W/i.test(message)) return revisionScript(world, req, b)
   if (/재배치|대안|레이아웃/.test(message)) return layoutScript(world, req, b)
   if (/표로|표 |테이블|table/i.test(message)) return tableScript(world, req, b)
+  if (ROUTE_PATTERN.test(message)) return routeScript(world, req, b)
   if (/동선|경로|여정|journey/i.test(message)) return journeyScript(world, req, b)
   if (/저효율|효율|원인|zone|존/i.test(message)) return productivityScript(world, req, b)
   if (/교차|VIP|연관|같이 사|함께 사/i.test(message)) return crossShoppingScript(world, req, b)
-  const codes = [...new Set(message.toUpperCase().match(/\b(?:B\d|\d{1,2}F)-[A-Z]\d{2}[A-Z]?\b/g) ?? [])].filter((c) =>
-    unitExists(world, req.ui_state.rev, c),
-  )
+  const codes = [...new Set(message.toUpperCase().match(UNIT_CODE_PATTERN) ?? [])].filter((c) => unitExists(world, req.ui_state.rev, c))
   if (codes.length) return unitScript(world, req, b, codes)
   return helpScript(world, req, b)
 }

@@ -10,7 +10,7 @@ import type { AgUiEvent } from './types/api'
 
 // jsdom has no WebGL, and importing the full deck.gl module graph is slow under the test runner.
 // Replace deck.gl with light stand-ins: layers keep their props, and <DeckGL> renders a probe that
-// exposes the layer ids, the number of unit polygons and the number of journey stops.
+// exposes the layer ids, the number of unit polygons, journey stops and route markers.
 vi.mock('@deck.gl/core', () => {
   class OrthographicView {
     props: unknown
@@ -41,12 +41,13 @@ vi.mock('@deck.gl/react', async () => {
   const React = await import('react')
   return {
     default: (props: { layers?: { id: string; props: { data?: unknown[] } }[] }) => {
-      const count = (id: string) => (props.layers ?? []).find((l) => l.id === id)?.props.data?.length ?? 0
+      const data = (id: string) => (props.layers ?? []).find((l) => l.id === id)?.props.data ?? []
       return React.createElement('div', {
         'data-testid': 'deck',
         'data-layers': (props.layers ?? []).map((l) => l.id).join(','),
-        'data-units': count('units'),
-        'data-journey-stops': count('journey-stops'),
+        'data-units': data('units').length,
+        'data-journey-stops': data('journey-stops').length,
+        'data-route-places': (data('route-places') as { role?: string }[]).map((d) => d.role).join(','),
       })
     },
   }
@@ -54,6 +55,7 @@ vi.mock('@deck.gl/react', async () => {
 
 const layerIds = () => screen.getByTestId('deck').getAttribute('data-layers')?.split(',') ?? []
 const journeyStops = () => screen.getByTestId('deck').getAttribute('data-journey-stops')
+const routePlaces = () => screen.getByTestId('deck').getAttribute('data-route-places')
 const log = () => screen.getByRole('log')
 const floorTab = (code: string) => within(screen.getByRole('tablist', { name: '층' })).getByRole('tab', { name: new RegExp(`^${code}`) })
 
@@ -255,6 +257,60 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     await waitFor(() => expect(layerIds()).not.toContain('journey-path'))
     expect(within(screen.getByRole('complementary', { name: '범례' })).queryByRole('heading', { name: '고객 동선' })).toBeNull()
     expect(floorTab('1F').textContent).toBe('1F')
+  })
+
+  it('draws a walking route with its box, floor marks and legend, and clears it', async () => {
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '정문에서 3층까지 가는 길 알려줘' }))
+    const box = await screen.findByRole('region', { name: 'ENT-1 정문 → Cafe Halune(3F-C05)' })
+    await waitFor(() => expect(log().textContent).toContain('통로망 최단 경로로 계산한 거리라서'))
+    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 2단계 · / })).toBeTruthy()
+
+    // Box: eyebrow, summary chips, the floors on the way and the caveat.
+    expect(box.textContent).toContain('길 찾기')
+    const chips = within(within(box).getByRole('list', { name: '경로 요약' })).getAllByRole('listitem')
+    expect(chips.map((c) => c.textContent)).toEqual(['걷는 거리 85m', '에스컬레이터 A · 2개 층 이동 · 높이 10m'])
+    const floorButtons = within(within(box).getByRole('list', { name: /경로가 지나는 층/ })).getAllByRole('button')
+    expect(floorButtons.map((b) => b.getAttribute('aria-label'))).toEqual(['1층 출발, 도면 보기', '3층 도착, 도면 보기'])
+    expect(box.textContent).toContain('에스컬레이터를 타는 구간과 층마다 갈아타는 거리는 넣지 않았어요.')
+
+    // Map: the origin floor with the line, the start marker and the floor-change note; tabs mark both floors.
+    await waitFor(() => expect(floorTab('1F').getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() =>
+      expect(layerIds()).toEqual(expect.arrayContaining(['route-casing', 'route-path', 'route-places', 'route-place-labels', 'route-notes'])),
+    )
+    expect(routePlaces()).toBe('origin')
+    expect(floorButtons[0].getAttribute('aria-current')).toBe('true')
+    expect(floorTab('1F').textContent).toContain('길 찾기 경로: 출발 층')
+    expect(floorTab('3F').textContent).toContain('길 찾기 경로: 도착 층')
+    const legend = screen.getByRole('complementary', { name: '범례' })
+    expect(within(legend).getByRole('heading', { name: '경로' })).toBeTruthy()
+    expect(legend.textContent).toContain('통로망 최단 경로 · 걷는 거리 85m')
+
+    // A floor in the box switches the map to that floor, where the end marker is.
+    fireEvent.click(floorButtons[1])
+    await waitFor(() => expect(floorTab('3F').getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() => expect(within(box).getByRole('button', { name: '3층 도착, 도면 보기' }).getAttribute('aria-current')).toBe('true'))
+    await waitFor(() => expect(routePlaces()).toBe('destination'))
+
+    // Another revision on screen: the box says which drawing the route was computed on.
+    expect(box.textContent).not.toContain('도면으로 계산한 경로예요')
+    fireEvent.change(screen.getByRole('combobox', { name: /^개정/ }), { target: { value: 'R1' } })
+    await waitFor(() => expect(box.textContent).toContain('R2 도면으로 계산한 경로예요. 지금은 R1 도면을 보고 있어요.'))
+
+    // "경로 지우기" clears the route from the map, the tabs and the legend.
+    fireEvent.click(within(box).getByRole('button', { name: '경로 지우기' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: /Cafe Halune/ })).toBeNull())
+    await waitFor(() => expect(layerIds()).not.toContain('route-path'))
+    expect(floorTab('1F').textContent).toBe('1F')
+    expect(floorTab('3F').textContent).toBe('3F')
+    expect(within(screen.getByRole('complementary', { name: '범례' })).queryByRole('heading', { name: '경로' })).toBeNull()
+
+    // Drawn again from the suggestion row; Esc inside the box clears it too.
+    fireEvent.click(screen.getByRole('button', { name: '정문에서 3층까지 가는 길 알려줘' }))
+    const again = await screen.findByRole('region', { name: 'ENT-1 정문 → Cafe Halune(3F-C05)' })
+    fireEvent.keyDown(within(again).getByRole('button', { name: '경로 지우기' }), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('region', { name: /Cafe Halune/ })).toBeNull())
   })
 
   it('shows one live status line while working, then streams the answer', async () => {

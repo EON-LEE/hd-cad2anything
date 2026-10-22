@@ -35,7 +35,7 @@ agents:
          - 서로 독립적인 조회는 한 번에 함께 호출한다.
          - 결과를 확인한 뒤, 답을 뒷받침하는 UI 함수만 1~3개 호출한다.
            층 이동은 ui_set_floor, 지표 색칠은 ui_show_heatmap, 매장 강조는 ui_highlight_units, 관계선은 ui_draw_edges,
-           확대는 ui_focus, 서로 다른 두 개정의 비교는 ui_compare, 패널은 ui_show_panel, 고객 한 명의 동선은 ui_show_journey이다.
+           확대는 ui_focus, 서로 다른 두 개정의 비교는 ui_compare, 패널은 ui_show_panel, 고객 한 명의 동선은 ui_show_journey, 길 안내는 ui_show_route이다.
          - UI 함수를 빈 목록으로 호출하거나 같은 UI 함수를 반복하지 않는다. ui_clear는 사용자가 지우라고 할 때만 쓴다.
          - 도구 호출은 질문 하나에 보통 6회 이내로 끝낸다.
       3. 고객 한 명의 쇼핑 동선, 구매 순서, 이동 경로를 물으면 ui_show_journey를 호출한다.
@@ -44,16 +44,27 @@ agents:
          - "다른 고객"을 원하면 직전 rank에 1을 더해 다시 호출한다.
          - 결과의 stops 순서대로 짧은 이야기처럼 설명한다. 예: "오전 11시 반 지하 1층 식품관에서 시작해 2층과 5층을 거쳐, 오후 3시쯤 8층 식당가에서 끝나요."
          - 이 동선은 결제 순서와 통로 최단 경로로 추정한 것이고 실제로 걸은 길은 아니라고 한 문장으로 밝힌다.
-      4. what-if, 레이아웃 대안, 인접 효과는 모델 추정이거나 상관관계다. 인과로 단정하지 않고, 범위가 있으면 함께 쓴다.
-      5. 산출물의 승인과 반려는 하지 않는다. 사람이 개정 검토 화면에서 직접 판단하도록 안내한다.
-      6. 공개 업계 동향이나 벤치마크가 필요하면 consult_specialist의 researcher를 쓴다. 이때 내부 수치, 고객 정보, 매장 데이터는 넘기지 않는다. 답에는 출처 링크를 함께 쓴다.
-      7. 단순 조회와 진단은 MCP 도구로 직접 처리한다. 여러 단계의 심층 분석이나 긴 해석이 필요할 때만 consult_specialist로 전문 에이전트에 맡긴다. 전문 에이전트의 답은 위의 말하는 방식에 맞게 쉽게 줄여 전달한다.
+      4. 공간 질문(위치, 방향, 정면, 코너, 이웃, 거리, 길, 층의 생김새)은 공간 도구로 답한다. 좌표를 보고 추측하지 않는다.
+         - 층이 어떻게 생겼는지, 무엇이 어디쯤 있는지 물으면 spatial_describe_floor를 먼저 쓴다.
+         - 조건, 관계, 집계가 섞인 질문은 spatial_query 한 번으로 푼다. 합계, 평균, 비율, 개수는 metrics로 받고 직접 계산하지 않는다. 매장을 하나씩 spatial_unit_details로 조회하지 않는다.
+         - 길, 가는 법, 걸어서 몇 m인지 물으면 ui_show_route로 도면에 그리고 결과의 walk_m과 transitions로 설명한다. 그리지 않고 거리만 필요하면 spatial_route를 쓴다. 걷는 거리에는 에스컬레이터를 타는 구간이 빠진다고 밝힌다.
+         - 공간 어휘는 spatial_query 필드에 이렇게 대응한다.
+           - 동쪽·서쪽·북쪽·남쪽·가운데 → side(도면 기준, 위쪽=북). 답할 때 "도면 기준"이라고 한 번 밝힌다.
+           - 에스컬레이터 정면·앞 → escalator_front. 출입구 정면 → entrance_front. 에스컬레이터에서 보이는 → escalator_view_m.
+           - 코너 매장 → corner. 두 면·세 면이 통로에 접한 매장 → frontage_sides.
+           - 메인 동선, 사람이 많이 지나는 길 → main_walkway, traffic_potential. 도면 구조로 계산한 잠재 유동이며 관측한 유동이 아니라고 밝힌다.
+           - 옆 매장, 붙어 있는 매장 → adjacent_to. 근처, 걸어서 몇 m 안 → near(within_m).
+           - 식당가, 카페, 화장품 같은 말 → category 또는 zone_name.
+      5. what-if, 레이아웃 대안, 인접 효과는 모델 추정이거나 상관관계다. 인과로 단정하지 않고, 범위가 있으면 함께 쓴다.
+      6. 산출물의 승인과 반려는 하지 않는다. 사람이 개정 검토 화면에서 직접 판단하도록 안내한다.
+      7. 공개 업계 동향이나 벤치마크가 필요하면 consult_specialist의 researcher를 쓴다. 이때 내부 수치, 고객 정보, 매장 데이터는 넘기지 않는다. 답에는 출처 링크를 함께 쓴다.
+      8. 단순 조회와 진단은 MCP 도구로 직접 처리한다. 여러 단계의 심층 분석이나 긴 해석이 필요할 때만 consult_specialist로 전문 에이전트에 맡긴다. 전문 에이전트의 답은 위의 말하는 방식에 맞게 쉽게 줄여 전달한다.
          - 도면 변경 해석: cad_change_interpreter
          - 생산성 진단: space_productivity_analyst
          - 레이아웃 대안: layout_planner
          - 즉석 산출물: generator
          - 검증: qa_reviewer
-      8. 기본 개정과 층은 메시지에 함께 오는 ui_state의 rev와 floor를 따른다.
+      9. 기본 개정과 층은 메시지에 함께 오는 ui_state의 rev와 floor를 따른다.
 
   - name: cad-change-interpreter
     model: "{chat_model}"

@@ -151,7 +151,7 @@ def test_specialist_tool_calls_are_streamed_under_the_consult_call():
 def test_ui_clear_all_resets_overlays():
     result = UiActionHandler().handle("ui_clear", {"what": "all"}, {})
     paths = [patch["path"] for patch in result.patches]
-    assert paths == ["/heatmap", "/highlights", "/edges", "/journey", "/focus"]
+    assert paths == ["/heatmap", "/highlights", "/edges", "/journey", "/route", "/focus"]
 
 
 class FakeStreamResponses:
@@ -280,7 +280,7 @@ def test_ui_show_journey_draws_the_path_and_reports_stops_to_the_model():
 
     assert calls == [{"segment": {"age_band": "40s"}, "rank": 2}]
     cleared = ["/heatmap", "/highlights", "/edges", "/compareRev"]
-    assert [p["path"] for p in result.patches] == [*cleared, "/journey", "/floor", "/panel"]
+    assert [p["path"] for p in result.patches] == [*cleared, "/route", "/journey", "/floor", "/panel"]
     assert [p["value"] for p in result.patches[:4]] == [None, [], [], None]
     floor_patch = next(p for p in result.patches if p["path"] == "/floor")
     assert floor_patch["value"] == "B1" and ui_state["floor"] == "B1"
@@ -318,10 +318,10 @@ def test_other_overlays_replace_a_journey_from_an_earlier_answer_only():
         journey_provider=lambda **params: {"rev": "R2", "stops": [{"order": 1, "floor": "1F"}]}
     )
     earlier = handler.handle("ui_highlight_units", {"unit_codes": ["3F-C05"]}, {"rev": "R2"})
-    assert [p["path"] for p in earlier.patches] == ["/highlights", "/journey"]
-    assert earlier.patches[1]["value"] is None
+    assert [p["path"] for p in earlier.patches] == ["/highlights", "/journey", "/route"]
+    assert earlier.patches[1]["value"] is None and earlier.patches[2]["value"] is None
     compare = handler.handle("ui_compare", {"rev_from": "R0", "rev_to": "R1"}, {})
-    assert [p["path"] for p in compare.patches] == ["/rev", "/compareRev", "/journey"]
+    assert [p["path"] for p in compare.patches] == ["/rev", "/compareRev", "/journey", "/route"]
 
     ui_state = {"rev": "R2", "floor": "3F"}
     handler.handle("ui_show_journey", {}, ui_state)
@@ -353,7 +353,12 @@ def test_table_panels_are_normalized_or_rejected():
     result = handler.handle("ui_show_panel", {"type": "table", "payload": as_objects}, {})
     panel = result.patches[0]["value"]["payload"]
     assert panel["columns"] == ["매장", "㎡당 매출"] and panel["rows"] == [["4F-E01", 100], ["4F-E02", None]]
-    assert json.loads(result.output) == {"ok": True, "panel": "table", "rows": 2}
+    assert json.loads(result.output) == {
+        "ok": True,
+        "panel": "table",
+        "rows": 2,
+        "shown": "도면 아래 표 패널에 표를 열었습니다.",
+    }
 
     columnar = {"data": {"층": ["3F", "4F"], "매출": [1, 2]}}
     panel = handler.handle("ui_show_panel", {"type": "table", "payload": columnar}, {}).patches[0]["value"]

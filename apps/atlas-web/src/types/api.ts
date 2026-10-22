@@ -299,6 +299,59 @@ export interface JourneyParams {
 }
 
 // ---------------------------------------------------------------------------------------------
+// GET /api/spatial/route  (shortest walkway route between two places; also UI state `route`)
+// ---------------------------------------------------------------------------------------------
+
+export type RoutePlaceKind = 'unit' | 'entrance' | 'escalator' | 'elevator' | 'stairs' | 'amenity'
+
+export interface RoutePlace {
+  /** Unit code ("3F-C05"), entrance id ("ENT-1") or floor-qualified link/amenity ("1F:ESC-A"). */
+  ref: string
+  kind: RoutePlaceKind | string
+  label: string
+  floor: string
+  unit_code: string | null
+  /** Access point (where the place meets the walkway), local meters; null when unknown. */
+  x: number | null
+  y: number | null
+  [key: string]: unknown
+}
+
+export interface RouteSegment {
+  floor: string
+  points: [number, number][]
+  [key: string]: unknown
+}
+
+export interface RouteTransition {
+  from_floor: string
+  to_floor: string
+  /** Vertical link used (e.g. "ESC-A"); null when unknown. */
+  via: string | null
+  /** Number of floors moved; null when unknown. */
+  floors: number | null
+  /** Sum of the floor heights moved, in meters; null when unknown. */
+  height_m: number | null
+  [key: string]: unknown
+}
+
+export interface Route {
+  title: string
+  rev: string | null
+  /** "escalator" or "elevator"; null when unknown. */
+  via_type: string | null
+  origin: RoutePlace
+  destination: RoutePlace
+  /** One walking line per floor (origin floor, then destination floor). */
+  segments: RouteSegment[]
+  transitions: RouteTransition[]
+  /** Walking distance on the origin and destination floors (rounded to 5 m); null when unknown. */
+  walk_m: number | null
+  caveat: string | null
+  [key: string]: unknown
+}
+
+// ---------------------------------------------------------------------------------------------
 // POST /api/chat (AG-UI compatible SSE)
 // ---------------------------------------------------------------------------------------------
 
@@ -398,4 +451,6 @@ export interface UiState {
   panel: { type: PanelType; payload: Record<string, unknown> } | null
   /** One customer's shopping path (drawn on the floors it visits); null when off. */
   journey: Journey | null
+  /** Shortest walking route between two places (drawn on its floors); null when off. */
+  route: Route | null
 }

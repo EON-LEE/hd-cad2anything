@@ -34,7 +34,7 @@ const CORRIDORS: readonly [Pt, Pt][] = [
   [[69, 40], [70.5, 40]],
 ]
 
-const ESCALATORS: readonly { id: string; at: Pt }[] = [
+export const ESCALATORS: readonly { id: string; at: Pt }[] = [
   { id: 'ESC-A', at: [51, 40] },
   { id: 'ESC-B', at: [69, 40] },
 ]

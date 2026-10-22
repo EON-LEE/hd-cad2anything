@@ -27,6 +27,9 @@ TOOL_LABELS = {
     "analytics_before_after": "개편 전후 비교",
     "analytics_time_patterns": "시간대별 매출 분석",
     "analytics_customer_journey": "고객 동선 찾기",
+    "spatial_query": "공간 조건 조회",
+    "spatial_route": "경로 계산",
+    "spatial_describe_floor": "층 구조 확인",
     "layout_generate_alternatives": "재배치 대안 계산",
     "whatif_score_moves": "이동 효과 추정",
     "ui_set_floor": "층 이동",
@@ -37,6 +40,7 @@ TOOL_LABELS = {
     "ui_compare": "개정 비교 표시",
     "ui_show_panel": "패널 열기",
     "ui_show_journey": "도면에 고객 동선 그리기",
+    "ui_show_route": "도면에 경로 그리기",
     "ui_clear": "화면 정리",
     "consult_specialist": "전문 에이전트에게 확인",
     "web_search": "웹 검색",
@@ -104,6 +108,17 @@ def tool_label(name: str | None, args: dict[str, Any] | None = None) -> str:
         return f"{args['unit_code']} 매장 확인"
     if name == "spatial_nearby_units" and args.get("unit_code"):
         return f"{args['unit_code']} 주변 매장 찾기"
+    if name == "spatial_describe_floor" and args.get("floor"):
+        return f"{floor_ko(args['floor'])} 구조 확인"
+    if name == "spatial_query":
+        filters = args.get("filters") if isinstance(args.get("filters"), dict) else {}
+        return _with_floor(base, filters) if isinstance(filters.get("floor"), str) else base
+    if name in ("spatial_route", "ui_show_route") and args.get("origin"):
+        target = args.get("destination") or " ".join(
+            str(v) for v in (floor_ko(args.get("destination_floor")), args.get("destination_category")) if v
+        )
+        verb = "경로 계산" if name == "spatial_route" else "경로 그리기"
+        return f"{verb}: {args['origin']} → {target}" if target else base
     if name in ("analytics_productivity", "analytics_drivers", "spatial_find_units"):
         return _with_floor(base, args)
     if name in ("analytics_cross_shopping", "analytics_customer_journey", "analytics_floor_transitions"):

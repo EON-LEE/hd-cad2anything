@@ -101,6 +101,13 @@ def _tool_error(exc: ToolError) -> HTTPException:
     return HTTPException(status_code=404, detail=str(exc))
 
 
+def _latest_actual_rev(toolkit: Toolkit) -> str:
+    actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
+    if not actual:
+        raise HTTPException(status_code=404, detail="실제 개정이 없습니다.")
+    return actual[-1].rev_id
+
+
 def create_api(
     toolkit: Toolkit,
     runtime_factory: RuntimeFactory | None = None,
@@ -332,6 +339,29 @@ def create_api(
                 rank=rank,
                 min_stops=min_stops,
                 rev=rev,
+            )
+        except ToolError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/spatial/route")
+    def spatial_route(
+        origin: str,
+        rev: str | None = None,
+        destination: str | None = None,
+        destination_category: str | None = None,
+        destination_floor: str | None = None,
+        via: str = "escalator",
+    ) -> dict[str, Any]:
+        revision = rev or _latest_actual_rev(toolkit)
+        try:
+            return toolkit.route_object(
+                revision,
+                origin,
+                destination,
+                destination_category,
+                destination_floor,
+                via,
+                with_geometry=True,
             )
         except ToolError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

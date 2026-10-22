@@ -2,14 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { CHANGE_COLORS, NO_DATA_COLOR, VACANT_COLOR, hexToRgba, heatmapColor, tint } from '../lib/colors'
 import { buildFloorModel, type UnitInfo } from '../lib/geometry'
 import { normalizeJourney } from '../lib/journey'
+import { normalizeRoute } from '../lib/route'
 import type { FeatureCollection } from '../types/api'
 import {
   EMPTY_JOURNEY_RENDER,
+  EMPTY_ROUTE_RENDER,
   changeMarksForFloor,
   crossFloorTargets,
   fitUnitLabel,
   layoutFloorBadges,
   prepareJourney,
+  prepareRoute,
   removedUnits,
   resolveEdges,
   resolveHighlights,
@@ -207,5 +210,90 @@ describe('customer journey render data', () => {
     })
     expect(prepareJourney(sparse, 'B1').notes).toEqual([{ key: 'depart-0', position: [52.4, 31], text: '→ 3층', kind: 'depart', stack: 0 }])
     expect(prepareJourney(sparse, '3F', floors).notes.map((n) => [n.text, n.position])).toEqual([['지하 1층에서 올라옴', [30, 37]]])
+  })
+})
+
+describe('route render data', () => {
+  // The contract example: ENT-1 on 1F to 8F-C05 by ESC-A.
+  const route = normalizeRoute({
+    title: 'ENT-1 정문 → Orlix Coffee(8F-C05)',
+    origin: { ref: 'ENT-1', kind: 'entrance', label: 'ENT-1 정문', floor: '1F', unit_code: null, x: 60, y: 0.4 },
+    destination: { ref: '8F-C05', kind: 'unit', label: 'Orlix Coffee(8F-C05)', floor: '8F', unit_code: '8F-C05', x: 41, y: 52 },
+    segments: [
+      { floor: '1F', points: [[60, 0.4], [60, 30], [52, 38]] },
+      { floor: '8F', points: [[52, 38], [41, 52]] },
+    ],
+    transitions: [{ from_floor: '1F', to_floor: '8F', via: 'ESC-A', floors: 7, height_m: 35 }],
+    walk_m: 85,
+  })
+
+  it('keeps the current floor only: its walking line and the start or end marker there', () => {
+    const f1 = prepareRoute(route, '1F')
+    expect(f1.paths).toEqual([{ key: 'seg-0', path: [[60, 0.4], [60, 30], [52, 38]] }])
+    expect(f1.places.map((p) => [p.role, p.text, p.label, p.position])).toEqual([['origin', '출발', 'ENT-1 정문', [60, 0.4]]])
+    const f8 = prepareRoute(route, '8F')
+    expect(f8.paths.map((p) => p.key)).toEqual(['seg-1'])
+    expect(f8.places.map((p) => [p.role, p.text, p.label, p.position])).toEqual([['destination', '도착', 'Orlix Coffee(8F-C05)', [41, 52]]])
+    expect(f8.places[0].place.unit_code).toBe('8F-C05')
+    expect(prepareRoute(route, '5F')).toEqual({ paths: [], places: [], notes: [] })
+    expect(prepareRoute(null, '1F')).toBe(EMPTY_ROUTE_RENDER)
+  })
+
+  it('labels where the walk leaves for and arrives from another floor', () => {
+    expect(prepareRoute(route, '1F').notes).toEqual([{ key: 'depart-0', position: [52, 38], text: '→ 8층 (ESC-A)', kind: 'depart', stack: 0 }])
+    expect(prepareRoute(route, '8F').notes).toEqual([{ key: 'arrive-0', position: [52, 38], text: '1층에서 올라옴', kind: 'arrive', stack: 0 }])
+    // Ordinals from /api/meta decide up or down.
+    const reversed = [
+      { code: '1F', ordinal: 9, name: '' },
+      { code: '8F', ordinal: 2, name: '' },
+    ]
+    expect(prepareRoute(route, '8F', reversed).notes[0].text).toBe('1층에서 내려옴')
+  })
+
+  it('skips one-point lines and places without coordinates', () => {
+    const same = normalizeRoute({
+      origin: { ref: '3F:ESC-B', kind: 'escalator', label: 'ESC-B 에스컬레이터', x: 69, y: 40 },
+      destination: { ref: '3F-C05', kind: 'unit', label: 'Cafe Halune(3F-C05)', unit_code: '3F-C05', x: 60, y: null },
+      segments: [{ floor: '3F', points: [[69, 40]] }],
+      transitions: [],
+    })
+    const f3 = prepareRoute(same, '3F')
+    expect(f3.paths).toEqual([])
+    expect(f3.places.map((p) => p.role)).toEqual(['origin'])
+    expect(f3.notes).toEqual([])
+  })
+
+  it('puts a floor-change note at the place when its floor has no line', () => {
+    const sparse = normalizeRoute({
+      origin: { ref: '1F:ESC-A', kind: 'escalator', label: 'ESC-A 에스컬레이터', floor: '1F', x: 51, y: 40 },
+      destination: { ref: '3F-C05', kind: 'unit', label: 'Cafe Halune(3F-C05)', floor: '3F', x: 60, y: 50 },
+      segments: [{ floor: '3F', points: [[51, 40], [49.5, 40], [49.5, 48.5], [60, 48.5], [60, 50]] }],
+      transitions: [{ from_floor: '1F', to_floor: '3F', via: 'ESC-A' }],
+    })
+    expect(prepareRoute(sparse, '1F').notes.map((n) => [n.text, n.position])).toEqual([['→ 3층 (ESC-A)', [51, 40]]])
+    expect(prepareRoute(sparse, '3F').notes.map((n) => [n.text, n.position])).toEqual([['1층에서 올라옴', [51, 40]]])
+  })
+
+  it('pairs each floor change with the lines around it on a route over three floors', () => {
+    const twoChanges = normalizeRoute({
+      origin: { ref: '1F-C01', kind: 'unit', floor: '1F', x: 30, y: 37 },
+      destination: { ref: '5F-C01', kind: 'unit', floor: '5F', x: 30, y: 37 },
+      segments: [
+        { floor: '1F', points: [[30, 37], [51, 40]] },
+        { floor: '3F', points: [[51, 40], [6, 12]] },
+        { floor: '5F', points: [[6, 12], [30, 37]] },
+      ],
+      transitions: [
+        { from_floor: '1F', to_floor: '3F', via: 'ESC-A' },
+        { from_floor: '3F', to_floor: '5F', via: 'EV-1' },
+      ],
+    })
+    const f3 = prepareRoute(twoChanges, '3F', floors)
+    expect(f3.notes).toEqual([
+      { key: 'arrive-0', position: [51, 40], text: '1층에서 올라옴', kind: 'arrive', stack: 0 },
+      { key: 'depart-1', position: [6, 12], text: '→ 5층 (EV-1)', kind: 'depart', stack: 0 },
+    ])
+    expect(f3.places).toEqual([])
+    expect(f3.paths.map((p) => p.key)).toEqual(['seg-1'])
   })
 })

@@ -5,6 +5,7 @@ import { LINK_COLORS, changeColor, hexToRgba, withAlpha, type Rgba } from '../li
 import type { FloorModel, LineItem, Point2, PolygonItem, UnitInfo } from '../lib/geometry'
 import { AMENITY_LABELS, LINK_TYPE_LABELS } from '../lib/format'
 import { JOURNEY_COLOR } from '../lib/journey'
+import { ROUTE_COLOR, ROUTE_DESTINATION_COLOR, ROUTE_ORIGIN_COLOR } from '../lib/route'
 import {
   unitFillColor,
   unitLabels,
@@ -15,6 +16,10 @@ import {
   type JourneyRender,
   type JourneyStopRender,
   type LabelItem,
+  type RouteNoteRender,
+  type RoutePathRender,
+  type RoutePlaceRender,
+  type RouteRender,
   type UnitStyleContext,
 } from './prepare'
 
@@ -39,6 +44,8 @@ export interface LayerInput {
   edges: EdgeRender[]
   /** The customer journey on this floor (empty render data when off). */
   journey: JourneyRender
+  /** The route between two places on this floor (empty render data when off). */
+  route: RouteRender
   zoom: number
 }
 
@@ -50,6 +57,28 @@ const STOP_RADIUS_MAX_PX = 16
 
 export function stopRadiusPx(zoom: number): number {
   return Math.min(STOP_RADIUS_MAX_PX, Math.max(STOP_RADIUS_MIN_PX, STOP_RADIUS_M * 2 ** zoom))
+}
+
+const ROUTE_RGBA = hexToRgba(ROUTE_COLOR)
+const ROUTE_PLACE_RGBA: Record<RoutePlaceRender['role'], Rgba> = {
+  origin: hexToRgba(ROUTE_ORIGIN_COLOR),
+  destination: hexToRgba(ROUTE_DESTINATION_COLOR),
+}
+const ROUTE_LABEL_RGBA: Record<RoutePlaceRender['role'], Rgba> = { origin: [27, 94, 32, 255], destination: [13, 71, 161, 255] }
+/** Start/end markers hold a word ("출발", "도착"), so they are larger than journey stops (same clamping idea). */
+const ROUTE_MARKER_RADIUS_M = 1.8
+const ROUTE_MARKER_MIN_PX = 13
+const ROUTE_MARKER_MAX_PX = 18
+/** Extra radius of the ring around the end marker. */
+const ROUTE_HALO_PX = 6
+
+export function routeMarkerRadiusPx(zoom: number): number {
+  return Math.min(ROUTE_MARKER_MAX_PX, Math.max(ROUTE_MARKER_MIN_PX, ROUTE_MARKER_RADIUS_M * 2 ** zoom))
+}
+
+/** Font size of the word inside a route marker of the given radius. */
+export function routeMarkerFontPx(radius: number): number {
+  return Math.min(12, Math.max(10, Math.round(radius * 0.72)))
 }
 
 const rings = (d: PolygonItem) => d.rings
@@ -346,8 +375,107 @@ export function buildLayers(input: LayerInput): Layer[] {
       ),
     )
   }
+  result.push(...routeLayers(input.route, input.zoom))
   result.push(...journeyLayers(input.journey, input.zoom))
   return result
+}
+
+/** Route between two places, above highlights and edges: cased blue line, start/end markers with place names, floor-change notes. */
+export function routeLayers(route: RouteRender, zoom: number): Layer[] {
+  const { paths, places, notes } = route
+  if (!paths.length && !places.length && !notes.length) return []
+  const radius = routeMarkerRadiusPx(zoom)
+  const fontPx = routeMarkerFontPx(radius)
+  const pathProps = {
+    data: paths,
+    getPath: (d: RoutePathRender) => d.path,
+    widthUnits: 'pixels' as const,
+    capRounded: true,
+    jointRounded: true,
+  }
+  return [
+    new PathLayer<RoutePathRender>({ id: 'route-casing', ...pathProps, getColor: [255, 255, 255, 235], getWidth: 9 }),
+    new PathLayer<RoutePathRender>({ id: 'route-path', ...pathProps, getColor: ROUTE_RGBA, getWidth: 5 }),
+    new ScatterplotLayer<RoutePlaceRender>({
+      id: 'route-destination-halo',
+      data: places.filter((p) => p.role === 'destination'),
+      getPosition: (d) => d.position,
+      getFillColor: withAlpha(ROUTE_PLACE_RGBA.destination, 48),
+      getLineColor: withAlpha(ROUTE_PLACE_RGBA.destination, 170),
+      stroked: true,
+      getRadius: radius + ROUTE_HALO_PX,
+      radiusUnits: 'pixels',
+      getLineWidth: 1.5,
+      lineWidthUnits: 'pixels',
+      updateTriggers: { getRadius: radius },
+    }),
+    new ScatterplotLayer<RoutePlaceRender>({
+      id: 'route-places',
+      data: places,
+      getPosition: (d) => d.position,
+      getFillColor: (d) => ROUTE_PLACE_RGBA[d.role],
+      getLineColor: [255, 255, 255, 255],
+      stroked: true,
+      getRadius: ROUTE_MARKER_RADIUS_M,
+      radiusUnits: 'common',
+      radiusMinPixels: ROUTE_MARKER_MIN_PX,
+      radiusMaxPixels: ROUTE_MARKER_MAX_PX,
+      getLineWidth: 2,
+      lineWidthUnits: 'pixels',
+      pickable: true,
+    }),
+    textLayer(
+      'route-place-text',
+      places.map((p) => ({ key: p.key, position: p.position, text: p.text, color: [255, 255, 255, 255] as Rgba, size: fontPx })),
+      { fontWeight: 700, outlineWidth: 0 },
+    ),
+    new TextLayer<RoutePlaceRender>({
+      id: 'route-place-labels',
+      data: places.filter((p) => p.label),
+      getPosition: (d) => d.position,
+      getText: (d) => d.label,
+      getColor: (d) => ROUTE_LABEL_RGBA[d.role],
+      getSize: 12,
+      sizeUnits: 'pixels',
+      getTextAnchor: 'start',
+      getAlignmentBaseline: 'center',
+      getPixelOffset: (d) => [radius + (d.role === 'destination' ? ROUTE_HALO_PX : 0) + 5, 0],
+      characterSet: 'auto',
+      fontFamily: FONT_FAMILY,
+      fontWeight: 700,
+      fontSettings: FONT_SETTINGS,
+      background: true,
+      getBackgroundColor: [255, 255, 255, 240],
+      getBorderColor: (d) => withAlpha(ROUTE_PLACE_RGBA[d.role], 200),
+      getBorderWidth: 1,
+      backgroundBorderRadius: 4,
+      backgroundPadding: [5, 2],
+      updateTriggers: { getPixelOffset: radius },
+    }),
+    new TextLayer<RouteNoteRender>({
+      id: 'route-notes',
+      data: notes,
+      getPosition: (d) => d.position,
+      getText: (d) => d.text,
+      getColor: [13, 71, 161, 255],
+      getSize: 11,
+      sizeUnits: 'pixels',
+      getTextAnchor: 'middle',
+      getAlignmentBaseline: 'bottom',
+      getPixelOffset: (d) => [0, -(radius + 6 + d.stack * 20)],
+      characterSet: 'auto',
+      fontFamily: FONT_FAMILY,
+      fontWeight: 700,
+      fontSettings: FONT_SETTINGS,
+      background: true,
+      getBackgroundColor: [239, 246, 255, 245],
+      getBorderColor: ROUTE_RGBA,
+      getBorderWidth: 1,
+      backgroundBorderRadius: 4,
+      backgroundPadding: [5, 2],
+      updateTriggers: { getPixelOffset: radius },
+    }),
+  ]
 }
 
 /** Customer journey on top of everything: cased orange path, numbered stops, times and floor-change notes. */

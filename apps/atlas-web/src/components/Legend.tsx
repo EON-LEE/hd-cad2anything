@@ -2,10 +2,11 @@ import { useMemo } from 'react'
 import { useData } from '../api/source'
 import { CHANGE_LABELS, CHANGE_ORDER, NO_DATA_COLOR, VACANT_COLOR, changeColor, heatmapColor, heatmapGradientCss, rgbaToCss } from '../lib/colors'
 import type { FloorModel } from '../lib/geometry'
+import { routeLegendText } from '../lib/route'
 import type { HighlightRender } from '../map/prepare'
 import { replaceOp } from '../state/reducer'
 import { usePatchUi } from '../state/store'
-import type { Heatmap, Journey } from '../types/api'
+import type { Heatmap, Journey, Route } from '../types/api'
 
 interface Props {
   model: FloorModel
@@ -18,6 +19,7 @@ interface Props {
   journey: Journey | null
   journeyStopsOnFloor: number
   journeyCardOpen: boolean
+  route: Route | null
 }
 
 export function Legend({
@@ -31,6 +33,7 @@ export function Legend({
   journey,
   journeyStopsOnFloor,
   journeyCardOpen,
+  route,
 }: Props) {
   const { meta } = useData()
   const patchUi = usePatchUi()
@@ -57,6 +60,26 @@ export function Legend({
       <details open>
         <summary>범례</summary>
         <div className="legend-body">
+        {route && (
+          <section className="legend-route">
+            <h3>경로</h3>
+            <ul>
+              <li>
+                <span className="swatch route-line" aria-hidden="true" />
+                이동 경로
+              </li>
+              <li>
+                <span className="swatch route-marker origin" aria-hidden="true" />
+                출발
+              </li>
+              <li>
+                <span className="swatch route-marker destination" aria-hidden="true" />
+                도착
+              </li>
+            </ul>
+            <p className="hint">{routeLegendText(route)}</p>
+          </section>
+        )}
         {journey && (
           <section className="legend-journey">
             <h3>고객 동선</h3>

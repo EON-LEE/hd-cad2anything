@@ -45,8 +45,20 @@ JOURNEY_STOP_FIELDS = (
     "amount_krw",
     "gap_min",
 )
-# Per-run ui_state flag: this answer drew a journey, so its other overlays keep it on screen.
-JOURNEY_DRAWN = "_journey_drawn"
+ROUTE_ARGS = ("origin", "destination", "destination_category", "destination_floor", "via")
+# Per-run ui_state flag: this answer drew a journey or a route, so its other overlays keep the path.
+PATH_DRAWN = "_path_drawn"
+# Overlays a path replaces so it stands alone on the plan.
+PATH_CLEARS = (("/heatmap", None), ("/highlights", []), ("/edges", []), ("/compareRev", None))
+# Where each panel appears, so answers point users to the right place.
+PANEL_PLACES = {
+    "changes": "오른쪽 개정 검토 탭을 열었습니다.",
+    "artifact": "오른쪽 개정 검토 탭에서 산출물을 열었습니다.",
+    "layout": "오른쪽 레이아웃 대안 탭을 열었습니다.",
+    "table": "도면 아래 표 패널에 표를 열었습니다.",
+    "journey": "도면 왼쪽 위에 동선 카드를 열었습니다.",
+    "none": "패널을 닫았습니다.",
+}
 
 
 @dataclass
@@ -59,10 +71,10 @@ def _replace(path: str, value: Any) -> dict[str, Any]:
     return {"op": "replace", "path": path, "value": value}
 
 
-def _drop_earlier_journey(patches: list[dict[str, Any]], ui_state: dict[str, Any]) -> list[dict[str, Any]]:
-    """A new heatmap, highlight, relation or comparison replaces a journey drawn by an earlier answer."""
-    if not ui_state.get(JOURNEY_DRAWN):
-        patches.append(_replace("/journey", None))
+def _drop_earlier_paths(patches: list[dict[str, Any]], ui_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """A new heatmap, highlight, relation or comparison replaces a journey or route from an earlier answer."""
+    if not ui_state.get(PATH_DRAWN):
+        patches.extend([_replace("/journey", None), _replace("/route", None)])
     return patches
 
 
@@ -121,9 +133,11 @@ class UiActionHandler:
         self,
         heatmap_provider: HeatmapProvider | None = None,
         journey_provider: Callable[..., dict[str, Any]] | None = None,
+        route_provider: Callable[..., dict[str, Any]] | None = None,
     ):
         self.heatmap_provider = heatmap_provider
         self.journey_provider = journey_provider
+        self.route_provider = route_provider
 
     def handle(self, name: str, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         method = getattr(self, f"_{name}", None)
@@ -158,7 +172,7 @@ class UiActionHandler:
         if floor and floor != ui_state.get("floor"):
             patches.insert(0, _replace("/floor", floor))
             ui_state["floor"] = floor
-        _drop_earlier_journey(patches, ui_state)
+        _drop_earlier_paths(patches, ui_state)
         output = {"ok": True, "metric": metric, "rev": rev, "floor": floor, "units": len(values)}
         ranked = sorted((v, k) for k, v in raw.items() if v is not None and v == v)
         if metric == "low_efficiency":
@@ -180,14 +194,9 @@ class UiActionHandler:
         except (ToolError, KeyError, ValueError) as exc:  # let the model see the reason and recover
             return UiActionResult(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         # The path stands alone: overlays from earlier answers would hide it.
-        patches = [
-            _replace("/heatmap", None),
-            _replace("/highlights", []),
-            _replace("/edges", []),
-            _replace("/compareRev", None),
-            _replace("/journey", journey),
-        ]
-        ui_state[JOURNEY_DRAWN] = True
+        patches = [_replace(path, value) for path, value in PATH_CLEARS]
+        patches += [_replace("/route", None), _replace("/journey", journey)]
+        ui_state[PATH_DRAWN] = True
         shown = []
         journey_rev = journey.get("rev")
         if journey_rev and journey_rev != ui_state.get("rev"):
@@ -218,13 +227,50 @@ class UiActionHandler:
         }
         return UiActionResult(json.dumps(output, ensure_ascii=False, default=str), patches)
 
+    def _ui_show_route(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
+        if self.route_provider is None:
+            return UiActionResult(json.dumps({"ok": False, "error": "route provider unavailable"}))
+        params = {k: args[k] for k in ROUTE_ARGS if args.get(k) not in (None, "")}
+        try:
+            route = self.route_provider(rev=ui_state.get("rev"), **params)
+        except (
+            ToolError,
+            KeyError,
+            ValueError,
+            TypeError,
+        ) as exc:  # let the model see the reason and recover
+            return UiActionResult(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        patches = [_replace(path, value) for path, value in PATH_CLEARS]
+        patches += [_replace("/journey", None), _replace("/route", route)]
+        ui_state[PATH_DRAWN] = True
+        origin_floor = (route.get("origin") or {}).get("floor")
+        if origin_floor and origin_floor != ui_state.get("floor"):
+            patches.append(_replace("/floor", origin_floor))
+            ui_state["floor"] = origin_floor
+        output = {
+            "ok": True,
+            "title": route.get("title"),
+            "origin": {k: (route.get("origin") or {}).get(k) for k in ("label", "floor")},
+            "destination": {k: (route.get("destination") or {}).get(k) for k in ("label", "floor")},
+            "walk_m": route.get("walk_m"),
+            "legs": route.get("legs", []),
+            "transitions": route.get("transitions", []),
+            "alternatives": route.get("alternatives", []),
+            "caveat": route.get("caveat"),
+            "shown": (
+                f"{floor_ko(origin_floor) + ' ' if origin_floor else ''}도면에 경로를 파란 선으로 그렸습니다. "
+                "도면 왼쪽 위 길 찾기 상자에서 층을 바꿔 볼 수 있습니다."
+            ),
+        }
+        return UiActionResult(json.dumps(output, ensure_ascii=False, default=str), patches)
+
     def _ui_highlight_units(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         color = args.get("color") or "#e53935"
         highlights = [
             {"unit_code": code, "color": color, "reason": args.get("reason", "")}
             for code in args["unit_codes"]
         ]
-        patches = _drop_earlier_journey([_replace("/highlights", highlights)], ui_state)
+        patches = _drop_earlier_paths([_replace("/highlights", highlights)], ui_state)
         return UiActionResult(json.dumps({"ok": True, "highlighted": len(highlights)}), patches)
 
     def _ui_draw_edges(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
@@ -232,7 +278,7 @@ class UiActionHandler:
             {"from": e["from"], "to": e["to"], "weight": e.get("weight", 1.0), "label": e.get("label", "")}
             for e in args["edges"]
         ]
-        patches = _drop_earlier_journey([_replace("/edges", edges)], ui_state)
+        patches = _drop_earlier_paths([_replace("/edges", edges)], ui_state)
         return UiActionResult(json.dumps({"ok": True, "edges": len(edges)}), patches)
 
     def _ui_focus(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
@@ -243,7 +289,7 @@ class UiActionHandler:
     def _ui_compare(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         ui_state["rev"], ui_state["compareRev"] = args["rev_to"], args["rev_from"]
         patches = [_replace("/rev", args["rev_to"]), _replace("/compareRev", args["rev_from"])]
-        return UiActionResult(json.dumps({"ok": True}), _drop_earlier_journey(patches, ui_state))
+        return UiActionResult(json.dumps({"ok": True}), _drop_earlier_paths(patches, ui_state))
 
     def _ui_show_panel(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
         panel_type = args["type"]
@@ -258,6 +304,7 @@ class UiActionHandler:
             payload = table
             output["rows"] = len(table["rows"])
         panel = {"type": panel_type, "payload": payload}
+        output["shown"] = PANEL_PLACES.get(panel_type, "")
         return UiActionResult(json.dumps(output, ensure_ascii=False), [_replace("/panel", panel)])
 
     def _ui_clear(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:
@@ -267,6 +314,7 @@ class UiActionHandler:
             "highlights": ("/highlights", []),
             "edges": ("/edges", []),
             "journey": ("/journey", None),
+            "route": ("/route", None),
         }
         selected = list(targets.values()) if what == "all" else [targets[what]]
         patches = [_replace(path, value) for path, value in selected]

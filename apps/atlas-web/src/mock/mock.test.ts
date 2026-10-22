@@ -6,10 +6,11 @@ import { appReducer, createAppState, type AppState, type ChatItem } from '../sta
 import { createInitialUiState } from '../state/uiState'
 import type { AgUiEvent, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
-import { buildMockScript, chunkText, playScript, segmentFromMessage, setMockSpeed } from './chatScripts'
+import { buildMockScript, chunkText, lastFloorMention, playScript, segmentFromMessage, setMockSpeed } from './chatScripts'
 import { buildMockFloor, buildMockMeta } from './floors'
-import { JOURNEY_REV, MOCK_JOURNEY_COUNT, corridorAccess, mockJourney, segmentLabelKo, unitEntrance } from './journey'
+import { ESCALATORS, JOURNEY_REV, MOCK_JOURNEY_COUNT, corridorAccess, mockJourney, segmentLabelKo, unitEntrance } from './journey'
 import { createMockSource } from './mockSource'
+import { mockPlace, mockRoute } from './route'
 import { buildWorld, changesBetween } from './world'
 
 const world = buildWorld()
@@ -249,6 +250,78 @@ describe('scripted mock chat streams', () => {
     expect(payload.rows).toHaveLength(19)
   })
 
+  it('route prompt draws the shortest walk from the main entrance to a 3F store', async () => {
+    const events = await collect(request('정문에서 3층 매장까지 가는 길 알려줘'))
+    const state = reduce(events)
+    const run = runOf(state)
+    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+      ['정문에서 3층 Cafe Halune까지 경로 계산', 'spatial_route'],
+      ['도면에 경로 그리기', 'ui_show_route'],
+    ])
+    // ui_show_route clears the other analysis overlays like the backend does.
+    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'route', 'floor'])
+    expect(state.ui).toMatchObject({ floor: '1F', heatmap: null, highlights: [], edges: [], compareRev: null, journey: null })
+    const route = state.ui.route!
+    expect(route).toMatchObject({ title: 'ENT-1 정문 → Cafe Halune(3F-C05)', rev: 'R2', via_type: 'escalator', walk_m: 85 })
+    expect(route.origin).toEqual({ ref: 'ENT-1', kind: 'entrance', label: 'ENT-1 정문', floor: '1F', unit_code: null, x: 60, y: 0.4 })
+    const unit = world.revisions.get('R2')!.floors['3F'].units.find((u) => u.code === '3F-C05')!
+    const [ex, ey] = unitEntrance(unit)
+    expect(route.destination).toEqual({ ref: '3F-C05', kind: 'unit', label: 'Cafe Halune(3F-C05)', floor: '3F', unit_code: '3F-C05', x: ex, y: ey })
+    expect(route.transitions).toEqual([{ from_floor: '1F', to_floor: '3F', via: 'ESC-A', floors: 2, height_m: 10 }])
+    // One line per floor: entrance -> ESC-A landing on 1F, landing -> store entrance on 3F, along the corridors.
+    expect(route.segments.map((s) => s.floor)).toEqual(['1F', '3F'])
+    const [leave, arrive] = route.segments
+    expect(leave.points[0]).toEqual([60, 0.4])
+    expect(leave.points.at(-1)).toEqual(ESCALATORS[0].at)
+    expect(arrive.points[0]).toEqual(ESCALATORS[0].at)
+    expect(arrive.points.at(-1)).toEqual([ex, ey])
+    for (const segment of route.segments) {
+      for (const p of segment.points.slice(1, -1)) {
+        const q = corridorAccess(p)
+        expect(Math.hypot(q[0] - p[0], q[1] - p[1])).toBeLessThan(1e-6)
+      }
+    }
+    expect(route.caveat).toContain('에스컬레이터를 타는 구간과 층마다 갈아타는 거리는 넣지 않았어요.')
+    expect(run.answer).toContain('에스컬레이터를 타고 3층으로 올라가요. (2개 층)')
+    expect(run.answer).toContain('걷는 거리는 약 85m예요.')
+  })
+
+  it('reads the entrance, the store, the floor and the vertical link from the question', async () => {
+    const byCode = reduce(await collect(request('서측 출입구에서 3F-N04까지 엘리베이터로 가는 길 알려줘'))).ui.route!
+    expect(byCode.origin.ref).toBe('ENT-2')
+    expect(byCode.destination).toMatchObject({ unit_code: '3F-N04', label: 'Sevrine Femme(3F-N04)' })
+    expect(byCode.via_type).toBe('elevator')
+    expect(byCode.transitions[0].via).toMatch(/^EV-/)
+    expect(byCode.caveat).toContain('엘리베이터를 타는 구간은 넣지 않았어요.')
+    const byBrand = reduce(await collect(request('동측 출입구에서 Atelier Noa 어떻게 가?'))).ui.route!
+    expect(byBrand.origin.ref).toBe('ENT-3')
+    expect(byBrand.destination).toMatchObject({ unit_code: '3F-N03', label: 'Atelier Noa(3F-N03)' })
+    const sameFloor = reduce(await collect(request('정문에서 1층 매장까지 가는 길 알려줘')))
+    expect(sameFloor.ui.route!.transitions).toEqual([])
+    expect(sameFloor.ui.route!.segments.map((s) => s.floor)).toEqual(['1F'])
+    expect(runOf(sameFloor).answer).toContain('1. 1층 정문(ENT-1)에서 Atelier Corvane(1F-C05)까지 약')
+    const missing = runOf(reduce(await collect(request('정문에서 8층 매장까지 가는 길 알려줘'))))
+    expect(missing.answer.startsWith('모의 데이터에는 8층 도면이 없어서 3층으로 대신 보여 드릴게요.')).toBe(true)
+    expect(lastFloorMention('1층 정문에서 3층 카페까지')).toBe('3F')
+    expect(lastFloorMention('지하 1층 식품관')).toBe('B1')
+    expect(lastFloorMention('정문에서 카페까지')).toBeNull()
+  })
+
+  it('shows a route and a journey alone and drops both for later analysis displays', async () => {
+    const routeEvents = await collect(request('정문에서 3층까지 가는 길 알려줘'))
+    const journeyEvents = await collect(request('VIP 고객 한 명의 쇼핑 동선을 보여줘'))
+    const afterJourney = reduce([...routeEvents, ...journeyEvents]).ui
+    expect(afterJourney.journey).not.toBeNull()
+    expect(afterJourney.route).toBeNull()
+    const afterRoute = reduce([...journeyEvents, ...routeEvents]).ui
+    expect(afterRoute.route).not.toBeNull()
+    expect(afterRoute.journey).toBeNull()
+    for (const prompt of ['3층 저효율 zone과 원인', 'S/S 개편 도면에서 뭐가 바뀌었는지 알려줘', '40대 VIP 고객은 화장품이랑 뭘 같이 사?']) {
+      const later = reduce([...routeEvents, ...(await collect(request(prompt)))]).ui
+      expect(later.route).toBeNull()
+    }
+  })
+
   it('reads a customer segment from the question', () => {
     expect(segmentFromMessage('40대 여성 VIP 고객 동선')).toEqual({ age_band: '40s', gender: 'F', tier: 'VIP' })
     expect(segmentFromMessage('60대 남성 VVIP')).toEqual({ age_band: '60s+', gender: 'M', tier: 'VVIP' })
@@ -279,6 +352,25 @@ describe('mock journeys', () => {
     expect(journey.stops.map((s) => s.gap_min)).toEqual([null, 26, 43, 39, 45, 32])
     expect(journey.summary).toMatchObject({ stops: 6, total_krw: 2_335_500, duration_min: 185 })
     expect(journey.title).toBe('40대 여성 VIP 고객의 쇼핑 동선')
+  })
+})
+
+describe('mock routes', () => {
+  it('resolves entrances, stores and floor-qualified vertical links; unknown places give no route', () => {
+    expect(mockPlace(world, 'R2', 'ENT-3')).toEqual({ ref: 'ENT-3', kind: 'entrance', label: 'ENT-3 동측 출입구', floor: '1F', unit_code: null, x: 119.6, y: 40 })
+    expect(mockPlace(world, 'R2', '1f:esc-b')).toMatchObject({ ref: '1F:ESC-B', kind: 'escalator', label: 'ESC-B 에스컬레이터', floor: '1F', x: 69, y: 40 })
+    expect(mockPlace(world, 'R2', '3F:EV-2')).toMatchObject({ kind: 'elevator', floor: '3F', x: 114, y: 68 })
+    expect(mockPlace(world, 'R0', '3F-C02')?.label).toBe('3F-C02 (공실)')
+    expect(mockPlace(world, 'R2', '8F:ESC-A')).toBeNull()
+    expect(mockPlace(world, 'R2', 'ENT-9')).toBeNull()
+    expect(mockRoute(world, { rev: 'R2', origin: 'ENT-1', destination: '9F-X01' })).toBeNull()
+  })
+
+  it('starts on an escalator landing without a walking line on that floor', () => {
+    const route = mockRoute(world, { rev: 'R2', origin: '1F:ESC-A', destination: '3F-C05' })!
+    expect(route.segments[0]).toEqual({ floor: '1F', points: [[51, 40]] })
+    expect(route.transitions[0]).toMatchObject({ via: 'ESC-A', floors: 2 })
+    expect(route.walk_m).toBe(20)
   })
 })
 

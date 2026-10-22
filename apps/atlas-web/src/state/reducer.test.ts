@@ -26,6 +26,21 @@ const journey = {
   transitions: [{ from_order: 1, to_order: 2, from_floor: '1F', to_floor: '3F', via: 'ESC-B' }],
 }
 
+const route = {
+  title: 'ENT-1 정문 → Cafe Halune(3F-C05)',
+  rev: 'R2',
+  via_type: 'escalator',
+  origin: { ref: 'ENT-1', kind: 'entrance', label: 'ENT-1 정문', floor: '1F', unit_code: null, x: 60, y: 0.4 },
+  destination: { ref: '3F-C05', kind: 'unit', label: 'Cafe Halune(3F-C05)', floor: '3F', unit_code: '3F-C05', x: 60, y: 50 },
+  segments: [
+    { floor: '1F', points: [[60, 0.4], [60, 15], [45, 15], [45, 31.5], [49.5, 31.5], [49.5, 40], [51, 40]] },
+    { floor: '3F', points: [[51, 40], [49.5, 40], [49.5, 48.5], [60, 48.5], [60, 50]] },
+  ],
+  transitions: [{ from_floor: '1F', to_floor: '3F', via: 'ESC-A', floors: 2, height_m: 10 }],
+  walk_m: 85,
+  caveat: '통로망 최단 경로로 계산한 걷는 거리예요.',
+}
+
 describe('appReducer: chat runs', () => {
   it('folds a run: labelled steps, STATE_DELTA patches and the streamed answer', () => {
     let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u1', text: '4층 저효율 매장', at: 0 })
@@ -136,6 +151,30 @@ describe('appReducer: chat runs', () => {
     expect(state.ui.journey).toBeNull()
   })
 
+  it('accepts route patches thanks to the route: null default', () => {
+    let state = run(createAppState(ui), [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/route', value: route },
+          { op: 'replace', path: '/floor', value: '1F' },
+        ],
+      },
+    ])
+    expect(state.ui.floor).toBe('1F')
+    expect(state.ui.route).toEqual(route)
+    // A later patch of one field goes through normalization too.
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route/walk_m', value: '90' }] }])
+    expect(state.ui.route?.walk_m).toBe(90)
+    // The backend never sends a route and a journey together, but both still render side by side.
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: journey }] }])
+    expect(state.ui.route?.origin.ref).toBe('ENT-1')
+    expect(state.ui.journey?.stops).toHaveLength(2)
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: null }] }])
+    expect(state.ui.route).toBeNull()
+    expect(state.ui.journey).not.toBeNull()
+  })
+
   it('normalizes agent-provided values defensively', () => {
     const state = run(createAppState(ui), [
       {
@@ -145,6 +184,7 @@ describe('appReducer: chat runs', () => {
           { op: 'replace', path: '/panel', value: { type: 'unknown' } },
           { op: 'replace', path: '/heatmap', value: { metric: 'x', values: { a: 0.3, b: 'bad' } } },
           { op: 'replace', path: '/journey', value: { stops: 'none' } },
+          { op: 'replace', path: '/route', value: { origin: { ref: 'ENT-1' }, destination: { unit_code: '3F-C05' } } },
         ],
       },
     ])
@@ -152,6 +192,8 @@ describe('appReducer: chat runs', () => {
     expect(state.ui.panel).toEqual({ type: 'none', payload: {} })
     expect(state.ui.heatmap).toEqual({ metric: 'x', label: 'x', values: { a: 0.3 } })
     expect(state.ui.journey).toBeNull()
+    // "ENT-1" alone does not say which floor the walk starts on.
+    expect(state.ui.route).toBeNull()
   })
 
   it('handles RUN_ERROR, content without START, aborts and streams that end early', () => {
