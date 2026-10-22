@@ -18,6 +18,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | GET | `/api/analytics/transitions?segment=` | `{floors:[...], matrix:[[...]], top_transitions, fountain:{base_floor, share, customer_days}, shower:{top_floor, share, customer_days}, caveat}` |
 | POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints:{keep_anchors, area_tolerance, max_moves, n_alternatives, movable_categories, allow_cross_floor, save}}` → `{rev, period, label, caveats, alternatives:[{id, rev_id, summary, moves:[{brand_id, brand_name, from_unit, to_unit, delta, delta_low, delta_high, explanation}], objective_before, objective_after(억원), kpi_delta:{sales_krw, low, high}, constraints:[{name, ok, detail}], kpi_by_floor, explanations}]}`. 대안마다 가상 개정 `rev_id`가 저장된다. |
 | GET | `/api/analytics/journey?customer_id=&date=&segment=&rank=1&rev=` | 고객 한 명의 하루 쇼핑 동선. 응답은 3절의 `journey` 객체와 같다. `customer_id`·`date`를 생략하면 조건(`segment`)에 맞는 고객 하루 중 `rank`번째를 고른다. `rev`를 주면 그 개정이 실제 매장 배치였던 기간에서만 고른다(가상 개정은 기준 실제 개정의 기간). 해당하는 동선이 없으면 404 |
+| GET | `/api/spatial/route?rev=&origin=&destination=&destination_category=&destination_floor=&via=escalator` | 두 지점 사이의 통로망 최단 경로. 응답은 3절의 `route` 객체와 같다. `origin`·`destination`은 매장 코드(`3F-C05`), 출입구 ID(`ENT-1`), 층을 붙인 수직동선·편의시설(`1F:ESC-A`, `8F:RESTROOM`)이다. `destination` 대신 `destination_category`와 `destination_floor`를 주면 그 층에서 걸어서 가장 가까운 해당 카테고리 매장으로 간다. `via`는 `escalator`(기본) 또는 `elevator`. 찾을 수 없는 지점이면 404 |
 
 ## 2. 채팅(AG-UI 호환 SSE)
 
@@ -45,7 +46,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 ## 3. UI 상태 모델
 
-에이전트의 UI 함수 도구 호출은 백엔드가 `STATE_DELTA`로 바꿔 보낸다. UI 함수 도구는 `ui_set_floor`, `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_focus`, `ui_compare`, `ui_show_panel`, `ui_show_journey`, `ui_clear`이다.
+에이전트의 UI 함수 도구 호출은 백엔드가 `STATE_DELTA`로 바꿔 보낸다. UI 함수 도구는 `ui_set_floor`, `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_focus`, `ui_compare`, `ui_show_panel`, `ui_show_journey`, `ui_show_route`, `ui_clear`이다.
 
 ```json
 {
@@ -58,7 +59,8 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
   "edges": [{"from": "3F-N05", "to": "2F-C03", "weight": 2.4, "label": "lift 2.4"}],
   "focus": {"unit_codes": ["3F-N05"]},
   "panel": {"type": "changes", "payload": {}},
-  "journey": null
+  "journey": null,
+  "route": null
 }
 ```
 
@@ -84,9 +86,34 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 - `stops`의 `x`, `y`는 매장 출입구(통로와 맞닿은 지점) 좌표다.
 - `rev`는 구매 날짜에 실제로 쓰인 개정이다. 정류장 매장 코드와 경로는 이 개정의 도면 기준이다. 에이전트가 동선을 보여 줄 때 화면의 개정이 이와 다르면 `/rev`도 함께 바꾼다.
 - `query`는 같은 조건의 다음 고객을 요청할 때 쓴다. `rev`가 있으면 그 개정이 쓰인 기간의 고객 하루만 고른 것이다.
-- 동선과 다른 분석 표시는 함께 두지 않는다. `ui_show_journey`는 `heatmap`, `highlights`, `edges`, `compareRev`를 비운다. 이후 답변의 `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_compare`는 `journey`를 `null`로 바꾼다. 같은 답변 안에서 그린 동선은 유지한다.
+- 동선과 다른 분석 표시는 함께 두지 않는다. `ui_show_journey`는 `heatmap`, `highlights`, `edges`, `compareRev`, `route`를 비운다. 이후 답변의 `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_compare`는 `journey`를 `null`로 바꾼다. 같은 답변 안에서 그린 동선은 유지한다.
 - `segments`는 통로망 최단 경로로 추정한 이동선이다. 층이 바뀌는 구간은 출발 층에서 에스컬레이터까지, 도착 층에서 에스컬레이터부터 매장까지 두 개의 segment로 나뉜다.
 - 화면은 현재 층의 `segments`와 `stops`만 그린다. 다른 층에 들르는 정류장이 있으면 층 탭에 표시한다.
+
+**`route`(두 지점 사이의 길)**
+
+```json
+{
+  "title": "ENT-1 정문 → Orlix Coffee(8F-C05)",
+  "rev": "R2",
+  "via_type": "escalator",
+  "origin": {"ref": "ENT-1", "kind": "entrance", "label": "ENT-1 정문", "floor": "1F", "unit_code": null, "x": 60.0, "y": 0.4},
+  "destination": {"ref": "8F-C05", "kind": "unit", "label": "Orlix Coffee(8F-C05)", "floor": "8F", "unit_code": "8F-C05", "x": 41.0, "y": 52.0},
+  "segments": [
+    {"floor": "1F", "points": [[60.0, 0.4], [60.0, 30.0], [52.0, 38.0]]},
+    {"floor": "8F", "points": [[52.0, 38.0], [41.0, 52.0]]}
+  ],
+  "transitions": [{"from_floor": "1F", "to_floor": "8F", "via": "ESC-A", "floors": 7, "height_m": 35.0}],
+  "walk_m": 85,
+  "caveat": "통로망 최단 경로로 계산한 걷는 거리예요. 에스컬레이터를 타는 구간과 층마다 갈아타는 거리는 넣지 않았어요."
+}
+```
+
+- `origin.kind`, `destination.kind`는 `unit`, `entrance`, `escalator`, `elevator`, `stairs`, `amenity` 중 하나다. `x`, `y`는 지점의 출입 지점(통로와 맞닿은 곳) 좌표다.
+- `segments`는 층마다 하나다. 출발 층은 출발 지점에서 수직동선까지, 도착 층은 수직동선에서 도착 지점까지다. 같은 층이면 segment가 하나이고 `transitions`는 빈 배열이다.
+- `walk_m`은 출발 층과 도착 층에서 걷는 거리의 합이다(5m 단위 반올림). 수직 이동은 `transitions`의 `floors`(지나는 층 수)와 `height_m`(층 높이 합)으로 따로 보여 준다.
+- 화면은 현재 층의 segment와, 현재 층에 있는 출발·도착 지점을 그린다. 경로가 지나는 다른 층은 층 탭에 표시한다.
+- 경로도 동선처럼 단독으로 표시한다. `ui_show_route`는 `heatmap`, `highlights`, `edges`, `compareRev`, `journey`를 비우고, `ui_show_journey`는 `route`를 비운다. 이후 답변의 `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_compare`는 `journey`와 `route`를 `null`로 바꾼다. 같은 답변 안에서 그린 경로는 유지한다.
 
 | 필드 | 규칙 |
 |---|---|

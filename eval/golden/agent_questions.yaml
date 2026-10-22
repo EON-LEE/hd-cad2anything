@@ -74,6 +74,49 @@ cases:
       ui_any: [ui_show_journey]
       answer_any: ["추정", "결제 순서", "구매 순서"]
 
+  - id: spatial-route-food-hall
+    scenario: 공간 질의
+    question: 1층 정문에서 8층 식당가까지 걸어서 몇 m 정도야?
+    expect:
+      tools_any: [spatial_route, ui_show_route]
+      answer_any: ["에스컬레이터", "엘리베이터"]
+
+  - id: spatial-adjacent-aggregate
+    scenario: 공간 질의
+    question: R2에서 화장품 매장과 벽을 맞대고 있는 매장들의 평균 ㎡당 매출은 얼마야?
+    expect:
+      tools_any: [spatial_query]
+      tools_none: [spatial_unit_details]
+      answer_any: ["Casa Arnino", "1F-N02"]
+
+  - id: spatial-escalator-front
+    scenario: 공간 질의
+    question: 3층 에스컬레이터 정면에 있는 매장은 어디야?
+    expect:
+      tools_any: [spatial_query, spatial_describe_floor]
+      answer_any: ["3F-C05"]
+
+  - id: spatial-vacancy-by-floor
+    scenario: 공간 질의
+    question: R2 기준 층별 공실 면적 합계를 알려줘.
+    expect:
+      tools_any: [spatial_query, spatial_floor_summary, spatial_find_units]
+      answer_any: ["190", "191", "897", "898"]
+
+  - id: spatial-corner-efficiency
+    scenario: 공간 질의
+    question: R2에서 코너 매장이 코너가 아닌 매장보다 면적당 매출이 높아?
+    expect:
+      tools_any: [spatial_query]
+      answer_any: ["코너"]
+
+  - id: spatial-describe-floor
+    scenario: 공간 질의
+    question: 4층은 어떻게 생겼어? 에스컬레이터랑 화장실은 어디쯤 있어?
+    expect:
+      tools_any: [spatial_describe_floor]
+      answer_any: ["도면 기준", "중앙", "북동", "남서"]
+
   - id: md-relayout-before-after
     scenario: 개편 효과
     question: R1 개편 때 에스컬레이터 정면(3F-C05)으로 옮긴 브랜드의 매출이 이전 후 어떻게 변했는지 비교해줘.

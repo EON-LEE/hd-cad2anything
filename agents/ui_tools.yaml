@@ -68,7 +68,8 @@ tools:
       additionalProperties: false
   - name: ui_show_panel
     description: >-
-      오른쪽 패널을 연다. payload 형식은 type마다 다르다.
+      패널을 연다. changes·artifact는 오른쪽 개정 검토 탭, layout은 오른쪽 레이아웃 대안 탭, table은 도면 아래 표 패널,
+      journey는 도면 왼쪽 위 동선 카드에 열린다. payload 형식은 type마다 다르다.
       changes는 {rev_from, rev_to}, artifact는 {generator}, layout은 {rev, floors},
       table은 {title, columns, rows}다. table의 rows에는 도구 결과의 실제 값을 columns 순서대로 넣는다.
     parameters:
@@ -96,8 +97,24 @@ tools:
     parameters:
       type: object
       properties:
-        what: { type: string, enum: [heatmap, highlights, edges, journey, all] }
+        what: { type: string, enum: [heatmap, highlights, edges, journey, route, all] }
       required: [what]
+      additionalProperties: false
+  - name: ui_show_route
+    description: >-
+      두 지점 사이의 통로망 최단 경로를 도면에 파란 선으로 그리고 길 찾기 상자를 연다. 걷는 거리와 지나는 층을 함께 돌려준다.
+      origin·destination은 매장 코드(3F-C05), 브랜드명, 출입구(ENT-1, 정문), 층을 붙인 수직동선·편의시설(1F:ESC-A, 8F:화장실)이다.
+      목적지가 '8층 식당가'처럼 카테고리면 destination 대신 destination_category와 destination_floor를 준다.
+      길, 가는 법, 거리를 물으면 이 함수로 그리고 결과의 walk_m과 transitions로 설명한다.
+    parameters:
+      type: object
+      properties:
+        origin: { type: string, description: "출발지. 예: 정문, ENT-1, 3F-C05, 1F:ESC-A" }
+        destination: { type: string, description: "도착지. 예: 8F-C05, 브랜드명, 8F:화장실" }
+        destination_category: { type: string, description: "도착 카테고리. 예: 레스토랑, 카페, 화장품" }
+        destination_floor: { type: string, description: "destination_category를 찾을 층. 예: 8F" }
+        via: { type: string, enum: [escalator, elevator, stairs], description: "층을 옮기는 수단. 기본 escalator" }
+      required: [origin]
       additionalProperties: false
   - name: ui_show_journey
     description: >-

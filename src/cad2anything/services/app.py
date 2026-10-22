@@ -57,15 +57,28 @@ def foundry_runtime_factory(toolkit: Toolkit) -> AgentRuntime:
     handler = UiActionHandler(
         heatmap_provider=lambda metric, rev, floor: metrics.unit_metric(toolkit, metric, rev, floor),
         journey_provider=lambda **params: toolkit.customer_journey(**params, with_routes=True),
+        route_provider=lambda rev=None, **params: toolkit.route_object(
+            rev or latest_actual_rev(toolkit), **params, with_geometry=True
+        ),
     )
     return AgentRuntime.from_project(endpoint, credential, ui_handler=handler)
 
 
+def latest_actual_rev(toolkit: Toolkit) -> str:
+    actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
+    if not actual:
+        raise ValueError("실제 개정이 없습니다.")
+    return actual[-1].rev_id
+
+
 def warm_up(toolkit: Toolkit) -> None:
-    """Load transactions and build caches so the first analytics question answers quickly."""
+    """Load transactions and build caches so the first analytics and spatial questions answer quickly."""
     started = time.monotonic()
     try:
         toolkit._journey_rows()
+        actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
+        if actual:
+            toolkit.unit_table(actual[-1].rev_id)
         logger.info("analytics caches warmed in %.1fs", time.monotonic() - started)
     except Exception:  # warm-up is best effort; requests compute the same caches on demand
         logger.exception("analytics warm-up failed")

@@ -31,9 +31,15 @@ def _events(text="4F-E05는 노출이 낮습니다.", consult_request="백화점
 def test_golden_cases_load_and_cover_every_scenario(tmp_path):
     defaults, cases = load_cases(__import__("pathlib").Path(GOLDEN))
     assert defaults["ui_state"]["rev"] == "R2" and len(cases) >= 15
-    assert {"개정 반영", "공간 생산성", "레이아웃 대안", "데이터 경계", "승인 경계", "고객 동선"} <= {
-        c["scenario"] for c in cases
-    }
+    assert {
+        "개정 반영",
+        "공간 생산성",
+        "레이아웃 대안",
+        "데이터 경계",
+        "승인 경계",
+        "고객 동선",
+        "공간 질의",
+    } <= {c["scenario"] for c in cases}
     assert all("consult_specialist" in c["expect"]["answer_none"] for c in cases)
     bad = tmp_path / "bad.yaml"
     bad.write_text("cases:\n  - {id: a, question: q, expect: {magic: [1]}}\n", encoding="utf-8")

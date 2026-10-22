@@ -44,6 +44,35 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "layout_generate_alternatives": "실제 개정을 기준으로 제약(층, 앵커 유지, 면적 허용 오차, 최대 이동 수, 이동 가능 카테고리)을 지키며 기대 매출을 높이는 배치 대안을 만들고 가상 개정으로 저장한다. 이동별 기여도, 층별 변화 범위, 제약 충족표를 반환한다(추정치).",
     "whatif_score_moves": "브랜드 이동안(moves: brand_id 또는 브랜드명, to_unit)의 연간 기대 매출 변화와 범위, 층별 영향, 제약 충족 여부를 추정한다. 가상 개정은 만들지 않는다.",
     "analytics_customer_journey": "가명 고객 한 명의 하루 결제 순서(시각, 층, 매장, 금액, 이전 결제 후 경과 시간)를 반환한다. customer_id·date를 주거나, segment(age_band, gender, tier)와 rank로 조건에 맞는 고객 하루를 고른다. 결제 순서이며 실제 이동 경로가 아니다.",
+    "spatial_query": (
+        "자유로운 공간 질문용 범용 질의. 매장을 조건으로 거르고, 관계로 찾고, 묶어서 집계하고, 정렬한다. "
+        "합계·평균·비율은 직접 계산하지 말고 metrics로 받는다. "
+        "필드: unit_code, floor, zone_code, zone_name, brand_id, brand_name, category(코드·한글명·'F&B'), "
+        "category_name, vacant, anchor, area_m2, frontage_m(통로 접면), walk_to_escalator_m, walk_to_entrance_m, "
+        "side(도면 기준 방위 북서·북·북동·서·중앙·동·남서·남·남동. '동'은 북동·남동 포함), frontage_sides, corner(직각인 두 면이 "
+        "통로에 접함), escalator_front(에스컬레이터 정면), escalator_view_m, front_escalator, entrance_front(출입구 정면), "
+        "entrance_view_m, traffic_potential(0~1, 수직동선·출입구 사이 최단 경로가 매장 앞을 지나는 정도, 관측 유동 아님), "
+        "main_walkway(메인 동선). 실제 개정의 연환산 실적: sales_krw, receipts, aov_krw, sales_per_m2, sales_per_pyeong, gmrof, "
+        "commission_rate, commission_revenue, percentile, floor_percentile, low_efficiency. 가상 개정은 expected_sales_krw, "
+        "expected_sales_per_m2(추정). "
+        'filters: {필드: 값 | [값...] | {"gte": 10, "lt": 30, "ne": 값, "in": [...], "contains": "글자"}}. '
+        '관계 조건: {"adjacent_to": "화장품" | "3F-C05" | {"brand": "이름"}}는 벽을 맞댄 매장, '
+        '{"near": {"to": "ESC-A" | "3F-C05" | "ENT-1" | "화장실", "within_m": 30, "floor": "3F"}}는 걸어서 가까운 매장(distance_m 추가). '
+        "group_by: 필드나 목록. metrics: count, sum:필드, mean:필드, median:필드, min:필드, max:필드, "
+        "rate:sales_krw/area_m2(합계 비율=면적 가중 평균). sort_by: 필드나 집계 이름, '-'를 앞에 붙이면 내림차순. "
+        'fields: 행 결과에 보일 필드. 예) 층별 공실 면적: filters {"vacant": true}, group_by "floor", '
+        'metrics ["count", "sum:area_m2"].'
+    ),
+    "spatial_route": (
+        "두 지점 사이의 통로망 최단 경로와 걷는 거리(walk_m, 층별 legs)를 반환한다. origin·destination은 매장 코드(3F-C05), "
+        "브랜드명, 출입구(ENT-1, 정문), 층을 붙인 수직동선·편의시설(1F:ESC-A, 8F:화장실)이다. destination 대신 "
+        "destination_category와 destination_floor를 주면 그 층에서 가장 가까운 해당 카테고리 매장으로 가고 다른 후보도 준다. "
+        "via는 escalator(기본), elevator, stairs. 걷는 거리에는 수직 이동이 들어가지 않는다. 도면에 그리려면 ui_show_route를 쓴다."
+    ),
+    "spatial_describe_floor": (
+        "층의 지도 카드: 크기, 수직동선·출입구·편의시설의 도면 기준 방위, 구역과 방위, 앵커 매장, 에스컬레이터 정면 매장, "
+        "메인 동선 매장, 공실, 코너 매장 수와 한국어 요약. 층의 생김새, '어디쯤', '정면', '안쪽' 같은 질문에 먼저 쓴다."
+    ),
 }
 
 
