@@ -252,12 +252,12 @@ export function transitionText(t: JourneyTransition, floors?: readonly FloorInfo
 }
 
 /** Map label at the end of a departing segment: "→ 3층 (ESC-A)". */
-export function departureLabel(t: JourneyTransition): string {
+export function departureLabel(t: Pick<JourneyTransition, 'to_floor' | 'via'>): string {
   return `→ ${floorLabel(t.to_floor)}${t.via ? ` (${t.via})` : ''}`
 }
 
 /** Map label at the start of an arriving segment: "1층에서 올라옴". */
-export function arrivalLabel(t: JourneyTransition, floors?: readonly FloorInfo[]): string {
+export function arrivalLabel(t: Pick<JourneyTransition, 'from_floor' | 'to_floor'>, floors?: readonly FloorInfo[]): string {
   const dir = transitionDirection(t, floors)
   return `${floorLabel(t.from_floor)}에서 ${dir > 0 ? '올라옴' : dir < 0 ? '내려옴' : '이동'}`
 }

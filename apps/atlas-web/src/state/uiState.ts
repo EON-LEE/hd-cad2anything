@@ -1,5 +1,6 @@
 // UI state model (the target of STATE_DELTA patches): defaults and defensive normalization.
 import { normalizeJourney } from '../lib/journey'
+import { normalizeRoute } from '../lib/route'
 import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
 
 export const DEFAULT_LAYERS: LayerToggles = { fixtures: false, walkways: true, labels: true }
@@ -42,6 +43,8 @@ export function createInitialUiState(meta: Meta | null | undefined, overrides: P
     panel: { type: 'none', payload: {} },
     // Must exist (as null) so that agent `replace /journey` patches apply.
     journey: null,
+    // Same for `replace /route`.
+    route: null,
     ...overrides,
   }
 }
@@ -139,6 +142,7 @@ export function normalizeUiState(raw: unknown, fallback: UiState): UiState {
     focus: normalizeFocus(raw.focus),
     panel: normalizePanel(raw.panel),
     journey: (raw.journey === fallback.journey ? fallback.journey : normalizeJourney(raw.journey)) ?? null,
+    route: (raw.route === fallback.route ? fallback.route : normalizeRoute(raw.route)) ?? null,
   }
 }
 

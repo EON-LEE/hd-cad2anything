@@ -166,6 +166,39 @@ describe('chat run fold: labels', () => {
     )
     expect(describeUiChange('ui_show_journey', [{ op: 'replace', path: '/journey', value: {} }])).toBeNull()
   })
+
+  it('names the spatial and route tools and describes route patches', () => {
+    expect(toolLabel('spatial_query')).toBe('공간 조건 조회')
+    expect(toolLabel('spatial_route')).toBe('경로 계산')
+    expect(toolLabel('spatial_describe_floor')).toBe('층 구조 확인')
+    expect(toolLabel('atlas_spatial_route')).toBe('경로 계산')
+    expect(toolLabel('ui_show_route')).toBe('도면에 경로 그리기')
+    const run = fold([
+      { type: 'TOOL_CALL_START', tool_call_id: 'r1', tool_name: 'spatial_route', args: { origin: 'ENT-1', destination: '8F-C05' } },
+      { type: 'TOOL_CALL_END', tool_call_id: 'r1', ok: true },
+      { type: 'TOOL_CALL_START', tool_call_id: 'u1', tool_name: 'ui_show_route' },
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/journey', value: null },
+          { op: 'replace', path: '/route', value: { title: 'ENT-1 정문 → Orlix Coffee(8F-C05)' } },
+          { op: 'replace', path: '/floor', value: '1F' },
+        ],
+      },
+      { type: 'TOOL_CALL_END', tool_call_id: 'u1' },
+    ])
+    expect(run.steps.map((s) => [s.label, s.labelSource])).toEqual([
+      ['경로 계산', 'fallback'],
+      ['경로 그리기', 'ui'],
+    ])
+    expect(run.steps[1].patchKeys).toEqual(['journey', 'route', 'floor'])
+    expect(describeUiChange('ui_show_route', [{ op: 'replace', path: '/route', value: null }])).toBe('경로 지우기')
+    expect(describeUiChange('ui_show_route', [{ op: 'replace', path: '/route/walk_m', value: 90 }])).toBeNull()
+    expect(describeUiChange(null, [{ op: 'replace', path: '/route', value: {} }, { op: 'replace', path: '/floor', value: '8F' }])).toBe(
+      '8층으로 이동 · 경로 그리기',
+    )
+    expect(describeUiChange(null, [{ op: 'remove', path: '/route' }])).toBe('경로 지우기')
+  })
 })
 
 describe('chat run fold: nested specialist calls', () => {

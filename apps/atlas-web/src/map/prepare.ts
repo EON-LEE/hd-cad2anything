@@ -22,7 +22,20 @@ import {
   type UnitInfo,
 } from '../lib/geometry'
 import { arrivalLabel, departureLabel } from '../lib/journey'
-import type { CategoryInfo, ChangeItem, FloorInfo, GraphEdge, Highlight, Journey, JourneySegment, JourneyStop } from '../types/api'
+import { ROUTE_MARKER_TEXT, type RoutePlaceRole } from '../lib/route'
+import type {
+  CategoryInfo,
+  ChangeItem,
+  FloorInfo,
+  GraphEdge,
+  Highlight,
+  Journey,
+  JourneySegment,
+  JourneyStop,
+  Route,
+  RoutePlace,
+  RouteSegment,
+} from '../types/api'
 
 export function categoryColorMap(categories: readonly CategoryInfo[]): Map<string, Rgba> {
   return new Map(categories.map((c) => [c.code, hexToRgba(c.color)]))
@@ -279,6 +292,18 @@ export const EMPTY_JOURNEY_RENDER: JourneyRender = { paths: [], stops: [], notes
 const stopPoint = (stop: JourneyStop | undefined): Point2 | null =>
   stop && stop.x !== null && stop.y !== null ? [stop.x, stop.y] : null
 
+/** Collects floor-change notes; notes within 2 m of earlier ones stack upwards. */
+function noteCollector() {
+  const notes: JourneyNoteRender[] = []
+  const placed: Point2[] = []
+  const add = (key: string, position: Point2, text: string, kind: JourneyNoteRender['kind']) => {
+    const stack = placed.filter((p) => Math.hypot(p[0] - position[0], p[1] - position[1]) < 2).length
+    placed.push(position)
+    notes.push({ key, position, text, kind, stack })
+  }
+  return { notes, add }
+}
+
 /**
  * What to draw of a journey on one floor: that floor's path segments (2+ points), its numbered stops,
  * and floor-change notes ("→ 3층 (ESC-A)" where a segment leaves, "1층에서 올라옴" where one arrives).
@@ -292,13 +317,7 @@ export function prepareJourney(journey: Journey | null | undefined, floor: strin
     const position = stop.floor === floor ? stopPoint(stop) : null
     return position ? [{ key: `stop-${stop.order}`, order: stop.order, position, time: stop.time, stop }] : []
   })
-  const notes: JourneyNoteRender[] = []
-  const placed: Point2[] = []
-  const addNote = (key: string, position: Point2, text: string, kind: JourneyNoteRender['kind']) => {
-    const stack = placed.filter((p) => Math.hypot(p[0] - position[0], p[1] - position[1]) < 2).length
-    placed.push(position)
-    notes.push({ key, position, text, kind, stack })
-  }
+  const { notes, add: addNote } = noteCollector()
   journey.transitions.forEach((t, i) => {
     if (t.from_floor === t.to_floor) return
     const leg = (onFloor: string) =>
@@ -313,4 +332,75 @@ export function prepareJourney(journey: Journey | null | undefined, floor: strin
     }
   })
   return { paths, stops, notes }
+}
+
+// --- route between two places (길 찾기) ------------------------------------------------------------
+
+export interface RoutePathRender {
+  key: string
+  path: Point2[]
+}
+
+export interface RoutePlaceRender {
+  key: RoutePlaceRole
+  role: RoutePlaceRole
+  position: Point2
+  /** Word inside the marker: "출발" or "도착". */
+  text: string
+  /** Place name drawn beside the marker. */
+  label: string
+  place: RoutePlace
+}
+
+/** Floor-change notes of a route ("→ 8층 (ESC-A)", "1층에서 올라옴"); same shape as the journey's. */
+export type RouteNoteRender = JourneyNoteRender
+
+export interface RouteRender {
+  paths: RoutePathRender[]
+  places: RoutePlaceRender[]
+  notes: RouteNoteRender[]
+}
+
+export const EMPTY_ROUTE_RENDER: RouteRender = { paths: [], places: [], notes: [] }
+
+const placePoint = (place: RoutePlace): Point2 | null => (place.x !== null && place.y !== null ? [place.x, place.y] : null)
+
+/** Segment at `position` when it is on `floor` (one segment per floor, in walking order), else the last (leaving) or first (arriving) one there. */
+function routeLeg(segments: readonly RouteSegment[], position: number, floor: string, end: 'depart' | 'arrive'): RouteSegment | undefined {
+  const aligned = segments[position]
+  if (aligned?.floor === floor) return aligned
+  const onFloor = segments.filter((s) => s.floor === floor)
+  return end === 'depart' ? onFloor.at(-1) : onFloor[0]
+}
+
+/**
+ * What to draw of a route on one floor: that floor's walking line (2+ points), the start and end markers
+ * on this floor, and floor-change notes where the line leaves for or arrives from another floor.
+ */
+export function prepareRoute(route: Route | null | undefined, floor: string, floors?: readonly FloorInfo[]): RouteRender {
+  if (!route) return EMPTY_ROUTE_RENDER
+  const paths = route.segments.flatMap((segment, i) =>
+    segment.floor === floor && segment.points.length >= 2 ? [{ key: `seg-${i}`, path: segment.points.map(([x, y]): Point2 => [x, y]) }] : [],
+  )
+  const places: RoutePlaceRender[] = []
+  for (const role of ['origin', 'destination'] as const) {
+    const place = route[role]
+    const position = place.floor === floor ? placePoint(place) : null
+    if (position) places.push({ key: role, role, position, text: ROUTE_MARKER_TEXT[role], label: place.label, place })
+  }
+  const { notes, add: addNote } = noteCollector()
+  route.transitions.forEach((t, i) => {
+    if (t.from_floor === t.to_floor) return
+    if (t.from_floor === floor) {
+      const leg = routeLeg(route.segments, i, floor, 'depart')
+      const position = leg?.points.at(-1) ?? (route.origin.floor === floor ? placePoint(route.origin) : null)
+      if (position) addNote(`depart-${i}`, [position[0], position[1]], departureLabel(t), 'depart')
+    }
+    if (t.to_floor === floor) {
+      const leg = routeLeg(route.segments, i + 1, floor, 'arrive')
+      const position = leg?.points[0] ?? (route.destination.floor === floor ? placePoint(route.destination) : null)
+      if (position) addNote(`arrive-${i}`, [position[0], position[1]], arrivalLabel(t, floors), 'arrive')
+    }
+  })
+  return { paths, places, notes }
 }

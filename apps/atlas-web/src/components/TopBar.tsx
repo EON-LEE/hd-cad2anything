@@ -3,6 +3,7 @@ import { facilityName } from '../api/client'
 import { useData } from '../api/source'
 import { REVISION_KIND_LABELS } from '../lib/format'
 import { journeyStopCounts } from '../lib/journey'
+import { ROUTE_FLOOR_ROLE_LABELS, routeFloorRoles } from '../lib/route'
 import { replaceOp } from '../state/reducer'
 import { useAppState, usePatchUi } from '../state/store'
 import { parentRevision, sortedFloors } from '../state/uiState'
@@ -13,6 +14,7 @@ export function TopBar() {
   const patchUi = usePatchUi()
   const floors = sortedFloors(meta)
   const journeyCounts = useMemo(() => journeyStopCounts(ui.journey), [ui.journey])
+  const routeRoles = useMemo(() => routeFloorRoles(ui.route), [ui.route])
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [bannerOpen, setBannerOpen] = useState(true)
 
@@ -94,6 +96,8 @@ export function TopBar() {
             {floors.map((f, i) => {
               const selected = f.code === ui.floor
               const stops = journeyCounts.get(f.code) ?? 0
+              const routeRole = routeRoles.get(f.code)
+              const routeText = routeRole ? `길 찾기 경로: ${ROUTE_FLOOR_ROLE_LABELS[routeRole]} 층` : ''
               return (
                 <button
                   key={f.code}
@@ -105,7 +109,7 @@ export function TopBar() {
                   aria-selected={selected}
                   aria-controls="floor-canvas"
                   tabIndex={selected ? 0 : -1}
-                  title={`${f.code} ${f.name}${stops ? ` · 고객 동선 결제 ${stops}곳` : ''}`}
+                  title={`${f.code} ${f.name}${stops ? ` · 고객 동선 결제 ${stops}곳` : ''}${routeText ? ` · ${routeText}` : ''}`}
                   className={selected ? 'active' : undefined}
                   onClick={() => patchUi([replaceOp('/floor', f.code)])}
                   onKeyDown={(e) => onTabKey(e, i)}
@@ -117,6 +121,12 @@ export function TopBar() {
                         {stops}
                       </span>
                       <span className="visually-hidden">(고객 동선 결제 {stops}곳)</span>
+                    </>
+                  )}
+                  {routeRole && (
+                    <>
+                      <span className={`route-tab-mark ${routeRole}`} aria-hidden="true" />
+                      <span className="visually-hidden">({routeText})</span>
                     </>
                   )}
                 </button>

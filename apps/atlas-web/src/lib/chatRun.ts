@@ -65,6 +65,9 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   spatial_find_units: '매장 찾기',
   spatial_unit_details: '매장 상세 확인',
   spatial_nearby_units: '주변 매장 찾기',
+  spatial_query: '공간 조건 조회',
+  spatial_route: '경로 계산',
+  spatial_describe_floor: '층 구조 확인',
   revision_diff: '도면 변경 내역 확인',
   revision_process: '도면 분석',
   revision_create_hypothetical: '가상 배치 만들기',
@@ -91,6 +94,7 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   ui_compare: '개정 비교 표시',
   ui_show_panel: '패널 열기',
   ui_show_journey: '도면에 고객 동선 그리기',
+  ui_show_route: '도면에 경로 그리기',
   ui_clear: '화면 정리',
   consult_specialist: '전문 에이전트에게 확인',
   web_search: '웹 검색',
@@ -139,9 +143,10 @@ const UI_PRIMARY_KEY: Readonly<Record<string, string>> = {
   ui_focus: 'focus',
   ui_compare: 'compareRev',
   ui_show_panel: 'panel',
+  ui_show_route: 'route',
 }
 
-const DESCRIBE_ORDER = ['floor', 'rev', 'compareRev', 'journey', 'heatmap', 'highlights', 'edges', 'panel', 'focus', 'layers']
+const DESCRIBE_ORDER = ['floor', 'rev', 'compareRev', 'journey', 'route', 'heatmap', 'highlights', 'edges', 'panel', 'focus', 'layers']
 
 const PANEL_LABELS: Readonly<Record<string, string>> = {
   changes: '변경 목록 열기',
@@ -193,6 +198,8 @@ function describeKey(key: string, values: Map<string, unknown>): string | null {
     }
     case 'journey':
       return value === null ? '동선 지우기' : isRecord(value) ? '고객 동선 그리기' : null
+    case 'route':
+      return value === null ? '경로 지우기' : isRecord(value) ? '경로 그리기' : null
     case 'layers':
       return '레이어 바꾸기'
     default:
