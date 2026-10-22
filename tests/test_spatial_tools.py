@@ -165,3 +165,17 @@ def test_route_endpoint_and_labels(toolkit):
         "ui_show_route", {"origin": "정문", "destination_category": "레스토랑", "destination_floor": "8F"}
     ) == ("경로 그리기: 정문 → 8층 레스토랑")
     assert tool_label("spatial_query", {"filters": {"floor": "3F", "corner": True}}) == "3층 공간 조건 조회"
+
+
+def test_specialists_with_spatial_tools_get_every_spatial_tool():
+    """docs/specs/mcp-tools.md grants `spatial_*` as a group; agents.yaml must list all of them."""
+    from cad2anything.agents.deploy import load_definitions
+    from cad2anything.services.mcp_server import TOOL_DESCRIPTIONS
+
+    spatial = {name for name in TOOL_DESCRIPTIONS if name.startswith("spatial_")}
+    for agent in load_definitions("chat", "mini"):
+        tools = agent.get("mcp_tools")
+        if isinstance(tools, list):
+            assert set(tools) <= set(TOOL_DESCRIPTIONS), agent["name"]
+            if any(t.startswith("spatial_") for t in tools):
+                assert spatial <= set(tools), agent["name"]
