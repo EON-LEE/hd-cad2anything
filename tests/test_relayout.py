@@ -141,6 +141,7 @@ def test_plan_alternatives(toolkit, plan):
     base_alt = plan["alternatives"][0]
     types = {c["type"] for c in base_alt["changes"]}
     assert types == {"entry", "exit"} and base_alt["kpi"]["net_krw"] == 0
+    assert base_alt["kpi"]["sales_low_krw"] == base_alt["kpi"]["sales_high_krw"] == 0
     leases = toolkit._leases()
     expiring = set(leases.loc[leases["lease_end"] < brief["effective_date"], "brand_id"])
     for alternative in plan["alternatives"]:
