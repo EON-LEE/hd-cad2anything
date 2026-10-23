@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgUiEvent } from '../types/api'
-import { ApiError, createHttpSource, drawingUploadForm, errorText, facilityName, journeyQuery, normalizeMeta } from './client'
+import { ApiError, createHttpSource, drawingUploadForm, errorText, facilityName, flowQuery, journeyQuery, normalizeMeta, reviewQuery, storesQuery } from './client'
 
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder()
@@ -170,6 +170,47 @@ describe('createHttpSource: seasonal relayout', () => {
     expect(createHttpSource('http://api.test').relayoutReportUrl('A/B')).toBe('http://api.test/api/relayout/A%2FB/report')
   })
 
+  it('POSTs the construction order request and normalizes the phasing', async () => {
+    // Shaped like the backend sample: FW2026 ALT-2, two crews, one cycle resolved by a closure.
+    const phasing = {
+      brief_id: 'FW2026',
+      alt_id: 'ALT-2',
+      rev_id: 'FW2026-A2',
+      params: { crews: 2, fitout_weeks: 2, temporary_sales_ratio: 0.6, use_temporary: true },
+      steps: [
+        { step: 1, start_week: 0, end_week: 0, action: 'exit', action_label: '퇴점·철거', unit_code: '4F-E02', floor: '4F', brand_name: 'Quorelle', waits_for: [], closed_weeks: 0, lost_krw: 0 },
+        { step: 2, start_week: 0, end_week: 4, action: 'close', action_label: '임시 휴점', unit_code: '4F-C06', brand_name: 'Novier & Co', from_unit: '4F-C06', closed_weeks: 4, lost_krw: 66_481_534.2 },
+        { step: 3, start_week: '0', end_week: 2, action: 'move', unit_code: '4F-C20', brand_name: 'Kaelova Intimates', from_unit: '4F-C06', waits_for: [2, 'x'], note: '휴점 뒤 바로 시작해요.' },
+      ],
+      total_weeks: 10,
+      lost_krw: 66_481_534.2,
+      naive_lost_krw: 616_032_748.6,
+      saved_krw: 549_551_214.4,
+      entry_delay_krw: 147_000_000,
+      entries: [{ brand_id: 'BR3301', brand_name: 'Norvane Outdoor', unit_code: '6F-S02B', open_week: 8, earliest_week: 6 }],
+      cycles: [{ brands: ['Novier & Co', 'Kaelova Intimates'], units: ['4F-C06', '4F-C20'], breaker: 'Novier & Co', resolved_by: 'close', unit_code: null, weeks: 4 }],
+      summary: 'ALT-2의 공사 9건을 공사팀 2개로 나눠 10주 만에 끝내요.',
+      caveats: ['추정치예요.'],
+    }
+    const fetchMock = vi.fn().mockResolvedValueOnce(json(phasing)).mockResolvedValueOnce(json('nope'))
+    vi.stubGlobal('fetch', fetchMock)
+    const source = createHttpSource()
+    const result = await source.phaseRelayout('FW2026', { crews: 2, fitout_weeks: 2, use_temporary: true })
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(`${init.method} ${url}`).toBe('POST /api/relayout/FW2026/phasing')
+    expect(JSON.parse(init.body as string)).toEqual({ crews: 2, fitout_weeks: 2, use_temporary: true })
+    expect(result).toMatchObject({ alt_id: 'ALT-2', total_weeks: 10, lost_krw: 66_481_534.2, naive_lost_krw: 616_032_748.6, entry_delay_krw: 147_000_000 })
+    expect(result.steps.map((s) => [s.step, s.action, s.start_week, s.end_week, s.waits_for])).toEqual([
+      [1, 'exit', 0, 0, []],
+      [2, 'close', 0, 4, []],
+      [3, 'move', 0, 2, [2]],
+    ])
+    expect(result.steps[2]).toMatchObject({ floor: '4F', action_label: null, closed_weeks: 0, lost_krw: null, temporary_unit: null })
+    expect(result.entries).toEqual([{ brand_id: 'BR3301', brand_name: 'Norvane Outdoor', unit_code: '6F-S02B', open_week: 8, earliest_week: 6 }])
+    expect(result.cycles[0]).toEqual({ brands: ['Novier & Co', 'Kaelova Intimates'], units: ['4F-C06', '4F-C20'], breaker: 'Novier & Co', resolved_by: 'close', unit_code: null, weeks: 4 })
+    await expect(source.phaseRelayout('FW2026', {})).rejects.toMatchObject({ status: 500 })
+  })
+
   it('passes the Korean `detail` of 400/404/409 responses through ApiError.detail', async () => {
     vi.stubGlobal(
       'fetch',
@@ -278,6 +319,90 @@ describe('createHttpSource: uploads', () => {
       .uploadDrawings({ files: [new File(['0'], 'R2_3F.dxf')], rev_id: 'R2', effective_date: '2026-10-01' })
       .catch((e: unknown) => e)
     expect(error).toMatchObject({ status: 409, detail: '이미 있는 개정입니다: R2' })
+  })
+})
+
+describe('createHttpSource: flow, store benchmark and relayout review', () => {
+  it('requests the walkway aggregates with the contract query and normalizes them', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({
+          mode: 'popup',
+          floors: { '3F': { segments: [{ points: [[0, 0], [10, 0]], weight: 0.5 }, { points: [[1, 1]] }], max_value: 10 } },
+          markers: [{ floor: '3F', x: 5, y: 0, rank: 1 }],
+        }),
+      )
+      .mockResolvedValueOnce(json({ detail: 'mode는 traffic, popup, egress 중 하나여야 합니다.' }, 400))
+      .mockResolvedValueOnce(json({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    const source = createHttpSource()
+    const flow = await source.getFlow({ mode: 'popup', rev: 'R2', segment: { age_band: '40s', tier: ['VIP', 'VVIP'] }, day_type: 'weekend', hours: [10, 14] })
+    expect(flow.floors['3F'].segments).toHaveLength(1)
+    expect(flow.markers[0]).toMatchObject({ rank: 1, kind: 'spot', label: '1' })
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url.startsWith('/api/spatial/flow?')).toBe(true)
+    expect(Object.fromEntries(new URL(url, 'http://x').searchParams)).toEqual({
+      mode: 'popup',
+      rev: 'R2',
+      segment: 'age_band:40s;tier:VIP|VVIP',
+      day_type: 'weekend',
+      hours: '10-14',
+    })
+    await expect(source.getFlow({ mode: 'traffic' })).rejects.toMatchObject({ status: 400, detail: 'mode는 traffic, popup, egress 중 하나여야 합니다.' })
+    await expect(source.getFlow({ mode: 'egress' })).rejects.toMatchObject({ status: 500 })
+    expect(flowQuery({ mode: 'egress', floor: '3F', min_width_m: 2.4, max_travel_m: 50, hours: ' 18-21 ', category: 'CAFE' })).toBe(
+      '?mode=egress&floor=3F&hours=18-21&category=CAFE&min_width_m=2.4&max_travel_m=50',
+    )
+    expect(flowQuery({ mode: 'traffic', segment: '', hours: [Number.NaN, 3], min_width_m: null })).toBe('?mode=traffic')
+  })
+
+  it('reads the store benchmark and the relayout review, and links the review report', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json({
+          level: 'floor',
+          metric: 'sales_per_m2',
+          metric_label: '평효율(원/㎡)',
+          stores: [{ store_id: 'FLAGSHIP', store_name: '가상 플래그십점', flagship: true }, { store_name: 'no id' }],
+          rows: [{ key: '1F', label: '1F', flagship: '8135000', peer_median: 7037000, rank: 2, n_stores: 5, gap_pct: 15.6, values: { FLAGSHIP: 8135000, 'ST-E': 'x' } }],
+          notes: '다른 점포는 store_kpis에서 읽었습니다.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          rev: 'R2',
+          parent_rev: 'R1',
+          effective_date: '2025-09-01',
+          window: { before: { start: '2025-06-03', end: '2025-08-31' }, after: { start: '2025-09-01', end: '2025-11-29' }, days: 90 },
+          items: [{ change_type: 'reassign', unit_code: '3F-N03', before_daily_krw: 1_679_068, after_daily_krw: 2_812_589, change_pct: 67.5, control_pct: 2.1, vs_control_pct: 65.4 }],
+          by_type: [{ change_type: 'reassign', count: 1 }],
+          by_floor: 'none',
+          summary: '바뀐 매장 1곳은 비교군보다 높아요.',
+        }),
+      )
+      .mockResolvedValueOnce(json([]))
+    vi.stubGlobal('fetch', fetchMock)
+    const source = createHttpSource()
+    const stores = await source.getStoreComparison({ level: 'floor', metric: 'sales_per_m2', floor: '1F' })
+    expect(stores.stores).toEqual([{ store_id: 'FLAGSHIP', store_name: '가상 플래그십점', region: null, format: null, flagship: true }])
+    expect(stores.rows[0]).toMatchObject({ key: '1F', flagship: 8_135_000, values: { FLAGSHIP: 8_135_000, 'ST-E': null } })
+    expect(stores.notes).toEqual(['다른 점포는 store_kpis에서 읽었습니다.'])
+    const review = await source.getRelayoutReview('R2', 90)
+    expect(review).toMatchObject({ rev: 'R2', parent_rev: 'R1', window: { days: 90 }, by_floor: [], caveat: null })
+    expect(review.items[0]).toMatchObject({ unit_code: '3F-N03', floor: '3F', brand_name: null, vs_control_pct: 65.4 })
+    await expect(source.getRelayoutReview('R9')).rejects.toMatchObject({ status: 500 })
+    expect(calls(fetchMock)).toEqual([
+      'GET /api/analytics/stores?level=floor&metric=sales_per_m2&floor=1F',
+      'GET /api/analytics/relayout-review?rev=R2&window_days=90',
+      'GET /api/analytics/relayout-review?rev=R9',
+    ])
+    expect(source.relayoutReviewReportUrl('R2', 90)).toBe('/api/reports/relayout-review/R2?window_days=90')
+    expect(createHttpSource('http://api.test').relayoutReviewReportUrl('R 1', 30)).toBe('http://api.test/api/reports/relayout-review/R%201?window_days=30')
+    expect(source.relayoutReviewReportUrl('R2')).toBe('/api/reports/relayout-review/R2')
+    expect(storesQuery({})).toBe('')
+    expect(reviewQuery('R2', 0)).toBe('?rev=R2')
   })
 })
 

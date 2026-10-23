@@ -235,6 +235,146 @@ def test_entry_options(toolkit):
         toolkit.relayout_entry_options()
 
 
+def test_unit_options(toolkit):
+    brief = toolkit._brief(BRIEF_ID)
+    leaving = brief["exits"][0]
+    placed = toolkit._placements("R2")
+    result = toolkit.relayout_unit_options(leaving["unit_code"], season="FW", top=4)
+    unit = result["unit"]
+    assert unit["unit_code"] == leaving["unit_code"] and unit["status"] == "입점"
+    assert unit["current_brand"] == leaving["brand_name"] and unit["current_expected_krw"] > 0
+    values = [o["objective_krw"] for o in result["options"]]
+    assert 1 <= len(values) <= 4 and values == sorted(values, reverse=True)
+    assert [o["rank"] for o in result["options"]] == list(range(1, len(values) + 1))
+    for option in result["options"]:
+        assert option["low_krw"] <= option["expected_sales_krw"] <= option["high_krw"]
+        assert option["season_factor"] is not None and "vs_current_pct" in option
+        assert all(b["brand_id"] not in placed for b in option["brands"])
+    commission = toolkit.relayout_unit_options(leaving["unit_code"], objective="commission")
+    assert commission["objective"] == "commission" and commission["season"] is None
+    vacant = next(
+        (u.attributes["unit_code"] for u in toolkit._model("R2").units() if u.attributes.get("vacant")), None
+    )
+    if vacant:
+        empty = toolkit.relayout_unit_options(vacant)
+        assert empty["unit"]["status"] == "공실" and empty["unit"]["current_brand"] is None
+        assert all("vs_current_pct" not in o for o in empty["options"])
+    for kwargs in ({"unit_code": "9F-Z99"}, {"objective": "profit"}, {"season": "winter-ish"}):
+        with pytest.raises(ToolError):
+            toolkit.relayout_unit_options(**{"unit_code": leaving["unit_code"], **kwargs})
+
+
+def _assert_valid_phasing(toolkit, alternative, result):
+    weeks, crews = result["params"]["fitout_weeks"], result["params"]["crews"]
+    steps = {s["step"]: s for s in result["steps"]}
+    works = [c for c in alternative["changes"] if c["type"] in ("move", "entry")]
+    jobs = {s["brand_id"]: s for s in result["steps"] if s["action"] in ("move", "entry")}
+    assert set(jobs) == {c["brand_id"] for c in works}
+    assert sum(s["action"] == "exit" for s in result["steps"]) == sum(
+        c["type"] == "exit" for c in alternative["changes"]
+    )
+    assert sorted(steps) == list(range(1, len(steps) + 1))
+    for job in jobs.values():
+        assert job["end_week"] - job["start_week"] == weeks
+        assert all(steps[n]["end_week"] <= job["start_week"] for n in job["waits_for"])
+    for week in range(int(result["total_weeks"])):
+        assert sum(j["start_week"] <= week < j["end_week"] for j in jobs.values()) <= crews
+    leaves = {s["brand_id"]: s for s in result["steps"] if s["action"] in ("temporary", "close")}
+    for brand_id, leave in leaves.items():
+        assert leave["end_week"] == jobs[brand_id]["end_week"]
+    occupant = {u: b for b, u in toolkit._placements(result["base_rev"]).items()}
+    for change in works:
+        brand = occupant.get(change["to_unit"])
+        if brand in jobs and brand != change["brand_id"]:
+            vacated = leaves[brand]["start_week"] if brand in leaves else jobs[brand]["end_week"]
+            assert vacated <= jobs[change["brand_id"]]["start_week"]
+    assert result["total_weeks"] == max((j["end_week"] for j in jobs.values()), default=0)
+    assert result["lost_krw"] == pytest.approx(sum(s["lost_krw"] for s in result["steps"]))
+    assert result["saved_krw"] == pytest.approx(result["naive_lost_krw"] - result["lost_krw"])
+    assert {e["brand_id"] for e in result["entries"]} == {
+        c["brand_id"] for c in works if c["type"] == "entry"
+    }
+
+
+def test_phasing_of_plan(toolkit, plan):
+    result = toolkit.relayout_phasing(BRIEF_ID, crews=2)
+    project = toolkit._project(BRIEF_ID)
+    alternative = next(a for a in project["plan"]["alternatives"] if a["alt_id"] == result["alt_id"])
+    if project.get("selected_alt_id"):
+        assert result["alt_id"] == project["selected_alt_id"]
+    _assert_valid_phasing(toolkit, alternative, result)
+    assert project["phasing"]["alt_id"] == result["alt_id"] and result["summary"]
+    wider = toolkit.relayout_phasing(BRIEF_ID, alt_id=result["alt_id"], crews=6)
+    assert wider["total_weeks"] <= result["total_weeks"]
+    assert wider["entry_delay_krw"] <= result["entry_delay_krw"] + 1
+    assert "공사 순서" in toolkit.relayout_report(BRIEF_ID)["sections"]
+    assert "공사 순서(" in toolkit.relayout_report_html(BRIEF_ID)
+    for kwargs in ({"crews": 0}, {"fitout_weeks": 20}, {"temporary_sales_ratio": 2}, {"alt_id": "ALT-8"}):
+        with pytest.raises(ToolError):
+            toolkit.relayout_phasing(BRIEF_ID, **kwargs)
+
+
+def test_phasing_resolves_swaps(toolkit, plan):
+    saved = copy.deepcopy(toolkit._project(BRIEF_ID))
+    brief = toolkit._brief(BRIEF_ID)
+    floor = brief["floors"][0]
+    units = [
+        u
+        for u in toolkit._model(brief["base_rev"]).units(floor)
+        if u.attributes.get("brand_id") and not u.attributes.get("vacant")
+    ]
+    first, second, third = units[:3]
+
+    def change(kind, unit, target=None):
+        return {
+            "type": kind,
+            "brand_id": unit.attributes["brand_id"],
+            "brand_name": unit.attributes.get("brand_name") or unit.attributes["brand_id"],
+            "category_name": "",
+            "from_unit": unit.attributes["unit_code"],
+            "to_unit": target.attributes["unit_code"] if target else None,
+            "from_floor": floor,
+            "to_floor": floor if target else None,
+            "delta_krw": 0.0,
+            "explanation": "",
+        }
+
+    swap = {
+        "alt_id": "ALT-9",
+        "rev_id": "ALT9",
+        "summary": "",
+        "kpi": {"net_krw": 0.0},
+        "changes": [change("exit", third), change("move", first, second), change("move", second, first)],
+        "constraints": [],
+        "explanations": [],
+    }
+    try:
+        project = toolkit._project(BRIEF_ID)
+        project["plan"]["alternatives"].append(swap)
+        toolkit._save_project(project)
+        closed = toolkit.relayout_phasing(BRIEF_ID, alt_id="9", crews=1, fitout_weeks=3, use_temporary=False)
+        _assert_valid_phasing(toolkit, swap, closed)
+        assert len(closed["cycles"]) == 1 and closed["cycles"][0]["resolved_by"] == "close"
+        stop = next(s for s in closed["steps"] if s["action"] == "close")
+        assert stop["closed_weeks"] == 6 and stop["lost_krw"] > 0 and closed["total_weeks"] == 6
+        assert sum(bool(s["waits_for"]) for s in closed["steps"]) == 1
+        assert closed["naive_lost_krw"] >= closed["lost_krw"]
+        moved = toolkit.relayout_phasing(BRIEF_ID, alt_id="ALT-9", crews=1, fitout_weeks=3)
+        _assert_valid_phasing(toolkit, swap, moved)
+        stay = next(s for s in moved["steps"] if s["action"] == "temporary")
+        assert stay["brand_id"] == stop["brand_id"] and stay["temporary_unit"] and stay["closed_weeks"] == 0
+        assert moved["lost_krw"] == pytest.approx(stop["lost_krw"] * 0.4)
+        assert moved["cycles"][0]["unit_code"] == stay["temporary_unit"]
+        selected = saved.get("selected_alt_id")
+        if selected:
+            toolkit.relayout_select(BRIEF_ID, "ALT-9", "MD팀")
+            assert toolkit._project(BRIEF_ID)["phasing"]["alt_id"] == "ALT-9"
+            toolkit.relayout_select(BRIEF_ID, selected, "MD팀")
+            assert toolkit._project(BRIEF_ID)["phasing"] is None
+    finally:
+        toolkit._save_project(saved)
+
+
 def test_relayout_rest(toolkit):
     client = TestClient(create_api(toolkit))
     meta = client.get("/api/meta").json()
@@ -254,8 +394,21 @@ def test_relayout_rest(toolkit):
     assert client.post(f"/api/relayout/{BRIEF_ID}/check", json={"rev": "R2"}).status_code == 400
     selected = client.post(f"/api/relayout/{BRIEF_ID}/select", json={"alt_id": "ALT-0", "decided_by": "MD팀"})
     assert selected.status_code == 200 and selected.json()["selected_alt_id"] == "ALT-0"
+    assert client.post(f"/api/relayout/{BRIEF_ID}/phasing", json={"crews": 9}).status_code == 422
+    assert client.post("/api/relayout/NOPE/phasing").status_code == 404
+    phasing = client.post(f"/api/relayout/{BRIEF_ID}/phasing", json={"crews": 3, "fitout_weeks": 2})
+    assert phasing.status_code == 200
+    body = phasing.json()
+    assert body["alt_id"] == "ALT-0" and body["lost_krw"] == 0 and not body["cycles"]
+    assert body["entries"] and body["params"] == {
+        "crews": 3,
+        "fitout_weeks": 2,
+        "temporary_sales_ratio": 0.6,
+        "use_temporary": True,
+    }
     project = client.get(f"/api/relayout/{BRIEF_ID}").json()
     assert project["brief"]["brief_id"] == BRIEF_ID and project["plan"]["alternatives"]
+    assert project["phasing"]["alt_id"] == "ALT-0"
     report = client.get(f"/api/relayout/{BRIEF_ID}/report")
     assert report.status_code == 200 and report.headers["content-type"].startswith("text/html")
 

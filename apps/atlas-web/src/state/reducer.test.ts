@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChatRun } from '../lib/chatRun'
 import type { AgUiEvent, UiState } from '../types/api'
 import { appReducer, createAppState, touchedKeys, type AppAction, type AppState, type ChatItem } from './reducer'
-import { createInitialUiState, panelPayloadString, panelTab } from './uiState'
+import { applyOverlayRules, createInitialUiState, panelPayloadString, panelTab, shownOverlay } from './uiState'
 
 const ui: UiState = createInitialUiState(null, { rev: 'R2', floor: '3F' })
 
@@ -39,6 +39,17 @@ const route = {
   transitions: [{ from_floor: '1F', to_floor: '3F', via: 'ESC-A', floors: 2, height_m: 10 }],
   walk_m: 85,
   caveat: '통로망 최단 경로로 계산한 걷는 거리예요.',
+}
+
+const flow = {
+  mode: 'popup',
+  title: '전체 고객 기준 팝업 후보(주말)',
+  rev: 'R2',
+  floors: { '3F': { segments: [{ points: [[45, 15], [75, 15]], weight: 1, value: 1500, color: null, label: '남측 주통로' }], max_value: 1500, total: 1500 } },
+  markers: [{ floor: '3F', x: 60, y: 15, rank: 1, kind: 'spot', label: '1', title: '후보 1 · 3F 남측 주통로', unit_code: null }],
+  legend: { low: '적음', high: '많음', unit: '명(추정)', note: null },
+  summary: { customer_days: 1234, trips: 4200, floors: ['3F'] },
+  caveat: null,
 }
 
 describe('appReducer: chat runs', () => {
@@ -166,13 +177,86 @@ describe('appReducer: chat runs', () => {
     // A later patch of one field goes through normalization too.
     state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route/walk_m', value: '90' }] }])
     expect(state.ui.route?.walk_m).toBe(90)
-    // The backend never sends a route and a journey together, but both still render side by side.
+    // A route and a journey are drawn alone: showing the journey replaces the route (contract §3).
     state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: journey }] }])
-    expect(state.ui.route?.origin.ref).toBe('ENT-1')
+    expect(state.ui.route).toBeNull()
     expect(state.ui.journey?.stops).toHaveLength(2)
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: route }] }])
+    expect(state.ui.route?.origin.ref).toBe('ENT-1')
+    expect(state.ui.journey).toBeNull()
     state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: null }] }])
     expect(state.ui.route).toBeNull()
-    expect(state.ui.journey).not.toBeNull()
+  })
+
+  it('accepts flow patches thanks to the flow: null default and draws it alone', () => {
+    // Analysis displays from an earlier answer, then a route with highlights set in the same patch.
+    let state = run(createAppState(ui), [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/heatmap', value: { metric: 'm', label: 'm', values: { '3F-C05': 0.4 } } },
+          { op: 'replace', path: '/edges', value: [{ from: '3F-C05', to: '3F-C06' }] },
+          { op: 'replace', path: '/compareRev', value: 'R1' },
+        ],
+      },
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/route', value: route },
+          { op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] },
+        ],
+      },
+    ])
+    expect(state.ui.route).not.toBeNull()
+    // Showing the route cleared the displays it replaces, except those set by the same patch.
+    expect(state.ui).toMatchObject({ heatmap: null, edges: [], compareRev: null })
+    expect(state.ui.highlights).toHaveLength(1)
+
+    state = run(state, [
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] }, { op: 'replace', path: '/compareRev', value: 'R1' }] },
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: flow }, { op: 'replace', path: '/floor', value: '3F' }] },
+    ])
+    // Showing a flow clears the journey, the route and the analysis displays (contract §3: ui_show_flow).
+    expect(state.ui).toMatchObject({ route: null, journey: null, heatmap: null, highlights: [], edges: [], compareRev: null })
+    expect(state.ui.flow?.mode).toBe('popup')
+    expect(state.ui.flow?.floors['3F'].segments).toHaveLength(1)
+    expect(state.ui.flow?.markers.map((m) => m.rank)).toEqual([1])
+
+    // In the same answer the agent may highlight units on top of the flow.
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] }] }])
+    expect(state.ui.flow).not.toBeNull()
+    expect(state.ui.highlights).toHaveLength(1)
+    // A field patch keeps the overlays as they are.
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow/caveat', value: '추정치' }] }])
+    expect(state.ui.flow?.caveat).toBe('추정치')
+    expect(state.ui.highlights).toHaveLength(1)
+
+    // Showing a journey or a route clears the flow.
+    const withJourney = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: journey }] }])
+    expect(withJourney.ui.flow).toBeNull()
+    expect(withJourney.ui.highlights).toEqual([])
+    const withRoute = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/route', value: route }] })
+    expect(withRoute.ui.flow).toBeNull()
+
+    // ui_clear (what: flow or all) arrives as a null patch; a bad flow is dropped without clearing anything.
+    const cleared = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: null }] }])
+    expect(cleared.ui.flow).toBeNull()
+    expect(cleared.ui.highlights).toHaveLength(1)
+    const bad = run(cleared, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: { title: 'x' } }] }])
+    expect(bad.ui.flow).toBeNull()
+    expect(bad.ui.highlights).toHaveLength(1)
+  })
+
+  it('applies the overlay rule to user patches too (closing a card clears only its overlay)', () => {
+    const shown = appReducer(createAppState(ui), { type: 'ui/patch', ops: [{ op: 'replace', path: '/flow', value: flow }] })
+    expect(shown.ui.flow).not.toBeNull()
+    const closed = appReducer(shown, { type: 'ui/patch', ops: [{ op: 'replace', path: '/flow', value: null }] })
+    expect(closed.ui.flow).toBeNull()
+    // Identity is kept when the rule changes nothing.
+    expect(applyOverlayRules(shown.ui, [{ op: 'replace', path: '/flow', value: flow }])).toBe(shown.ui)
+    expect(shownOverlay([{ op: 'replace', path: '/route', value: route }, { op: 'replace', path: '/flow', value: flow }])).toBe('flow')
+    expect(shownOverlay([{ op: 'replace', path: '/flow', value: flow }, { op: 'remove', path: '/flow' }])).toBeNull()
+    expect(shownOverlay([{ op: 'replace', path: '/flow/title', value: 'x' }, { op: 'replace', path: '', value: {} }])).toBeNull()
   })
 
   it('normalizes agent-provided values defensively', () => {
@@ -185,6 +269,7 @@ describe('appReducer: chat runs', () => {
           { op: 'replace', path: '/heatmap', value: { metric: 'x', values: { a: 0.3, b: 'bad' } } },
           { op: 'replace', path: '/journey', value: { stops: 'none' } },
           { op: 'replace', path: '/route', value: { origin: { ref: 'ENT-1' }, destination: { unit_code: '3F-C05' } } },
+          { op: 'replace', path: '/flow', value: { segments: 'none' } },
         ],
       },
     ])
@@ -194,6 +279,8 @@ describe('appReducer: chat runs', () => {
     expect(state.ui.journey).toBeNull()
     // "ENT-1" alone does not say which floor the walk starts on.
     expect(state.ui.route).toBeNull()
+    // Neither a mode, floors nor markers: not a flow.
+    expect(state.ui.flow).toBeNull()
   })
 
   it('accepts the uploads panel and the layout brief payload, and still drops unknown panel types', () => {

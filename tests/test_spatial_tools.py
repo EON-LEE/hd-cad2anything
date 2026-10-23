@@ -141,7 +141,16 @@ def test_ui_show_route_draws_a_standalone_path(toolkit):
     ui_state = {"rev": "R2", "floor": "3F"}
     result = handler.handle("ui_show_route", {"origin": "정문", "destination": "3F-C17"}, ui_state)
     paths = [p["path"] for p in result.patches]
-    assert paths == ["/heatmap", "/highlights", "/edges", "/compareRev", "/journey", "/route", "/floor"]
+    assert paths == [
+        "/heatmap",
+        "/highlights",
+        "/edges",
+        "/compareRev",
+        "/journey",
+        "/flow",
+        "/route",
+        "/floor",
+    ]
     assert result.patches[-1]["value"] == "1F" and ui_state["floor"] == "1F"
     output = json.loads(result.output)
     assert output["ok"] and output["walk_m"] > 0 and "segments" not in output and "왼쪽 위" in output["shown"]

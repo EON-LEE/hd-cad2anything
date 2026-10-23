@@ -440,7 +440,87 @@ export interface RelayoutCheck {
   summary: string
 }
 
-/** GET /api/relayout/{brief_id}: diagnosis, plan and check are null until made. */
+/** `exit` 퇴점·철거, `move` 이전 공사, `entry` 신규 입점 공사, `temporary` 임시 매장 영업, `close` 임시 휴점. */
+export type PhasingAction = 'exit' | 'move' | 'entry' | 'temporary' | 'close'
+
+/** One work of the construction order (weeks count from the start of the works, week 0). */
+export interface PhasingStep {
+  step: number
+  start_week: number
+  end_week: number
+  action: PhasingAction | string
+  /** Korean action name from the backend (e.g. "이전 공사"); null when absent. */
+  action_label: string | null
+  /** Unit worked on: the new unit of a move or entry, the vacated unit of an exit, the temporary unit. */
+  unit_code: string | null
+  floor: string | null
+  brand_id: string | null
+  brand_name: string
+  from_unit: string | null
+  /** Step numbers that must finish first. */
+  waits_for: number[]
+  closed_weeks: number
+  temporary_unit: string | null
+  lost_krw: number | null
+  note: string | null
+}
+
+export interface PhasingEntry {
+  brand_id: string | null
+  brand_name: string
+  unit_code: string | null
+  open_week: number | null
+  /** Earliest week the brand could open after waiting for its chain of moves (with enough crews). */
+  earliest_week: number | null
+}
+
+/** Brands moving into each other's units, resolved by a temporary unit or a closure. */
+export interface PhasingCycle {
+  brands: string[]
+  units: string[]
+  /** Brand that leaves its unit first. */
+  breaker: string | null
+  resolved_by: 'temporary' | 'close' | string
+  /** Temporary unit (null when the brand closes). */
+  unit_code: string | null
+  weeks: number | null
+}
+
+/** POST /api/relayout/{brief_id}/phasing (also `project.phasing`). */
+export interface RelayoutPhasing {
+  brief_id: string
+  alt_id: string | null
+  rev_id: string | null
+  params: { crews: number | null; fitout_weeks: number | null; temporary_sales_ratio: number | null; use_temporary: boolean | null }
+  steps: PhasingStep[]
+  total_weeks: number | null
+  /** Expected sales lost to closures and temporary units. */
+  lost_krw: number | null
+  /** The plan's assumption: every moving brand closes for the fit-out weeks. */
+  naive_lost_krw: number | null
+  saved_krw: number | null
+  /** Expected sales of new brands opening later than their `earliest_week` because crews are busy. */
+  entry_delay_krw: number | null
+  entries: PhasingEntry[]
+  cycles: PhasingCycle[]
+  summary: string
+  caveats: string[]
+  created_at: string | null
+}
+
+/** Omitted fields take the backend defaults (selected alternative, 2 crews, the brief's downtime weeks). */
+export interface RelayoutPhasingRequest {
+  alt_id?: string
+  /** 1..6 */
+  crews?: number
+  /** 1..12 */
+  fitout_weeks?: number
+  /** 0..1 */
+  temporary_sales_ratio?: number
+  use_temporary?: boolean
+}
+
+/** GET /api/relayout/{brief_id}: diagnosis, plan, check and phasing are null until made. */
 export interface RelayoutProject {
   brief: RelayoutBrief
   status: RelayoutStatus | string
@@ -450,6 +530,7 @@ export interface RelayoutProject {
   decided_by: string | null
   decided_at: string | null
   check: RelayoutCheck | null
+  phasing: RelayoutPhasing | null
   report_url: string | null
   updated_at: string | null
 }
@@ -457,6 +538,79 @@ export interface RelayoutProject {
 export interface RelayoutSelectRequest {
   alt_id: string
   decided_by: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// Store benchmark and relayout review: /api/analytics/stores, /api/analytics/relayout-review
+// ---------------------------------------------------------------------------------------------
+
+export type StoreLevel = 'store' | 'floor' | 'category'
+
+export interface StoreInfo {
+  store_id: string
+  store_name: string
+  region: string | null
+  format: string | null
+  /** The store this app analyzes (its figures come from transactions). */
+  flagship: boolean
+}
+
+export interface StoreComparisonRow {
+  key: string
+  label: string
+  /** Value of the flagship store. */
+  flagship: number | null
+  peer_median: number | null
+  rank: number | null
+  n_stores: number | null
+  gap_pct: number | null
+  /** store_id -> value */
+  values: Record<string, number | null>
+}
+
+export interface StoreComparison {
+  level: StoreLevel | string
+  metric: string
+  metric_label: string
+  period: DatePeriod | null
+  stores: StoreInfo[]
+  rows: StoreComparisonRow[]
+  notes: string[]
+  caveat: string | null
+}
+
+export interface StoreComparisonParams {
+  level?: StoreLevel
+  metric?: string
+  floor?: string | null
+  category?: string | null
+}
+
+export interface RelayoutReviewItem {
+  change_type: string
+  unit_code: string
+  floor: string | null
+  brand_name: string | null
+  before_daily_krw: number | null
+  after_daily_krw: number | null
+  change_pct: number | null
+  /** Change of the unchanged units on the same floor (the control group). */
+  control_pct: number | null
+  vs_control_pct: number | null
+}
+
+/** Same-length windows before and after a revision's effective date (not a causal effect). */
+export interface RelayoutReview {
+  rev: string
+  parent_rev: string | null
+  effective_date: string | null
+  window: { before: DatePeriod | null; after: DatePeriod | null; days: number | null }
+  items: RelayoutReviewItem[]
+  /** Groups by change type and by floor (shape not pinned by the contract). */
+  by_type: Record<string, unknown>[]
+  by_floor: Record<string, unknown>[]
+  summary: string
+  caveat: string | null
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -552,7 +706,15 @@ export interface DrawingProfile {
   units: string | null
 }
 
-export type MetadataKind = 'brands' | 'tenancies' | 'leases' | 'pos_terminals' | 'relayout_brief' | 'drawing_profile'
+export type MetadataKind =
+  | 'brands'
+  | 'tenancies'
+  | 'leases'
+  | 'pos_terminals'
+  | 'relayout_brief'
+  | 'drawing_profile'
+  | 'stores'
+  | 'store_kpis'
 
 /** POST /api/uploads/metadata (rejections also come back as 200 with `errors`). */
 export interface MetadataUploadResult {
@@ -705,6 +867,90 @@ export interface Route {
 }
 
 // ---------------------------------------------------------------------------------------------
+// GET /api/spatial/flow  (aggregates drawn on the walkways; also UI state `flow`)
+// ---------------------------------------------------------------------------------------------
+
+/** `traffic` 추정 유동, `popup` 팝업 후보, `egress` 통로 폭·피난 거리 점검. */
+export type FlowMode = 'traffic' | 'popup' | 'egress'
+
+/** `spot` 통로 위 공간, `unit` 공실·팝업 매장, `warning` 피난 거리 초과 지점. */
+export type FlowMarkerKind = 'spot' | 'unit' | 'warning'
+
+export interface FlowSegment {
+  points: [number, number][]
+  /** 0..1 share of the floor maximum; derived from value / max_value when absent; null when unknown. */
+  weight: number | null
+  /** Estimated customers (traffic, popup) or the walkway width in meters (egress). */
+  value: number | null
+  /** Color chosen by the backend (e.g. the egress warning color); null = color by weight. */
+  color: string | null
+  label: string | null
+  [key: string]: unknown
+}
+
+export interface FlowFloor {
+  segments: FlowSegment[]
+  max_value: number | null
+  total: number | null
+  [key: string]: unknown
+}
+
+export interface FlowMarker {
+  floor: string
+  x: number
+  y: number
+  rank: number | null
+  kind: FlowMarkerKind | string
+  /** Text inside the marker (e.g. the rank). */
+  label: string | null
+  title: string | null
+  unit_code: string | null
+  [key: string]: unknown
+}
+
+export interface FlowLegend {
+  low: string | null
+  high: string | null
+  unit: string | null
+  note: string | null
+}
+
+export interface FlowSummary {
+  customer_days: number | null
+  trips: number | null
+  floors: string[]
+  [key: string]: unknown
+}
+
+export interface Flow {
+  mode: FlowMode | string
+  title: string
+  rev: string | null
+  /** Request echo (segment, day_type, hours, floor, ...). */
+  query: Record<string, unknown> | null
+  /** floor code -> segments on that floor */
+  floors: Record<string, FlowFloor>
+  markers: FlowMarker[]
+  legend: FlowLegend | null
+  summary: FlowSummary
+  caveat: string | null
+  [key: string]: unknown
+}
+
+export interface FlowParams {
+  mode: FlowMode
+  rev?: string | null
+  floor?: string | null
+  segment?: SegmentFilter | null
+  day_type?: 'all' | 'weekday' | 'weekend' | null
+  /** [start, end] hours or the query form "10-14". */
+  hours?: [number, number] | string | null
+  category?: string | null
+  min_width_m?: number | null
+  max_travel_m?: number | null
+}
+
+// ---------------------------------------------------------------------------------------------
 // POST /api/chat (AG-UI compatible SSE)
 // ---------------------------------------------------------------------------------------------
 
@@ -806,4 +1052,6 @@ export interface UiState {
   journey: Journey | null
   /** Shortest walking route between two places (drawn on its floors); null when off. */
   route: Route | null
+  /** Aggregates on the walkways (estimated traffic, popup candidates, egress check); null when off. */
+  flow: Flow | null
 }

@@ -2,6 +2,7 @@
 // labelled steps, answer text). Pure and unit-tested; the reducer applies STATE_DELTA patches to the
 // UI state and passes the outcome in. Tool names, args and summaries are kept for the developer view only.
 import type { AgUiEvent } from '../types/api'
+import { flowModeLabel } from './flow'
 import { floorLabel, withEuro } from './format'
 import { parsePointer, touchedKeys, type PatchOperation } from './jsonPatch'
 
@@ -67,6 +68,7 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   spatial_nearby_units: '주변 매장 찾기',
   spatial_query: '공간 조건 조회',
   spatial_route: '경로 계산',
+  spatial_flow: '통로 집계 계산',
   spatial_describe_floor: '층 구조 확인',
   revision_diff: '도면 변경 내역 확인',
   revision_process: '도면 분석',
@@ -86,6 +88,7 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   analytics_customer_journey: '고객 동선 찾기',
   layout_generate_alternatives: '재배치 대안 계산',
   whatif_score_moves: '이동 효과 추정',
+  relayout_phasing: '공사 순서 계산',
   ui_set_floor: '층 이동',
   ui_show_heatmap: '도면 색칠',
   ui_highlight_units: '매장 강조',
@@ -95,6 +98,7 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   ui_show_panel: '패널 열기',
   ui_show_journey: '도면에 고객 동선 그리기',
   ui_show_route: '도면에 경로 그리기',
+  ui_show_flow: '도면에 통로 집계 그리기',
   ui_clear: '화면 정리',
   consult_specialist: '전문 에이전트에게 확인',
   web_search: '웹 검색',
@@ -147,9 +151,10 @@ const UI_PRIMARY_KEY: Readonly<Record<string, string>> = {
   ui_compare: 'compareRev',
   ui_show_panel: 'panel',
   ui_show_route: 'route',
+  ui_show_flow: 'flow',
 }
 
-const DESCRIBE_ORDER = ['floor', 'rev', 'compareRev', 'journey', 'route', 'heatmap', 'highlights', 'edges', 'panel', 'focus', 'layers']
+const DESCRIBE_ORDER = ['floor', 'rev', 'compareRev', 'journey', 'route', 'flow', 'heatmap', 'highlights', 'edges', 'panel', 'focus', 'layers']
 
 const PANEL_LABELS: Readonly<Record<string, string>> = {
   changes: '변경 목록 열기',
@@ -206,6 +211,8 @@ function describeKey(key: string, values: Map<string, unknown>): string | null {
       return value === null ? '동선 지우기' : isRecord(value) ? '고객 동선 그리기' : null
     case 'route':
       return value === null ? '경로 지우기' : isRecord(value) ? '경로 그리기' : null
+    case 'flow':
+      return value === null ? '통로 집계 지우기' : isRecord(value) ? `${flowModeLabel(typeof value.mode === 'string' ? value.mode : null)} 표시` : null
     case 'layers':
       return '레이어 바꾸기'
     default:

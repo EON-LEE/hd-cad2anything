@@ -1,5 +1,7 @@
 // UI state model (the target of STATE_DELTA patches): defaults and defensive normalization.
+import { normalizeFlow } from '../lib/flow'
 import { normalizeJourney } from '../lib/journey'
+import { parsePointer, touchedKeys, type PatchOperation } from '../lib/jsonPatch'
 import { normalizeRoute } from '../lib/route'
 import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
 
@@ -68,8 +70,9 @@ export function createInitialUiState(meta: Meta | null | undefined, overrides: P
     panel: { type: 'none', payload: {} },
     // Must exist (as null) so that agent `replace /journey` patches apply.
     journey: null,
-    // Same for `replace /route`.
+    // Same for `replace /route` and `replace /flow`.
     route: null,
+    flow: null,
     ...overrides,
   }
 }
@@ -168,7 +171,80 @@ export function normalizeUiState(raw: unknown, fallback: UiState): UiState {
     panel: normalizePanel(raw.panel),
     journey: (raw.journey === fallback.journey ? fallback.journey : normalizeJourney(raw.journey)) ?? null,
     route: (raw.route === fallback.route ? fallback.route : normalizeRoute(raw.route)) ?? null,
+    flow: (raw.flow === fallback.flow ? fallback.flow : normalizeFlow(raw.flow)) ?? null,
   }
+}
+
+/** Overlays drawn alone (docs/specs/atlas-api.md §3): showing one of them clears the others. */
+export const SOLO_OVERLAYS = ['journey', 'route', 'flow'] as const
+
+export type SoloOverlay = (typeof SOLO_OVERLAYS)[number]
+
+const isSoloOverlay = (key: string): key is SoloOverlay => (SOLO_OVERLAYS as readonly string[]).includes(key)
+
+/**
+ * The overlay a patch shows: the last operation that sets `/journey`, `/route` or `/flow` itself to a
+ * value (a field inside it, null or a removal does not count). Null when the patch shows none.
+ */
+export function shownOverlay(ops: readonly PatchOperation[]): SoloOverlay | null {
+  let shown: SoloOverlay | null = null
+  for (const op of ops) {
+    if (!op || typeof op.path !== 'string' || op.op === 'test') continue
+    let tokens: string[]
+    try {
+      tokens = parsePointer(op.path)
+    } catch {
+      continue
+    }
+    if (tokens.length !== 1 || !isSoloOverlay(tokens[0])) continue
+    const key = tokens[0]
+    const clears = op.op === 'remove' || ((op.op === 'add' || op.op === 'replace') && (op.value === null || op.value === undefined))
+    if (clears) {
+      if (shown === key) shown = null
+    } else {
+      shown = key
+    }
+  }
+  return shown
+}
+
+/**
+ * Contract §3: a journey, a route and a flow are each drawn alone. When a patch shows one of them (and
+ * it normalized to something drawable), the other two are cleared, and so are the analysis displays
+ * it replaces (heatmap, highlights, edges, compareRev) unless the same patch sets them. The backend
+ * sends these clears itself (`ui_show_journey`, `ui_show_route`, `ui_show_flow`); applying the rule
+ * here as well keeps user actions and older backends to one overlay. Later analysis displays clearing
+ * an overlay is left to the backend, which knows where one answer ends.
+ */
+export function applyOverlayRules(ui: UiState, ops: readonly PatchOperation[]): UiState {
+  const shown = shownOverlay(ops)
+  if (!shown || ui[shown] === null) return ui
+  const touched = new Set(touchedKeys(ops))
+  const next: UiState = { ...ui }
+  let changed = false
+  for (const key of SOLO_OVERLAYS) {
+    if (key !== shown && next[key] !== null) {
+      next[key] = null
+      changed = true
+    }
+  }
+  if (!touched.has('heatmap') && next.heatmap !== null) {
+    next.heatmap = null
+    changed = true
+  }
+  if (!touched.has('highlights') && next.highlights.length) {
+    next.highlights = []
+    changed = true
+  }
+  if (!touched.has('edges') && next.edges.length) {
+    next.edges = []
+    changed = true
+  }
+  if (!touched.has('compareRev') && next.compareRev !== null) {
+    next.compareRev = null
+    changed = true
+  }
+  return changed ? next : ui
 }
 
 /** True when the heatmap should replace category colors. */

@@ -22,10 +22,14 @@ import {
   type UnitInfo,
 } from '../lib/geometry'
 import { arrivalLabel, departureLabel } from '../lib/journey'
+import { flowColor, flowMarkerColor, flowMarkerText, flowWidthPx, sortedFlowMarkers } from '../lib/flow'
 import { ROUTE_MARKER_TEXT, type RoutePlaceRole } from '../lib/route'
 import type {
   CategoryInfo,
   ChangeItem,
+  Flow,
+  FlowMarker,
+  FlowSegment,
   FloorInfo,
   GraphEdge,
   Highlight,
@@ -403,4 +407,71 @@ export function prepareRoute(route: Route | null | undefined, floor: string, flo
     }
   })
   return { paths, places, notes }
+}
+
+// --- walkway aggregates (flow: 추정 유동, 팝업 후보, 통로 폭·피난 점검) ---------------------------------------
+
+export interface FlowPathRender {
+  key: string
+  path: Point2[]
+  /** Line width in pixels (2–10 by weight). */
+  width: number
+  color: Rgba
+  segment: FlowSegment
+}
+
+export interface FlowMarkerRender {
+  key: string
+  position: Point2
+  /** Text inside the marker (label or rank). */
+  text: string
+  color: Rgba
+  marker: FlowMarker
+}
+
+export interface FlowRender {
+  paths: FlowPathRender[]
+  markers: FlowMarkerRender[]
+}
+
+export const EMPTY_FLOW_RENDER: FlowRender = { paths: [], markers: [] }
+
+const flowWeight = (segment: FlowSegment) => segment.weight ?? 0.5
+
+/**
+ * What to draw of a flow on one floor: that floor's segments (2+ points) with a width and a color by
+ * weight, or the backend's color when it sent one; lighter lines first so heavy ones stay on top. Then
+ * the markers on this floor, the top rank last (drawn on top).
+ */
+export function prepareFlow(flow: Flow | null | undefined, floor: string): FlowRender {
+  if (!flow) return EMPTY_FLOW_RENDER
+  const segments = flow.floors[floor]?.segments ?? []
+  const paths = segments
+    .flatMap((segment, i): FlowPathRender[] =>
+      segment.points.length >= 2
+        ? [
+            {
+              key: `seg-${i}`,
+              path: segment.points.map(([x, y]): Point2 => [x, y]),
+              width: flowWidthPx(segment.weight),
+              color: segment.color ? hexToRgba(segment.color, 240, flowColor(segment.weight)) : flowColor(segment.weight),
+              segment,
+            },
+          ]
+        : [],
+    )
+    .sort((a, b) => flowWeight(a.segment) - flowWeight(b.segment))
+  const markers = sortedFlowMarkers(flow)
+    .filter((marker) => marker.floor === floor)
+    .map(
+      (marker, i): FlowMarkerRender => ({
+        key: `marker-${marker.rank ?? 'x'}-${i}`,
+        position: [marker.x, marker.y],
+        text: flowMarkerText(marker),
+        color: hexToRgba(flowMarkerColor(marker.kind)),
+        marker,
+      }),
+    )
+    .reverse()
+  return { paths, markers }
 }

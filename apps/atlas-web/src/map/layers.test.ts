@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
+import { FLOW_MARKER_COLORS, normalizeFlow } from '../lib/flow'
+import { hexToRgba } from '../lib/colors'
 import { buildFloorModel } from '../lib/geometry'
 import { normalizeJourney } from '../lib/journey'
 import { normalizeRoute } from '../lib/route'
 import type { Feature } from '../types/api'
-import { buildLayers, routeLayers, routeMarkerFontPx, routeMarkerRadiusPx, type LayerInput } from './layers'
-import { EMPTY_JOURNEY_RENDER, EMPTY_ROUTE_RENDER, prepareJourney, prepareRoute, resolveEdges, resolveHighlights } from './prepare'
+import { FLOW_CASING_PX, FLOW_MARKER_MAX_PX, FLOW_MARKER_MIN_PX, buildLayers, flowMarkerLayers, flowPathLayers, routeLayers, routeMarkerFontPx, routeMarkerRadiusPx, type LayerInput } from './layers'
+import { EMPTY_FLOW_RENDER, EMPTY_JOURNEY_RENDER, EMPTY_ROUTE_RENDER, prepareFlow, prepareJourney, prepareRoute, resolveEdges, resolveHighlights } from './prepare'
 
 // deck.gl needs WebGL only to draw: stand-ins that keep their props are enough to check the layer stack.
 vi.mock('@deck.gl/layers', () => {
@@ -67,6 +69,7 @@ function input(over: Partial<LayerInput> = {}): LayerInput {
     edges: [],
     journey: EMPTY_JOURNEY_RENDER,
     route: EMPTY_ROUTE_RENDER,
+    flow: EMPTY_FLOW_RENDER,
     zoom: 2,
     ...over,
   }
@@ -137,5 +140,60 @@ describe('route layers', () => {
     expect(routeMarkerFontPx(13)).toBe(10)
     expect(routeMarkerFontPx(15)).toBe(11)
     expect(routeMarkerFontPx(18)).toBe(12)
+  })
+})
+
+describe('flow layers', () => {
+  const flow = normalizeFlow({
+    mode: 'popup',
+    floors: {
+      '1F': {
+        segments: [
+          { points: [[0, 15], [20, 15]], weight: 0.25, value: 300 },
+          { points: [[20, 15], [60, 15]], weight: 1, value: 1200 },
+          { points: [[20, 13], [20, 20]], weight: 0.5, color: '#c62828' },
+        ],
+      },
+    },
+    markers: [
+      { floor: '1F', x: 30, y: 15, rank: 1, kind: 'spot', label: '1', title: '후보 1 · 1F 남측 통로' },
+      { floor: '1F', x: 50, y: 6, rank: 2, kind: 'unit', unit_code: '1F-A02' },
+    ],
+  })!
+
+  it('adds nothing without a flow on this floor', () => {
+    expect(flowPathLayers(EMPTY_FLOW_RENDER)).toEqual([])
+    expect(flowMarkerLayers(EMPTY_FLOW_RENDER)).toEqual([])
+    expect(ids(buildLayers(input())).some((id) => id.startsWith('flow-'))).toBe(false)
+  })
+
+  it('lays the lines on the walkways under highlights and labels, and the markers above the edges', () => {
+    const order = ids(
+      buildLayers(
+        input({
+          highlights: resolveHighlights([{ unit_code: '1F-A01' }], model.units),
+          edges: resolveEdges([{ from: '1F-A01', to: '1F-A02', weight: 1, label: 'lift 1.0' }], '1F', model.units, []),
+          flow: prepareFlow(flow, '1F'),
+        }),
+      ),
+    )
+    expect(order.filter((id) => id.startsWith('flow-'))).toEqual(['flow-casing', 'flow-paths', 'flow-markers', 'flow-marker-text'])
+    expect(order.indexOf('flow-casing')).toBeGreaterThan(order.indexOf('openings'))
+    expect(order.indexOf('flow-paths')).toBeLessThan(order.indexOf('highlights'))
+    expect(order.indexOf('flow-paths')).toBeLessThan(order.indexOf('unit-labels'))
+    expect(order.indexOf('flow-markers')).toBeGreaterThan(order.indexOf('edge-labels'))
+  })
+
+  it('draws 2-10 px lines colored by weight (or the backend color) and numbered markers colored by kind', () => {
+    const layers = propsById([...flowPathLayers(prepareFlow(flow, '1F')), ...flowMarkerLayers(prepareFlow(flow, '1F'))])
+    const paths = data(layers['flow-paths'])
+    expect(paths.map((d) => call(layers['flow-paths'], 'getWidth', d))).toEqual([4, 6, 10])
+    expect(paths.map((d) => call(layers['flow-casing'], 'getWidth', d))).toEqual([4 + FLOW_CASING_PX, 6 + FLOW_CASING_PX, 10 + FLOW_CASING_PX])
+    expect(call(layers['flow-paths'], 'getColor', paths[1])).toEqual(hexToRgba('#c62828', 240))
+    expect(layers['flow-paths']).toMatchObject({ widthUnits: 'pixels', pickable: true })
+    const markers = data(layers['flow-markers'])
+    expect(markers.map((d) => call(layers['flow-markers'], 'getFillColor', d))).toEqual([hexToRgba(FLOW_MARKER_COLORS.unit), hexToRgba(FLOW_MARKER_COLORS.spot)])
+    expect(layers['flow-markers']).toMatchObject({ radiusMinPixels: FLOW_MARKER_MIN_PX, radiusMaxPixels: FLOW_MARKER_MAX_PX, pickable: true })
+    expect(data(layers['flow-marker-text']).map((d) => d.text)).toEqual(['2', '1'])
   })
 })

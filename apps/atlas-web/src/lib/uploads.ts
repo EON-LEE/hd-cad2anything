@@ -72,6 +72,22 @@ export const METADATA_KINDS: readonly MetadataKindInfo[] = [
     storage: '브리프 하나 추가·교체',
   },
   { kind: 'drawing_profile', label: '도면 규약 프로필', ...DOCUMENT, required: ['profile_id', 'title'], optional: [], storage: '프로필 하나 추가·교체' },
+  {
+    kind: 'stores',
+    label: '비교 점포',
+    ...TABLE,
+    required: ['store_id', 'store_name', 'region', 'format', 'gross_area_m2'],
+    optional: [],
+    storage: '표 전체 교체(비교 대상 점포 목록)',
+  },
+  {
+    kind: 'store_kpis',
+    label: '점포 실적',
+    ...TABLE,
+    required: ['store_id', 'period', 'floor', 'category', 'area_m2', 'sales_krw'],
+    optional: [],
+    storage: '표 전체 교체(점포별 월·층·카테고리 실적, period는 YYYY-MM)',
+  },
 ]
 
 export const METADATA_KIND_LABELS: Record<string, string> = Object.fromEntries(METADATA_KINDS.map((k) => [k.kind, k.label]))

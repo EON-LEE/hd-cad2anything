@@ -14,7 +14,7 @@ import { replaceOp } from '../state/reducer'
 import { usePatchUi } from '../state/store'
 import type { RelayoutAlternative, RelayoutChange, RelayoutProject } from '../types/api'
 
-export type RelayoutBusy = 'diagnose' | 'plan' | 'select' | 'check' | null
+export type RelayoutBusy = 'diagnose' | 'plan' | 'select' | 'check' | 'phasing' | null
 
 function Unit({ code }: { code: string | null }) {
   return <span className="unit-code">{code ?? '–'}</span>
@@ -334,6 +334,7 @@ export function RelayoutAlternatives({
       replaceOp('/heatmap', null),
       replaceOp('/journey', null),
       replaceOp('/route', null),
+      replaceOp('/flow', null),
       replaceOp('/highlights', view.highlights),
       replaceOp('/edges', view.edges),
       replaceOp('/focus', view.codes.length ? { unit_codes: view.codes } : null),

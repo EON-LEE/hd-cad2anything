@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Meta, RelayoutAlternative } from '../types/api'
+import type { Meta, PhasingStep, RelayoutAlternative } from '../types/api'
 import {
   brandDisplay,
   checkRevisionOptions,
@@ -8,12 +8,19 @@ import {
   firstChangedFloor,
   groupRelayoutChanges,
   isBaselineAlternative,
+  normalizePhasing,
   normalizePlan,
   normalizeProject,
   pastDiagnosis,
+  phasingCycleLoop,
+  phasingCycleText,
+  phasingDefaults,
+  phasingStepRemark,
+  phasingWeekText,
   relayoutPreview,
   seasonExtremes,
   seasonText,
+  weeksText,
 } from './relayout'
 
 const plan = normalizePlan({
@@ -94,8 +101,41 @@ describe('relayout normalization', () => {
     expect(named).toEqual({ unit_code: '4F-N02', before_brand: 'BR0333', after_brand: 'BR0166', before_brand_name: 'Dovrelle', after_brand_name: 'Talvessa' })
     expect([brandDisplay(named.before_brand_name, named.before_brand), brandDisplay(named.after_brand_name, named.after_brand)]).toEqual(['Dovrelle', 'Talvessa'])
     expect([brandDisplay(unnamed.before_brand_name, unnamed.before_brand), brandDisplay(unnamed.after_brand_name, unnamed.after_brand)]).toEqual(['BR0334', '(공실)'])
-    expect(project).toMatchObject({ plan: null, selected_alt_id: null, report_url: null })
+    expect(project).toMatchObject({ plan: null, selected_alt_id: null, report_url: null, phasing: null })
     expect(() => normalizeProject({ status: 'draft' })).toThrow()
+  })
+
+  it('reads a stored construction order with steps, entries, cycles and the entry delay', () => {
+    const project = normalizeProject({
+      brief: { brief_id: 'FW2026', downtime_weeks: 3 },
+      phasing: {
+        alt_id: 'ALT-2',
+        params: { crews: '3', fitout_weeks: 2.5, use_temporary: false },
+        steps: [
+          { start_week: 2, end_week: 1, action: 'entry', unit_code: '6F-S02B', brand_name: 'Norvane Outdoor', waits_for: [1] },
+          { step: 1, action: 'close', unit_code: '4F-C06', brand_id: 'BR0101', closed_weeks: 4, lost_krw: '66481534' },
+          'bad',
+        ],
+        lost_krw: 66_481_534,
+        naive_lost_krw: 616_032_748,
+        entry_delay_krw: 147_000_000,
+        entries: [{ brand_name: 'Norvane Outdoor', unit_code: '6F-S02B', open_week: 8, earliest_week: 6 }],
+        cycles: [{ brands: ['Novier & Co', 'Kaelova Intimates'], resolved_by: 'close', weeks: 4 }],
+      },
+    })
+    const phasing = project.phasing!
+    expect(phasing.params).toEqual({ crews: 3, fitout_weeks: 2.5, temporary_sales_ratio: null, use_temporary: false })
+    // Missing numbers: the step from the order, the end no earlier than the start, the total from the last end.
+    expect(phasing.steps.map((s) => [s.step, s.start_week, s.end_week, s.floor, s.brand_name])).toEqual([
+      [1, 2, 2, '6F', 'Norvane Outdoor'],
+      [1, 0, 0, '4F', 'BR0101'],
+    ])
+    expect(phasing.total_weeks).toBe(2)
+    expect(phasing.saved_krw).toBe(616_032_748 - 66_481_534)
+    expect(phasing.entry_delay_krw).toBe(147_000_000)
+    expect(phasing.entries[0]).toEqual({ brand_id: null, brand_name: 'Norvane Outdoor', unit_code: '6F-S02B', open_week: 8, earliest_week: 6 })
+    expect(phasing.cycles[0]).toEqual({ brands: ['Novier & Co', 'Kaelova Intimates'], units: [], breaker: null, resolved_by: 'close', unit_code: null, weeks: 4 })
+    expect(normalizePhasing('none')).toBeNull()
   })
 })
 
@@ -158,6 +198,51 @@ describe('relayout display helpers', () => {
 
   it('folds the diagnosis away once alternatives exist', () => {
     expect(['draft', 'diagnosed', 'planned', 'selected', 'checked', 'invalid'].map(pastDiagnosis)).toEqual([false, false, true, true, true, false])
+  })
+
+  it('describes construction steps, cycles and the form defaults', () => {
+    const step = (over: Partial<PhasingStep>): PhasingStep => ({
+      step: 1,
+      start_week: 0,
+      end_week: 2,
+      action: 'move',
+      action_label: '이전 공사',
+      unit_code: '4F-E01',
+      floor: '4F',
+      brand_id: 'B1',
+      brand_name: 'Lumivane',
+      from_unit: '4F-C06',
+      waits_for: [],
+      closed_weeks: 0,
+      temporary_unit: null,
+      lost_krw: 0,
+      note: null,
+      ...over,
+    })
+    expect(phasingWeekText(step({}))).toBe('0~2주')
+    expect(phasingWeekText(step({ action: 'exit', start_week: 0, end_week: 0 }))).toBe('0주')
+    expect(phasingWeekText(step({ start_week: 1.5, end_week: 4 }))).toBe('1.5~4주')
+    expect([weeksText(10), weeksText(2.5), weeksText(null)]).toEqual(['10주', '2.5주', '–'])
+    expect(phasingStepRemark(step({ waits_for: [2] }))).toBe('4F-C06에서 · 2번 작업 뒤')
+    expect(phasingStepRemark(step({ action: 'entry', from_unit: null, start_week: 2, end_week: 4 }))).toBe('4주차 개점')
+    expect(phasingStepRemark(step({ action: 'close', unit_code: '4F-C06', closed_weeks: 4, lost_krw: 66_481_534 }))).toBe('4F-C06 휴점 4주 · 손실 6,648만 원')
+    expect(phasingStepRemark(step({ action: 'temporary', unit_code: '4F-E02', temporary_unit: '4F-E02' }))).toBe('4F-C06에서 임시 이전')
+    expect(phasingStepRemark(step({ action: 'exit', from_unit: '4F-E02' }))).toBe('')
+
+    expect(phasingCycleLoop(['A', 'B'])).toBe('A ↔ B')
+    expect(phasingCycleLoop(['A', 'B', 'C'])).toBe('A → B → C → A')
+    const close = { brands: ['Novier & Co', 'Kaelova Intimates'], units: ['4F-C06', '4F-C20'], breaker: 'Novier & Co', resolved_by: 'close', unit_code: null, weeks: 4 }
+    expect(phasingCycleText(close)).toBe('서로 자리를 바꾸는 순환(Novier & Co ↔ Kaelova Intimates)은 Novier & Co 매장이 4주 동안 휴점해서 풉니다.')
+    expect(phasingCycleText({ ...close, resolved_by: 'temporary', unit_code: '4F-E02' })).toBe(
+      '서로 자리를 바꾸는 순환(Novier & Co ↔ Kaelova Intimates)은 Novier & Co 매장을 4주 동안 임시 매장(4F-E02)으로 옮겨 풉니다.',
+    )
+
+    const brief = normalizeProject({ brief: { brief_id: 'FW2026', downtime_weeks: 3 } }).brief
+    expect(phasingDefaults({ brief, phasing: null })).toEqual({ crews: 2, fitoutWeeks: 3, useTemporary: true })
+    expect(phasingDefaults({ brief: { ...brief, downtime_weeks: 0 }, phasing: null }).fitoutWeeks).toBe(1)
+    expect(phasingDefaults({ brief: { ...brief, downtime_weeks: null }, phasing: null }).fitoutWeeks).toBe(2)
+    const stored = normalizePhasing({ params: { crews: 9, fitout_weeks: 4, use_temporary: false } })
+    expect(phasingDefaults({ brief, phasing: stored })).toEqual({ crews: 6, fitoutWeeks: 4, useTemporary: false })
   })
 
   it('names seasons and picks strong and weak categories', () => {

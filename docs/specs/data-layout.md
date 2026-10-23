@@ -33,15 +33,19 @@ data/workspace/
   reports/{rev}.json                         # 파싱 보고서
   business/*.csv[.gz]                        # 업무 표(브랜드, 테넌시, POS, 고객, 거래)
   business/leases.csv                        # 현재 계약: lease_id, brand_id, unit_code, lease_start, lease_end, contract_area_m2, commission_rate
+  business/stores.csv                        # 비교 점포 목록: store_id, store_name, region, format, gross_area_m2, opened
+  business/store_kpis.csv                    # 비교 점포 월별 실적: store_id, period(YYYY-MM), floor, category, area_m2, sales_krw
   business/relayout_briefs/{brief_id}.yaml   # 시즌 개편 브리프(사람 입력)
   business/drawing_profiles/{id}.yaml        # 도면 규약 프로필(사람 입력)
   business/_backup/                          # 메타데이터를 교체하기 전 파일
   artifacts/{rev}/{generator}/               # 산출물
-  projects/relayout/{brief_id}.json|.html    # 개편 프로젝트(진단, 대안, 결정, 도면 대조)와 제안서
+  projects/relayout/{brief_id}.json|.html    # 개편 프로젝트(진단, 대안, 결정, 공사 순서, 도면 대조)와 제안서
   uploads/jobs/{job_id}.json                 # 도면 업로드 작업 상태와 결과
 ```
 
 `leases.csv`와 `FW2026` 브리프는 합성 데이터다. `bootstrap`이 없을 때 만들고(`cad2anything.mockgen.relayout`), 계약 면적·브랜드 불일치 4건을 일부러 심는다(6F-C14, 2F-N06, 7F-N05 면적, 3F-C13 브랜드).
+
+`stores.csv`와 `store_kpis.csv`는 가상 점포 6곳의 합성 실적이다. `bootstrap`이 둘 다 없을 때 대상 점포의 실제 거래 규모를 기준으로 만든다(`cad2anything.mockgen.stores`). 사람이 올린 표는 덮어쓰지 않는다.
 
 ## 2. 개정과 기간
 
@@ -62,7 +66,7 @@ data/workspace/
 - 매니페스트
 - 브랜드와 테넌시
 - 거래 수천 건
-- `metadata/`: 업로드 시연용 계약 정보(`leases.csv`)와 개편 브리프(`FW2026.yaml`)
+- `metadata/`: 업로드 시연용 계약 정보(`leases.csv`), 개편 브리프(`FW2026.yaml`), 비교 점포 목록(`stores.csv`)과 점포 실적(`store_kpis.csv`)
 - `uploads/`: 기본 규약과 다른 "고객사 형식" 합성 도면(ZIP)과 그 도면 규약 프로필
 
 ## 4. 금지 사항

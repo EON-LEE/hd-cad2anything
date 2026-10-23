@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { facilityName } from '../api/client'
 import { useData } from '../api/source'
 import { REVISION_KIND_LABELS, revisionMarkers } from '../lib/format'
+import { flowFloorStats, flowFloorText } from '../lib/flow'
 import { journeyStopCounts } from '../lib/journey'
 import { ROUTE_FLOOR_ROLE_LABELS, routeFloorRoles } from '../lib/route'
 import { replaceOp } from '../state/reducer'
@@ -15,6 +16,7 @@ export function TopBar() {
   const floors = sortedFloors(meta)
   const journeyCounts = useMemo(() => journeyStopCounts(ui.journey), [ui.journey])
   const routeRoles = useMemo(() => routeFloorRoles(ui.route), [ui.route])
+  const flowStats = useMemo(() => flowFloorStats(ui.flow), [ui.flow])
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [bannerOpen, setBannerOpen] = useState(true)
 
@@ -114,6 +116,8 @@ export function TopBar() {
               const stops = journeyCounts.get(f.code) ?? 0
               const routeRole = routeRoles.get(f.code)
               const routeText = routeRole ? `길 찾기 경로: ${ROUTE_FLOOR_ROLE_LABELS[routeRole]} 층` : ''
+              const flowStat = ui.flow ? flowStats.get(f.code) : undefined
+              const flowText = ui.flow && flowStat ? flowFloorText(ui.flow.mode, flowStat) : ''
               return (
                 <button
                   key={f.code}
@@ -125,7 +129,7 @@ export function TopBar() {
                   aria-selected={selected}
                   aria-controls="floor-canvas"
                   tabIndex={selected ? 0 : -1}
-                  title={`${f.code} ${f.name}${stops ? ` · 고객 동선 결제 ${stops}곳` : ''}${routeText ? ` · ${routeText}` : ''}`}
+                  title={`${f.code} ${f.name}${stops ? ` · 고객 동선 결제 ${stops}곳` : ''}${routeText ? ` · ${routeText}` : ''}${flowText ? ` · ${flowText}` : ''}`}
                   className={selected ? 'active' : undefined}
                   onClick={() => patchUi([replaceOp('/floor', f.code)])}
                   onKeyDown={(e) => onTabKey(e, i)}
@@ -143,6 +147,12 @@ export function TopBar() {
                     <>
                       <span className={`route-tab-mark ${routeRole}`} aria-hidden="true" />
                       <span className="visually-hidden">({routeText})</span>
+                    </>
+                  )}
+                  {flowText && (
+                    <>
+                      <span className={`flow-tab-mark${ui.flow?.mode === 'egress' ? ' egress' : ''}`} aria-hidden="true" />
+                      <span className="visually-hidden">({flowText})</span>
                     </>
                   )}
                 </button>

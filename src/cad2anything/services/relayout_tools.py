@@ -155,6 +155,12 @@ def _more_less(value: Any) -> str:
     return f"연 {_krw(abs(number))} {'많아요' if number >= 0 else '적어요'}"
 
 
+def _num(value: Any) -> float | int:
+    """Whole numbers as int (2 weeks rather than 2.0 weeks)."""
+    number = float(value)
+    return int(number) if number.is_integer() else round(number, 1)
+
+
 def _name_key(name: Any) -> str:
     return re.sub(r"\s+", "", str(name or "")).lower()
 
@@ -492,6 +498,7 @@ class RelayoutTools:
             "decided_by": None,
             "decided_at": None,
             "check": None,
+            "phasing": None,
             "report_url": None,
             "updated_at": None,
         }
@@ -512,7 +519,12 @@ class RelayoutTools:
         link is always present."""
         project = self._project(brief_id)
         return _json(
-            {**project, "brief": self._brief(brief_id), "report_url": f"/api/relayout/{brief_id}/report"}
+            {
+                **project,
+                "phasing": project.get("phasing"),
+                "brief": self._brief(brief_id),
+                "report_url": f"/api/relayout/{brief_id}/report",
+            }
         )
 
     def relayout_briefs(self) -> list[dict[str, Any]]:
@@ -1301,6 +1313,7 @@ class RelayoutTools:
         project["decided_by"] = None
         project["decided_at"] = None
         project["check"] = None
+        project["phasing"] = None
         project["status"] = "planned"
         self._save_project(project)
         return plan
@@ -1328,6 +1341,8 @@ class RelayoutTools:
                 "check": None,
             }
         )
+        if (project.get("phasing") or {}).get("alt_id") != alt_id:
+            project["phasing"] = None
         project["status"] = "selected"
         self._save_project(project)
         return self.relayout_project(brief_id)
@@ -1498,7 +1513,7 @@ class RelayoutTools:
         """Where a new brand (catalog brand or a category's typical brand) would sell best: vacant units and,
         optionally, units whose lease ends within six months after the data period (estimates)."""
         from cad2anything.layout import AssignmentScorer, LayoutConstraints
-        from cad2anything.layout.whatif import BrandInfo, brand_info
+        from cad2anything.layout.whatif import brand_info
 
         rev = rev or self.latest_sales_rev()
         inputs = self._layout_inputs(rev)
@@ -1517,16 +1532,7 @@ class RelayoutTools:
             prior = "카테고리 평균과 브랜드 매력도 기반 추정"
         elif category:
             code = self._resolve_category(category)
-            peers = catalog[catalog["category"] == code]
-            counts = pd.Series([f for v in peers["preferred_floors"] for f in as_list(v)]).value_counts()
-            info = BrandInfo(
-                brand_id=f"NEW-{code}",
-                brand_name=f"신규 {CATEGORIES[code].name_ko} 브랜드",
-                category=code,
-                target_area_min_m2=float(peers["target_area_min_m2"].median()) if len(peers) else math.nan,
-                target_area_max_m2=float(peers["target_area_max_m2"].median()) if len(peers) else math.nan,
-                preferred_floors=(str(counts.index[0]),) if len(counts) else (),
-            )
+            info = self._typical_brand(code, catalog)
             infos[info.brand_id] = info
             prior = "카테고리 평균 브랜드 기준 추정"
         else:
@@ -1623,6 +1629,694 @@ class RelayoutTools:
             )
         return _json(result)
 
+    # Unit options --------------------------------------------------------------------------------------
+    @staticmethod
+    def _typical_brand(code: str, catalog: pd.DataFrame, min_floor_share: float | None = None) -> Any:
+        """A category's typical new brand: median target area, the most common conflicts and its floors: the
+        top preferred floor, plus any floor preferred by at least ``min_floor_share`` of its brands."""
+        from cad2anything.layout.whatif import BrandInfo
+
+        peers = catalog[catalog["category"] == code]
+        counts = pd.Series([f for v in peers["preferred_floors"] for f in as_list(v)]).value_counts()
+        floors = [str(counts.index[0])] if len(counts) else []
+        if min_floor_share is not None:
+            floors += [
+                str(f)
+                for f, n in counts.items()
+                if n / max(len(peers), 1) >= min_floor_share and str(f) not in floors
+            ]
+        conflicts: tuple[str, ...] = ()
+        if "adjacency_conflicts" in peers and peers["adjacency_conflicts"].notna().any():
+            conflicts = tuple(as_list(peers["adjacency_conflicts"].dropna().astype(str).mode().iloc[0]))
+        return BrandInfo(
+            brand_id=f"NEW-{code}",
+            brand_name=f"신규 {CATEGORIES[code].name_ko} 브랜드",
+            category=code,
+            target_area_min_m2=float(peers["target_area_min_m2"].median()) if len(peers) else math.nan,
+            target_area_max_m2=float(peers["target_area_max_m2"].median()) if len(peers) else math.nan,
+            preferred_floors=tuple(floors),
+            adjacency_conflicts=conflicts,
+        )
+
+    def _category_rates(self, rev: str) -> dict[str, float]:
+        """Median commission rate per category of the brands in a revision (catalog midpoint as fallback)."""
+        rates = self._commission_rates(rev)
+        catalog = self._catalog().set_index("brand_id")
+        by_category: dict[str, list[float]] = {}
+        for brand_id, rate in rates.items():
+            if brand_id in catalog.index:
+                by_category.setdefault(str(catalog.at[brand_id, "category"]), []).append(rate)
+        result = {c: float(np.median(v)) for c, v in by_category.items()}
+        for code, category in CATEGORIES.items():
+            result.setdefault(code, sum(category.commission_range) / 2)
+        return result
+
+    def relayout_unit_options(
+        self,
+        unit_code: str,
+        rev: str | None = None,
+        season: str | None = None,
+        objective: str = "sales",
+        include_other_floors: bool = False,
+        top: int = 5,
+    ) -> dict[str, Any]:
+        """What would fit one unit (a vacancy or a store about to leave): categories ranked by expected sales
+        (or commission) of a typical new brand there, with the best unplaced catalog brands (estimates)."""
+        from cad2anything.layout import AssignmentScorer, LayoutConstraints
+        from cad2anything.layout.whatif import brand_info
+
+        rev = rev or self.latest_sales_rev()
+        objective = str(objective or "sales").lower()
+        if objective not in OBJECTIVE_LABELS:
+            raise ToolError("objective는 sales(매출) 또는 commission(수수료 수익)이어야 해요.")
+        model = self._model(rev)
+        code = str(unit_code or "").strip().upper()
+        unit = model.unit_by_code(code)
+        if unit is None:
+            raise ToolError(f"{rev}에 매장 {unit_code}가 없어요.")
+        inputs = self._layout_inputs(rev)
+        catalog = self._catalog()
+        infos = dict(brand_info(inputs["brands"]))
+        typical = {
+            c: self._typical_brand(c, catalog, min_floor_share=0.2)
+            for c in sorted(set(catalog["category"].dropna()))
+            if c in CATEGORIES
+        }
+        infos.update({info.brand_id: info for info in typical.values()})
+        scorer = AssignmentScorer(
+            inputs["features"], infos, inputs["model"], inputs["affinity"], inputs["adjacency"]
+        )
+        if code not in scorer.units:
+            raise ToolError(f"{code}의 면적·보행 정보를 계산할 수 없어요.")
+        constraints = LayoutConstraints(area_tolerance=DEFAULT_AREA_TOLERANCE)
+        geometry = scorer.units[code]
+        assignment = dict(inputs["assignment"])
+        current = assignment.get(code)
+        assignment[code] = None
+        neighbor_categories = sorted(
+            {
+                infos[b].category
+                for v in scorer.neighbors.get(code, ())
+                if (b := assignment.get(v)) in infos and infos[b].category
+            }
+        )
+        factors: dict[str, float] = {}
+        season_code = None
+        if season:
+            season_code = SEASON_ALIASES.get(str(season).strip().upper()) or SEASON_ALIASES.get(
+                str(season).strip()
+            )
+            if season_code is None:
+                raise ToolError("season은 SS 또는 FW여야 해요.")
+            factors = self._season_factors(season_code)
+        rates = self._category_rates(inputs["fit_rev"])
+        placements = self._placements(rev)
+        anchors = catalog.set_index("brand_id")["anchor"] if "anchor" in catalog else pd.Series(dtype=bool)
+
+        def value_of(brand_id: str) -> tuple[float, float]:
+            trial = dict(assignment)
+            trial[code] = brand_id
+            value = scorer.location_value(brand_id, code) * (1 + scorer.bonus(brand_id, code, trial))
+            return value, scorer.half_width(brand_id, code)
+
+        options, excluded = [], []
+        for category, info in typical.items():
+            name = CATEGORIES[category].name_ko
+            conflict = [c for c in neighbor_categories if c in info.adjacency_conflicts]
+            conflict += [
+                c
+                for c in neighbor_categories
+                if category in next((t.adjacency_conflicts for t in typical.values() if t.category == c), ())
+            ]
+            if not constraints.area_ok(info, geometry.area_m2):
+                lo, hi = constraints.area_band(info)
+                excluded.append({"category_name": name, "reason": f"보통 {lo:.0f}~{hi:.0f}㎡ 매장을 써요."})
+                continue
+            floor_fit = constraints.floor_ok(info, geometry.floor)
+            if not floor_fit and not include_other_floors:
+                excluded.append(
+                    {
+                        "category_name": name,
+                        "reason": f"주로 {', '.join(info.preferred_floors)}에 배치하는 카테고리예요.",
+                    }
+                )
+                continue
+            if conflict:
+                names = ", ".join(CATEGORIES[c].name_ko for c in sorted(set(conflict)) if c in CATEGORIES)
+                excluded.append(
+                    {"category_name": name, "reason": f"옆 매장({names})과 상충하는 카테고리예요."}
+                )
+                continue
+            value, half = value_of(info.brand_id)
+            factor = factors.get(category, 1.0)
+            rate = rates.get(category, 0.25)
+            weight = factor * (rate if objective == "commission" else 1.0)
+            brands = []
+            pool = catalog[(catalog["category"] == category) & ~catalog["brand_id"].isin(placements)]
+            for brand_id in pool["brand_id"]:
+                brand = infos.get(brand_id)
+                if brand is None or bool(anchors.get(brand_id, False)):
+                    continue
+                if not (
+                    constraints.area_ok(brand, geometry.area_m2)
+                    and constraints.floor_ok(brand, geometry.floor)
+                ):
+                    continue
+                brands.append((value_of(brand_id)[0] * factor, brand_id, brand.brand_name))
+            brands.sort(reverse=True)
+            notes = []
+            if not floor_fit:
+                notes.append(
+                    f"이 층은 이 카테고리의 주 배치 층({', '.join(info.preferred_floors)})이 아니에요."
+                )
+            if not brands:
+                notes.append("면적·층이 맞는 미입점 브랜드가 카탈로그에 없어요.")
+            options.append(
+                {
+                    "category": category,
+                    "category_name": name,
+                    "expected_sales_krw": value * factor,
+                    "low_krw": value * factor * math.exp(-half),
+                    "high_krw": value * factor * math.exp(half),
+                    "season_factor": factor if season_code else None,
+                    "commission_rate": round(rate, 3),
+                    "objective_krw": value * weight,
+                    "floor_fit": floor_fit,
+                    "brands": [
+                        {"brand_id": b, "brand_name": n, "expected_sales_krw": v} for v, b, n in brands[:3]
+                    ],
+                    "notes": notes,
+                }
+            )
+        options.sort(key=lambda o: -o["objective_krw"])
+        current_info = infos.get(current) if current else None
+        current_value = None
+        if current_info is not None:
+            current_value = value_of(current)[0] * factors.get(current_info.category, 1.0)
+        for rank, option in enumerate(options, start=1):
+            option["rank"] = rank
+            if current_value:
+                option["vs_current_pct"] = (option["expected_sales_krw"] / current_value - 1) * 100
+        lease_end = None
+        leases = self._leases()
+        if leases is not None and current:
+            match = leases[(leases["unit_code"] == code) & (leases["brand_id"] == current)]
+            lease_end = str(match["lease_end"].iloc[0]) if len(match) else None
+        features = []
+        table = self.unit_table(rev).set_index("unit_code")
+        if code in table.index:
+            row = table.loc[code]
+            features = [
+                label
+                for column, label in (
+                    ("escalator_front", "에스컬레이터 정면"),
+                    ("corner", "코너"),
+                    ("main_walkway", "메인 동선"),
+                )
+                if bool(row.get(column))
+            ]
+        result = {
+            "rev": rev,
+            "unit": {
+                "unit_code": code,
+                "floor": geometry.floor,
+                "area_m2": round(geometry.area_m2, 1),
+                "status": "입점" if current else "공실",
+                "current_brand": current_info.brand_name if current_info else None,
+                "current_category_name": CATEGORIES[current_info.category].name_ko
+                if current_info and current_info.category in CATEGORIES
+                else None,
+                "lease_end": lease_end,
+                "current_expected_krw": current_value,
+                "walk_to_escalator_m": round(geometry.walk_m, 1),
+                "features": features,
+                "neighbor_categories": [
+                    CATEGORIES[c].name_ko for c in neighbor_categories if c in CATEGORIES
+                ],
+            },
+            "objective": objective,
+            "objective_label": "기대 매출" if objective == "sales" else "기대 수수료 수익",
+            "season": SEASON_LABELS.get(season_code) if season_code else None,
+            "options": options[: max(1, min(int(top), 12))],
+            "excluded": excluded[:8],
+            "label": "추정치",
+            "caveat": (
+                "카테고리 평균 브랜드를 이 자리에 넣었다고 본 점수 모델 추정치예요. 실제 브랜드에 따라 크게 달라질 수 있어요."
+                + (
+                    " 지금 브랜드 대비 비율은 지금 브랜드의 모델 추정치와 비교한 값이에요."
+                    if current_value
+                    else ""
+                )
+            ),
+        }
+        if not options:
+            result["note"] = (
+                "면적·층·옆 매장 조건에 맞는 카테고리가 없어요. include_other_floors를 켜 보세요."
+            )
+        return _json(result)
+
+    # Phasing -----------------------------------------------------------------------------------------
+    @_locked
+    def relayout_phasing(
+        self,
+        brief_id: str,
+        alt_id: str | None = None,
+        crews: int = 2,
+        fitout_weeks: float | None = None,
+        temporary_sales_ratio: float = 0.6,
+        use_temporary: bool = True,
+    ) -> dict[str, Any]:
+        """Order the fit-out works of an alternative so that brands keep trading as long as possible.
+
+        A fit-out starts only in an empty unit. A moving brand keeps trading in its old unit until its new
+        unit is ready, so a chain of moves runs in sequence. Brands that move into each other's units form a
+        cycle: the one with the lowest weekly sales leaves first, to a temporary unit (a vacant unit that
+        the alternative does not use) or closed, until its new unit is ready. At most ``crews`` fit-outs run
+        at the same time. Weeks count from the start of the works.
+        """
+        brief = self._brief(brief_id)
+        project = self._project(brief_id)
+        plan = project.get("plan")
+        if not plan:
+            raise ToolError("먼저 대안을 만들어야 해요(relayout_plan).")
+        if alt_id:
+            wanted = str(alt_id).strip().upper()
+            if re.fullmatch(r"\d+", wanted):
+                wanted = f"ALT-{wanted}"
+            alternative = self._selected(project, wanted)
+        elif project.get("selected_alt_id"):
+            alternative = self._selected(project)
+        else:
+            options = [a for a in plan["alternatives"] if a["alt_id"] != "ALT-0"] or plan["alternatives"]
+            alternative = max(options, key=lambda a: a["kpi"]["net_krw"])
+        try:
+            crews = int(crews)
+            weeks = float(brief["downtime_weeks"] if fitout_weeks is None else fitout_weeks)
+            ratio = float(temporary_sales_ratio)
+        except (TypeError, ValueError) as exc:
+            raise ToolError("crews, fitout_weeks, temporary_sales_ratio는 숫자여야 해요.") from exc
+        if fitout_weeks is None:
+            weeks = min(max(weeks, 1.0), 12.0)
+        if not (1 <= crews <= 6 and 1 <= weeks <= 12 and 0 <= ratio <= 1):
+            raise ToolError("crews는 1~6, fitout_weeks는 1~12, temporary_sales_ratio는 0~1이어야 해요.")
+        use_temporary = bool(use_temporary)
+
+        base_rev = brief["base_rev"]
+        base_model = self._model(base_rev)
+        occupancy = _occupancy(base_model, set(brief["floors"]))
+        # Annual sales by unit: actual results when the base revision has them (already loaded by the plan).
+        estimated = not (base_model.revision.kind == RevisionKind.ACTUAL and self._has_sales(base_rev))
+        frame = self.expected_unit_sales(base_rev) if estimated else self.productivity_frame(base_rev, "unit")
+        column = "expected_sales" if estimated else "sales"
+        annual = dict(
+            zip(
+                frame["unit_code"].astype(str),
+                pd.to_numeric(frame[column], errors="coerce").fillna(0.0),
+                strict=True,
+            )
+        )
+
+        changes = alternative["changes"]
+        names = {c["brand_id"]: str(c["brand_name"]) for c in changes}
+        exits = [c for c in changes if c["type"] == "exit"]
+        works = [c for c in changes if c["type"] in ("move", "entry")]
+        movers = {c["brand_id"]: c for c in works if c["type"] == "move"}
+        entering = {c["brand_id"] for c in works if c["type"] == "entry"}
+        exit_units = {c["from_unit"] for c in exits}
+        weekly = {
+            c["brand_id"]: (
+                annual.get(c["from_unit"], 0.0)
+                if c["type"] == "move"
+                else max(float(c.get("delta_krw") or 0.0), 0.0)
+            )
+            / 52.0
+            for c in works
+        }
+        # Each fit-out waits for the brand now in its unit (if that brand moves too): a functional graph.
+        blocker: dict[str, str | None] = {}
+        mismatched = []
+        for change in works:
+            occupant = occupancy.by_unit.get(change["to_unit"])
+            if occupant in movers and occupant != change["brand_id"] and change["to_unit"] not in exit_units:
+                blocker[change["brand_id"]] = occupant
+            else:
+                blocker[change["brand_id"]] = None
+                if occupant is not None and change["to_unit"] not in exit_units and occupant not in movers:
+                    mismatched.append(change["to_unit"])
+        cycles: list[list[str]] = []
+        seen: dict[str, str] = {}
+        for first in blocker:
+            path: list[str] = []
+            node: str | None = first
+            while node is not None and node not in seen:
+                seen[node] = first
+                path.append(node)
+                node = blocker.get(node)
+            if node is not None and seen.get(node) == first:
+                cycles.append(path[path.index(node) :])
+        waiter_of = {parent: job for job, parent in blocker.items() if parent is not None}
+        breakers: dict[str, str] = {}  # waiting fit-out -> brand that leaves its unit early
+        for cycle in cycles:
+            breaker = min(cycle, key=lambda b: (weekly.get(b, 0.0), b))
+            waiter = waiter_of[breaker]
+            blocker[waiter] = None
+            breakers[waiter] = breaker
+        waiter_of = {parent: job for job, parent in blocker.items() if parent is not None}
+
+        def downstream(job: str) -> list[str]:
+            chain, node = [], waiter_of.get(job)
+            while node is not None:
+                chain.append(node)
+                node = waiter_of.get(node)
+            return chain
+
+        def depth(job: str) -> int:
+            count, node = 0, blocker[job]
+            while node is not None:
+                count, node = count + 1, blocker[node]
+            return count
+
+        dependents = {job: len(downstream(job)) for job in blocker}
+        # Weekly sales that finishing a fit-out unlocks: new brands at the end of its chain.
+        unlocks = {job: sum(weekly[j] for j in [job, *downstream(job)] if j in entering) for job in blocker}
+        chain_of: dict[str, str] = {}  # fit-outs between a breaker leaving and its new unit opening
+        for waiter, breaker in breakers.items():
+            node: str | None = waiter
+            while node is not None:
+                chain_of[node] = breaker
+                node = None if node == breaker else waiter_of.get(node)
+        order = {c["brand_id"]: i for i, c in enumerate(works)}
+
+        def schedule(rule: str) -> tuple[dict[str, float], dict[str, float]]:
+            """List scheduling: a free crew takes the ready fit-out with the best priority.
+
+            ``critical`` takes the longest waiting chain first (shortest total time), ``value`` the chain
+            that unlocks the most new-brand sales, ``ratio`` the most unlocked sales per remaining fit-out.
+            """
+            start_at: dict[str, float] = {}
+            end_at: dict[str, float] = {}
+            left: set[str] = set()
+            crew_free = [0.0] * crews
+            remaining = set(blocker)
+            while remaining:
+                crew = min(range(crews), key=lambda i: crew_free[i])
+                now = crew_free[crew]
+                ready = []
+                for job in remaining:
+                    parent = blocker[job]
+                    if parent is not None and parent not in end_at:
+                        continue
+                    release = end_at[parent] if parent is not None else 0.0
+                    # A brand that already left its unit waits for the rest of its chain: finish it first.
+                    active = 1 if chain_of.get(job) in left else 0
+                    priority = {
+                        "critical": (dependents[job], unlocks[job]),
+                        "value": (unlocks[job], dependents[job]),
+                        "ratio": (unlocks[job] / (1 + dependents[job]), dependents[job]),
+                    }[rule]
+                    ready.append((max(now, release), -active, -priority[0], -priority[1], order[job], job))
+                begin, *_, job = min(ready)
+                start_at[job], end_at[job] = begin, begin + weeks
+                crew_free[crew] = begin + weeks
+                if job in breakers:
+                    left.add(breakers[job])
+                remaining.discard(job)
+            return start_at, end_at
+
+        # Temporary space: vacant and exiting units on the brief floors, until their own fit-out starts.
+        target_of = {c["to_unit"]: c["brand_id"] for c in works}
+        spaces = list(
+            dict.fromkeys([*(u for u in occupancy.areas if u not in occupancy.by_unit), *sorted(exit_units)])
+        )
+
+        def temporaries(
+            start_at: dict[str, float], end_at: dict[str, float]
+        ) -> dict[str, tuple[str | None, float, float, float]]:
+            busy: dict[str, list[tuple[float, float]]] = {}
+            chosen = {}
+            for waiter, breaker in breakers.items():
+                leave, back = start_at[waiter], end_at[breaker]
+                change = movers[breaker]
+                area = occupancy.areas.get(change["from_unit"], 0.0)
+                free = [
+                    u
+                    for u in spaces
+                    if (u not in target_of or start_at[target_of[u]] >= back)
+                    and all(back <= s or leave >= e for s, e in busy.get(u, []))
+                ]
+                temporary = None
+                if use_temporary and free:
+                    temporary = min(
+                        free,
+                        key=lambda u: (
+                            u.split("-")[0] != change["from_floor"],
+                            abs(occupancy.areas[u] - area),
+                            u,
+                        ),
+                    )
+                    busy.setdefault(temporary, []).append((leave, back))
+                lost = weekly[breaker] * (back - leave) * ((1.0 - ratio) if temporary else 1.0)
+                chosen[breaker] = (temporary, leave, back, lost)
+            return chosen
+
+        def entry_delay(end_at: dict[str, float]) -> float:
+            """Expected sales of new brands lost because a crew was busy (beyond waiting for their chain)."""
+            return float(sum(weekly[j] * (end_at[j] - weeks * (1 + depth(j))) for j in entering))
+
+        best: tuple[tuple[float, float], dict[str, float], dict[str, float], dict[str, Any]] | None = None
+        for rule in ("critical", "ratio", "value"):
+            start_at, end_at = schedule(rule)
+            chosen = temporaries(start_at, end_at)
+            cost = sum(item[3] for item in chosen.values()) + entry_delay(end_at)
+            key = (round(cost), max(end_at.values(), default=0.0))
+            if best is None or key < best[0]:
+                best = (key, start_at, end_at, chosen)
+        assert best is not None
+        _, start_at, end_at, chosen = best
+
+        rows: list[dict[str, Any]] = []
+        cycle_rows = []
+        temporary_of: dict[str, str | None] = {}
+        for breaker, (temporary, leave, back, lost) in chosen.items():
+            change = movers[breaker]
+            temporary_of[breaker] = temporary
+            span = back - leave
+            rows.append(
+                {
+                    "start_week": leave,
+                    "end_week": back,
+                    "action": "temporary" if temporary else "close",
+                    "action_label": "임시 매장 영업" if temporary else "임시 휴점",
+                    "unit_code": temporary or change["from_unit"],
+                    "floor": (temporary or change["from_unit"]).split("-")[0],
+                    "brand_id": breaker,
+                    "brand_name": names[breaker],
+                    "from_unit": change["from_unit"],
+                    "_waits": None,
+                    "closed_weeks": 0 if temporary else span,
+                    "temporary_unit": temporary,
+                    "lost_krw": lost,
+                    "note": (
+                        f"순환을 풀려고 {change['from_unit']} 매장을 먼저 비워요. 새 매장이 열릴 때까지 {_num(span)}주 동안 "
+                        + (
+                            f"임시 매장 {temporary}에서 평소 매출의 {ratio:.0%}로 영업한다고 봤어요."
+                            if temporary
+                            else "휴점해요."
+                        )
+                    ),
+                }
+            )
+            cycle = next(c for c in cycles if breaker in c)
+            cycle_rows.append(
+                {
+                    "brands": [names[b] for b in cycle],
+                    "units": [movers[b]["from_unit"] for b in cycle],
+                    "breaker": names[breaker],
+                    "resolved_by": "temporary" if temporary else "close",
+                    "unit_code": temporary,
+                    "weeks": _num(span),
+                }
+            )
+        for change in exits:
+            rows.append(
+                {
+                    "start_week": 0.0,
+                    "end_week": 0.0,
+                    "action": "exit",
+                    "action_label": "퇴점·철거",
+                    "unit_code": change["from_unit"],
+                    "floor": change["from_floor"],
+                    "brand_id": change["brand_id"],
+                    "brand_name": names[change["brand_id"]],
+                    "from_unit": change["from_unit"],
+                    "_waits": None,
+                    "closed_weeks": 0,
+                    "temporary_unit": None,
+                    "lost_krw": 0.0,
+                    "note": "공사 시작 전에 영업을 마치고 매장을 비워요.",
+                }
+            )
+        for change in works:
+            job = change["brand_id"]
+            parent = blocker[job]
+            before = []
+            if parent is not None:
+                before.append(f"{names[parent]} 이전 공사가 끝난 뒤 시작해요.")
+            if job in breakers:
+                way = "임시 매장 이전" if temporary_of[breakers[job]] else "휴점"
+                before.append(f"{names[breakers[job]]} {way} 뒤 바로 시작해요.")
+            if change["type"] == "entry":
+                note = f"공사가 끝나는 {_num(end_at[job])}주차에 문을 열어요."
+            elif job in temporary_of:
+                note = (
+                    f"임시 매장 {temporary_of[job]}에서 영업하다가 공사가 끝나면 옮겨요."
+                    if temporary_of[job]
+                    else "휴점했다가 공사가 끝나면 새 매장을 열어요."
+                )
+            else:
+                note = f"기존 매장 {change['from_unit']}에서 영업하다가 공사가 끝나면 옮겨요."
+            rows.append(
+                {
+                    "start_week": start_at[job],
+                    "end_week": end_at[job],
+                    "action": change["type"],
+                    "action_label": "이전 공사" if change["type"] == "move" else "신규 입점 공사",
+                    "unit_code": change["to_unit"],
+                    "floor": change["to_floor"],
+                    "brand_id": job,
+                    "brand_name": names[job],
+                    "from_unit": change["from_unit"],
+                    "_waits": parent,
+                    "closed_weeks": 0,
+                    "temporary_unit": None,
+                    "lost_krw": 0.0,
+                    "note": " ".join([*before, note]),
+                }
+            )
+        rank = {"exit": 0, "temporary": 1, "close": 1, "move": 2, "entry": 2}
+        rows.sort(
+            key=lambda r: (
+                r["start_week"],
+                rank[r["action"]],
+                floor_sort_key(r["floor"] or ""),
+                r["unit_code"],
+            )
+        )
+        step_of: dict[str, int] = {}
+        for number, row in enumerate(rows, 1):
+            row["step"] = number
+            if row["action"] in ("move", "entry"):
+                step_of[row["brand_id"]] = number
+        steps = []
+        for row in rows:
+            parent = row.pop("_waits")
+            row["waits_for"] = [step_of[parent]] if parent else []
+            for key in ("start_week", "end_week", "closed_weeks"):
+                row[key] = _num(row[key])
+            steps.append({"step": row.pop("step"), **row})
+
+        total = max(end_at.values(), default=0.0)
+        lost = float(sum(r["lost_krw"] for r in steps))
+        naive = float(sum(weekly[b] for b in movers) * weeks)
+        delay = entry_delay(end_at)
+        entries = sorted(
+            (
+                {
+                    "brand_id": c["brand_id"],
+                    "brand_name": names[c["brand_id"]],
+                    "unit_code": c["to_unit"],
+                    "open_week": _num(end_at[c["brand_id"]]),
+                    "earliest_week": _num(weeks * (1 + depth(c["brand_id"]))),
+                }
+                for c in works
+                if c["type"] == "entry"
+            ),
+            key=lambda e: (e["open_week"], e["unit_code"]),
+        )
+        if works:
+            parts = [
+                f"{alternative['alt_id']}의 공사 {len(works)}건을 공사팀 {crews}개로 나눠 {_num(total)}주 만에 끝내요."
+            ]
+        else:
+            parts = [f"{alternative['alt_id']}에는 공사할 매장이 없어요."]
+        if movers:
+            parts.append(
+                f"옮기는 브랜드 {len(movers)}곳 중 {len(movers) - len(breakers)}곳은 새 매장 공사가 끝날 때까지 기존 매장에서 영업해요."
+            )
+        for row in cycle_rows:
+            loop = (
+                " ↔ ".join(row["brands"])
+                if len(row["brands"]) == 2
+                else " → ".join([*row["brands"], row["brands"][0]])
+            )
+            if row["resolved_by"] == "temporary":
+                parts.append(
+                    f"서로 자리를 바꾸는 순환({loop})은 {row['breaker']} 매장을 {_num(row['weeks'])}주 동안 "
+                    f"임시 매장({row['unit_code']})으로 옮겨서 풀어요."
+                )
+            else:
+                parts.append(
+                    f"서로 자리를 바꾸는 순환({loop})은 쓸 수 있는 빈 매장이 없어 {row['breaker']} 매장이 "
+                    f"{_num(row['weeks'])}주 동안 휴점해야 해요."
+                )
+        if entries:
+            first, last = entries[0]["open_week"], entries[-1]["open_week"]
+            when = f"{first}주차" if first == last else f"{first}~{last}주차"
+            parts.append(f"신규 입점 {len(entries)}곳은 {when}에 문을 열어요.")
+        if movers:
+            parts.append(
+                f"예상 영업 손실은 {_krw(lost)}이에요. 옮기는 브랜드가 모두 공사 기간만큼 문을 닫는다고 본 "
+                f"대안 계산의 가정({_krw(naive)})보다 {_krw(naive - lost)} 적어요."
+            )
+        if delay >= 1e6:
+            parts.append(
+                f"공사팀이 모자라 신규 입점이 늦어지는 기회 손실은 {_krw(delay)}이에요. 공사팀을 늘리면 줄어요."
+            )
+        caveats = [
+            f"공사 기간은 매장마다 {_num(weeks)}주로 같다고 봤어요. 실제 기간은 면적과 공사 범위에 따라 달라요.",
+            "옮기는 브랜드는 새 매장 공사가 끝나는 주에 바로 옮긴다고 봤어요. 이사·진열 기간은 넣지 않았어요.",
+            f"손실은 기준 개정 {base_rev}의 연 매출{'(추정치)' if estimated else ''}을 52주로 나눈 주 매출로 계산했어요.",
+            "입점 지연 기회 손실(entry_delay_krw)은 앞 공사를 기다리는 기간을 빼고, 공사팀이 모자라 늦어진 기간만 셌어요.",
+        ]
+        if any(temporary_of.values()):
+            caveats.append(
+                f"임시 매장 매출은 평소의 {ratio:.0%}로 봤어요. 임시 매장 공사 비용은 넣지 않았어요."
+            )
+        if mismatched:
+            caveats.append(
+                f"기준 개정의 {', '.join(sorted(set(mismatched)))}에 대안에 없는 브랜드가 있어 비어 있다고 봤어요. "
+                "도면이 바뀌었다면 대안을 다시 만드세요."
+            )
+        result = _json(
+            {
+                "brief_id": brief_id,
+                "alt_id": alternative["alt_id"],
+                "rev_id": alternative.get("rev_id"),
+                "base_rev": base_rev,
+                "params": {
+                    "crews": crews,
+                    "fitout_weeks": _num(weeks),
+                    "temporary_sales_ratio": ratio,
+                    "use_temporary": use_temporary,
+                },
+                "steps": steps,
+                "total_weeks": _num(total),
+                "lost_krw": lost,
+                "naive_lost_krw": naive,
+                "saved_krw": naive - lost,
+                "entry_delay_krw": delay,
+                "entries": entries,
+                "cycles": cycle_rows,
+                "summary": " ".join(parts),
+                "caveats": caveats,
+                "label": "추정치",
+                "created_at": _now(),
+            }
+        )
+        project["phasing"] = result
+        self._save_project(project)
+        return result
+
     # Report ------------------------------------------------------------------------------------------
     def _floor_svg(self, rev: str, floor: str, marks: dict[str, tuple[str, str]]) -> str:
         model = self._model(rev)
@@ -1674,6 +2368,7 @@ class RelayoutTools:
         brief = self._brief(brief_id)
         project = self._project(brief_id)
         diagnosis, plan, check = project.get("diagnosis"), project.get("plan"), project.get("check")
+        phasing = project.get("phasing")
         esc = html.escape
         out = [
             "<!doctype html><html lang='ko'><head><meta charset='utf-8'>",
@@ -1807,8 +2502,37 @@ class RelayoutTools:
                     out.append(
                         f"<p><b>{esc(floor)}</b></p>{self._floor_svg(chosen['rev_id'], floor, marks[floor])}"
                     )
+        section = 5
+        if phasing:
+            out.append(
+                f"<h2>{section}. 공사 순서({esc(phasing['alt_id'])})</h2><p>{esc(phasing['summary'])}</p>"
+                "<table><tr><th>순서</th><th>주차</th><th>작업</th><th>브랜드</th><th>매장</th><th>먼저 끝나야 하는 순서</th>"
+                "<th>손실</th><th>설명</th></tr>"
+            )
+            for step in phasing["steps"]:
+                where = (
+                    f"{step['from_unit']} → {step['unit_code']}"
+                    if step["action"] == "move"
+                    else step["unit_code"]
+                )
+                weeks = (
+                    f"{step['start_week']}"
+                    if step["start_week"] == step["end_week"]
+                    else f"{step['start_week']}~{step['end_week']}"
+                )
+                out.append(
+                    f"<tr><td class='num'>{step['step']}</td><td>{esc(weeks)}</td><td>{esc(step['action_label'])}</td>"
+                    f"<td>{esc(str(step['brand_name']))}</td><td>{esc(str(where))}</td>"
+                    f"<td>{esc(', '.join(str(s) for s in step['waits_for']) or '-')}</td>"
+                    f"<td class='num'>{_krw(step['lost_krw']) if step['lost_krw'] else '-'}</td><td>{esc(step['note'])}</td></tr>"
+                )
+            out.append(
+                f"</table><p class='muted'>총 {phasing['total_weeks']}주 · 공사팀 {phasing['params']['crews']}개 · "
+                f"예상 영업 손실 {_krw(phasing['lost_krw'])}(모두 휴점 가정 {_krw(phasing['naive_lost_krw'])})</p>"
+            )
+            section += 1
         if check:
-            out.append(f"<h2>5. 도면 대조({esc(check['rev'])})</h2><p>{esc(check['summary'])}</p>")
+            out.append(f"<h2>{section}. 도면 대조({esc(check['rev'])})</h2><p>{esc(check['summary'])}</p>")
             out.append("<table><tr><th>구분</th><th>브랜드</th><th>계획</th><th>도면</th><th>결과</th></tr>")
             for item in check["items"]:
                 out.append(
@@ -1845,6 +2569,8 @@ class RelayoutTools:
             sections.append("진단")
         if project.get("plan"):
             sections += ["대안 비교", "선택안 상세"]
+        if project.get("phasing"):
+            sections.append("공사 순서")
         if project.get("check"):
             sections.append("도면 대조")
         return {

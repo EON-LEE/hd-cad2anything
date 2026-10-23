@@ -3,7 +3,9 @@ import { ApiError, type AtlasDataSource } from '../api/client'
 import { pickDefaultRevision } from '../state/uiState'
 import type { Artifact, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
+import { mockRelayoutReview, mockStoreComparison, relayoutReviewHtml } from './benchmark'
 import { buildMockScript, playScript, sleep } from './chatScripts'
+import { mockFlow } from './flow'
 import { buildMockFloor, buildMockMeta } from './floors'
 import { mockJourney } from './journey'
 import { createMockRelayout } from './relayout'
@@ -17,6 +19,8 @@ export function createMockSource(): AtlasDataSource {
   // Revisions made by relayout plans and uploads stay in this source (tests create several sources).
   const world: MockWorld = { brands: shared.brands, revisions: new Map(shared.revisions), order: [...shared.order] }
   const artifacts = new Map<string, Artifact[]>()
+  /** Blob URLs of review reports by `rev:days` (made once; the mock data does not change). */
+  const reviewReports = new Map<string, string | null>()
   let runCounter = 0
 
   /** Make a revision visible in /api/meta (and drop artifacts cached for an earlier upload of it). */
@@ -100,6 +104,32 @@ export function createMockSource(): AtlasDataSource {
       if (!journey) throw new ApiError(404, '조건에 맞는 고객 동선이 없습니다.')
       return clone(journey)
     },
+    async getFlow(params) {
+      await sleep(250)
+      return clone(mockFlow(world, params))
+    },
+    async getStoreComparison(params) {
+      await sleep(120)
+      return mockStoreComparison(world, params)
+    },
+    async getRelayoutReview(rev, windowDays) {
+      await sleep(120)
+      return mockRelayoutReview(world, rev, windowDays)
+    },
+    relayoutReviewReportUrl(rev, windowDays = 90) {
+      const key = `${rev}:${windowDays}`
+      if (reviewReports.has(key)) return reviewReports.get(key) ?? null
+      let url: string | null = null
+      if (typeof URL.createObjectURL === 'function' && typeof Blob !== 'undefined') {
+        try {
+          url = URL.createObjectURL(new Blob([relayoutReviewHtml(mockRelayoutReview(world, rev, windowDays))], { type: 'text/html;charset=utf-8' }))
+        } catch {
+          url = null
+        }
+      }
+      reviewReports.set(key, url)
+      return url
+    },
     async streamChat(body: ChatRequest, onEvent, signal) {
       runCounter += 1
       const threadId = body.thread_id || `mock-thread-${Date.now().toString(36)}`
@@ -134,6 +164,10 @@ export function createMockSource(): AtlasDataSource {
     async checkRelayout(briefId, rev) {
       await sleep(300)
       return relayout.check(briefId, rev)
+    },
+    async phaseRelayout(briefId, body) {
+      await sleep(400)
+      return relayout.phasing(briefId, body)
     },
     relayoutReportUrl: (briefId) => relayout.reportUrl(briefId),
 

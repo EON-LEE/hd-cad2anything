@@ -6,8 +6,9 @@ import { appReducer, createAppState, type AppState, type ChatItem } from '../sta
 import { createInitialUiState } from '../state/uiState'
 import type { AgUiEvent, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
-import { buildMockScript, chunkText, lastFloorMention, playScript, segmentFromMessage, setMockSpeed } from './chatScripts'
+import { buildMockScript, chunkText, dayTypeFromMessage, flowModeFromMessage, hoursFromMessage, lastFloorMention, playScript, segmentFromMessage, setMockSpeed } from './chatScripts'
 import { buildMockFloor, buildMockMeta } from './floors'
+import { DEFAULT_MAX_TRAVEL_M, DEFAULT_MIN_WIDTH_M, corridorStretches, mockFlow } from './flow'
 import { ESCALATORS, JOURNEY_REV, MOCK_JOURNEY_COUNT, corridorAccess, mockJourney, segmentLabelKo, unitEntrance } from './journey'
 import { createMockSource } from './mockSource'
 import { mockPlace, mockRoute } from './route'
@@ -259,7 +260,7 @@ describe('scripted mock chat streams', () => {
       ['도면에 경로 그리기', 'ui_show_route'],
     ])
     // ui_show_route clears the other analysis overlays like the backend does.
-    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'route', 'floor'])
+    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'flow', 'route', 'floor'])
     expect(state.ui).toMatchObject({ floor: '1F', heatmap: null, highlights: [], edges: [], compareRev: null, journey: null })
     const route = state.ui.route!
     expect(route).toMatchObject({ title: 'ENT-1 정문 → Cafe Halune(3F-C05)', rev: 'R2', via_type: 'escalator', walk_m: 85 })
@@ -328,6 +329,77 @@ describe('scripted mock chat streams', () => {
     expect(segmentFromMessage('고객 한 명')).toEqual({})
     expect(segmentLabelKo('age_band:40s;gender:F;tier:VIP|VVIP')).toBe('40대 여성 VIP·VVIP')
   })
+
+  it('popup prompt draws ranked candidates on the weekend traffic and clears the other overlays', async () => {
+    const state = reduce(await collect(request('주말 팝업 어디가 좋아?')))
+    const run = runOf(state)
+    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+      ['팝업 후보 위치 계산', 'spatial_flow'],
+      ['도면에 팝업 후보 표시', 'ui_show_flow'],
+    ])
+    // ui_show_flow clears the analysis displays, the journey and the route like the backend does.
+    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'route', 'flow', 'floor'])
+    const flow = state.ui.flow!
+    expect(flow).toMatchObject({ mode: 'popup', title: '전체 고객 기준 팝업 후보(주말)', rev: 'R2', query: { day_type: 'weekend', segment: null } })
+    expect(flow.markers.map((m) => m.rank)).toEqual([1, 2, 3, 4, 5])
+    expect(flow.markers.find((m) => m.kind === 'unit')).toMatchObject({ unit_code: '3F-P01', floor: '3F' })
+    expect(state.ui.floor).toBe(flow.markers[0].floor)
+    expect(state.ui).toMatchObject({ journey: null, route: null, heatmap: null, highlights: [], edges: [], compareRev: null })
+    expect(run.answer).toContain('팝업 후보 5곳')
+    expect(run.answer).toContain('1. **')
+  })
+
+  it('traffic prompt reads the segment, the day and the hours; weights follow the floor maximum', async () => {
+    const flow = reduce(await collect(request('40대 여성 VIP 주말 10~14시 유동 많은 통로 보여줘'))).ui.flow!
+    expect(flow.mode).toBe('traffic')
+    expect(flow.title).toBe('40대 여성 VIP 고객의 추정 유동(주말 10~14시)')
+    expect(flow.query).toMatchObject({ segment: { age_band: '40s', gender: 'F', tier: 'VIP' }, day_type: 'weekend', hours: [10, 14] })
+    expect(flow.summary.customer_days).toBeGreaterThan(0)
+    expect(flow.summary.customer_days).toBeLessThan(5000)
+    for (const floor of ['1F', '3F']) {
+      const data = flow.floors[floor]
+      expect(Math.max(...data.segments.map((s) => s.weight ?? 0))).toBe(1)
+      expect(Math.max(...data.segments.map((s) => s.value ?? 0))).toBe(data.max_value)
+      // Stretches lie on the corridor centerlines.
+      for (const segment of data.segments) {
+        for (const p of segment.points) {
+          const q = corridorAccess(p)
+          expect(Math.hypot(q[0] - p[0], q[1] - p[1])).toBeLessThan(1e-6)
+        }
+      }
+    }
+    expect(flow.markers).toEqual([])
+    expect(lastFloorMention('주말 3층 유동')).toBe('3F')
+    expect(hoursFromMessage('오후에 붐비는 통로')).toEqual([14, 18])
+    expect(dayTypeFromMessage('평일 저녁')).toBe('weekday')
+    expect(flowModeFromMessage('비상구까지 너무 먼 매장 있어?')).toBe('egress')
+  })
+
+  it('egress prompt marks narrow walkways in red and far store entrances as warnings', async () => {
+    const state = reduce(await collect(request('통로 폭이랑 피난 거리 점검해줘')))
+    const flow = state.ui.flow!
+    expect(flow.mode).toBe('egress')
+    const narrow = Object.values(flow.floors).flatMap((f) => f.segments)
+    expect(narrow.length).toBeGreaterThan(0)
+    expect(new Set(narrow.map((s) => s.color))).toEqual(new Set(['#c62828']))
+    expect(narrow.every((s) => (s.value ?? 99) < 4)).toBe(true)
+    expect(flow.markers.length).toBeGreaterThan(0)
+    expect(flow.markers.every((m) => m.kind === 'warning' && !!m.unit_code)).toBe(true)
+    expect(state.ui.floor).toBe(flow.markers[0].floor)
+    expect(runOf(state).answer).toContain('기준보다 좁은 통로')
+  })
+
+  it('shows a flow alone and drops it for a journey, a route or later analysis displays', async () => {
+    const flowEvents = await collect(request('주말 팝업 어디가 좋아?'))
+    const routeEvents = await collect(request('정문에서 3층까지 가는 길 알려줘'))
+    const afterFlow = reduce([...routeEvents, ...flowEvents]).ui
+    expect(afterFlow.flow).not.toBeNull()
+    expect(afterFlow.route).toBeNull()
+    expect(reduce([...flowEvents, ...routeEvents]).ui.flow).toBeNull()
+    for (const prompt of ['VIP 고객 한 명의 쇼핑 동선을 보여줘', '3층 저효율 zone과 원인', 'S/S 개편 도면에서 뭐가 바뀌었는지 알려줘', '40대 VIP 고객은 화장품이랑 뭘 같이 사?']) {
+      expect(reduce([...flowEvents, ...(await collect(request(prompt)))]).ui.flow).toBeNull()
+    }
+  })
 })
 
 describe('mock journeys', () => {
@@ -371,6 +443,43 @@ describe('mock routes', () => {
     expect(route.segments[0]).toEqual({ floor: '1F', points: [[51, 40]] })
     expect(route.transitions[0]).toMatchObject({ via: 'ESC-A', floors: 2 })
     expect(route.walk_m).toBe(20)
+  })
+})
+
+describe('mock flows', () => {
+  it('cuts the corridors into stretches that meet only at their ends', () => {
+    const stretches = corridorStretches()
+    expect(stretches.length).toBeGreaterThan(20)
+    for (const [a, b] of stretches) expect(a[0] === b[0] || a[1] === b[1]).toBe(true)
+  })
+
+  it('validates arguments like the backend (400 for bad ones, 404 for an unknown revision)', () => {
+    expect(() => mockFlow(world, { mode: 'crowd' as 'traffic' })).toThrow(ApiError)
+    expect(() => mockFlow(world, { mode: 'traffic', rev: 'R9' })).toThrow(expect.objectContaining({ status: 404 }))
+    expect(() => mockFlow(world, { mode: 'traffic', floor: '8F' })).toThrow(expect.objectContaining({ status: 400 }))
+    expect(() => mockFlow(world, { mode: 'traffic', hours: '14-10' })).toThrow(expect.objectContaining({ status: 400 }))
+    expect(() => mockFlow(world, { mode: 'traffic', day_type: 'holiday' as 'all' })).toThrow(expect.objectContaining({ status: 400 }))
+    const one = mockFlow(world, { mode: 'traffic', floor: '3F', hours: '10-14' })
+    expect(Object.keys(one.floors)).toEqual(['3F'])
+    expect(one.query).toMatchObject({ floor: '3F', hours: [10, 14], day_type: 'all' })
+  })
+
+  it('reports the egress criteria and narrows the warnings with a stricter distance', () => {
+    const egress = mockFlow(world, { mode: 'egress' })
+    expect(egress.summary).toMatchObject({ min_width_m: DEFAULT_MIN_WIDTH_M, max_travel_m: DEFAULT_MAX_TRAVEL_M, warnings: egress.markers.length })
+    expect(egress.legend).toMatchObject({ unit: 'm' })
+    const strict = mockFlow(world, { mode: 'egress', max_travel_m: 70 })
+    expect(strict.markers.length).toBeLessThan(egress.markers.length)
+    expect(mockFlow(world, { mode: 'egress', min_width_m: 2 }).floors['3F'].segments).toEqual([])
+  })
+
+  it('serves flows from the mock data source as copies', async () => {
+    const source = createMockSource()
+    const a = await source.getFlow({ mode: 'popup', day_type: 'weekend' })
+    a.markers[0].title = 'changed'
+    const b = await source.getFlow({ mode: 'popup', day_type: 'weekend' })
+    expect(b.markers[0].title).not.toBe('changed')
+    await expect(source.getFlow({ mode: 'traffic', floor: '9F' })).rejects.toMatchObject({ status: 400 })
   })
 })
 

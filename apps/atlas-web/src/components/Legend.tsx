@@ -1,12 +1,13 @@
 import { useMemo } from 'react'
 import { useData } from '../api/source'
 import { CHANGE_LABELS, CHANGE_ORDER, NO_DATA_COLOR, VACANT_COLOR, changeColor, heatmapColor, heatmapGradientCss, rgbaToCss } from '../lib/colors'
+import { FLOW_MARKER_KIND_LABELS, flowGradientCss, flowLegendInfo, flowMarkerColor, flowModeLabel } from '../lib/flow'
 import type { FloorModel } from '../lib/geometry'
 import { routeLegendText } from '../lib/route'
-import type { HighlightRender } from '../map/prepare'
+import type { FlowRender, HighlightRender } from '../map/prepare'
 import { replaceOp } from '../state/reducer'
 import { usePatchUi } from '../state/store'
-import type { Heatmap, Journey, Route } from '../types/api'
+import type { Flow, Heatmap, Journey, Route } from '../types/api'
 
 interface Props {
   model: FloorModel
@@ -20,6 +21,49 @@ interface Props {
   journeyStopsOnFloor: number
   journeyCardOpen: boolean
   route: Route | null
+  flow: Flow | null
+  /** What the flow draws on the current floor. */
+  flowOnFloor: FlowRender
+}
+
+/** Walkway aggregates: the weight gradient (low/high), backend line colors, marker kinds, unit and note. */
+function FlowLegend({ flow, onFloor }: { flow: Flow; onFloor: FlowRender }) {
+  const info = flowLegendInfo(flow)
+  const legend = flow.legend
+  const hint = [legend?.unit ? `단위 ${legend.unit}` : '', legend?.note ?? ''].filter(Boolean).join(' · ')
+  return (
+    <section className="legend-flow">
+      <h3>{flowModeLabel(flow.mode)}</h3>
+      {info.gradient && (
+        <>
+          <div className="gradient" style={{ background: flowGradientCss() }} aria-hidden="true" />
+          <div className="ticks">
+            <span>{legend?.low ?? '적음'}</span>
+            <span>{legend?.high ?? '많음'}</span>
+          </div>
+          <p className="visually-hidden">선이 굵고 진할수록 {legend?.high ?? '많음'}</p>
+        </>
+      )}
+      {(info.lines.length > 0 || info.markerKinds.length > 0) && (
+        <ul>
+          {info.lines.map((line) => (
+            <li key={line.color}>
+              <span className="swatch flow-line" style={{ background: line.color }} aria-hidden="true" />
+              {line.label}
+            </li>
+          ))}
+          {info.markerKinds.map((kind) => (
+            <li key={kind}>
+              <span className="swatch flow-dot" style={{ background: flowMarkerColor(kind) }} aria-hidden="true" />
+              {FLOW_MARKER_KIND_LABELS[kind] ?? kind}
+            </li>
+          ))}
+        </ul>
+      )}
+      {hint && <p className="hint">{hint}</p>}
+      {onFloor.paths.length === 0 && onFloor.markers.length === 0 && <p className="hint">이 층에는 표시할 내용이 없어요. 점이 있는 층 탭을 눌러 보세요.</p>}
+    </section>
+  )
 }
 
 export function Legend({
@@ -34,6 +78,8 @@ export function Legend({
   journeyStopsOnFloor,
   journeyCardOpen,
   route,
+  flow,
+  flowOnFloor,
 }: Props) {
   const { meta } = useData()
   const patchUi = usePatchUi()
@@ -60,6 +106,7 @@ export function Legend({
       <details open>
         <summary>범례</summary>
         <div className="legend-body">
+        {flow && <FlowLegend flow={flow} onFloor={flowOnFloor} />}
         {route && (
           <section className="legend-route">
             <h3>경로</h3>

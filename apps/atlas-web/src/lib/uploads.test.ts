@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import type { RevisionInfo } from '../types/api'
 import {
   MAX_FILE_BYTES,
+  METADATA_KINDS,
+  METADATA_KIND_LABELS,
   QA_CODE_LABELS,
   floorFromFileName,
   formatBytes,
   isJobSettled,
   jobHasRevision,
+  metadataKindInfo,
   normalizeUploadJob,
   validateDrawingUpload,
   validateMetadataFile,
@@ -74,6 +77,19 @@ describe('validateMetadataFile', () => {
     expect(validateMetadataFile('relayout_brief', { name: 'FW2026.yml' })).toBeNull()
     expect(validateMetadataFile('relayout_brief', { name: 'FW2026.csv' })).toBe('개편 브리프 종류는 YAML·JSON 파일만 올릴 수 있습니다.')
     expect(validateMetadataFile('unknown', { name: 'x.csv' })).toBe('메타데이터 종류를 고르세요.')
+  })
+
+  it('lists the store benchmark tables as CSV·XLSX kinds after the existing ones', () => {
+    expect(METADATA_KINDS.map((k) => k.kind)).toEqual(['brands', 'tenancies', 'leases', 'pos_terminals', 'relayout_brief', 'drawing_profile', 'stores', 'store_kpis'])
+    expect(metadataKindInfo('stores')).toMatchObject({ label: '비교 점포', accept: '.csv,.xlsx', required: ['store_id', 'store_name', 'region', 'format', 'gross_area_m2'] })
+    expect(metadataKindInfo('store_kpis')).toMatchObject({
+      label: '점포 실적',
+      accept: '.csv,.xlsx',
+      required: ['store_id', 'period', 'floor', 'category', 'area_m2', 'sales_krw'],
+    })
+    expect(METADATA_KIND_LABELS.store_kpis).toBe('점포 실적')
+    expect(validateMetadataFile('stores', { name: 'stores.xlsx' })).toBeNull()
+    expect(validateMetadataFile('store_kpis', { name: 'store_kpis.json' })).toBe('점포 실적 종류는 CSV·XLSX 파일만 올릴 수 있습니다.')
   })
 })
 

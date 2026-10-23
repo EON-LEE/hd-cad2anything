@@ -1,7 +1,9 @@
 // Data access for the Atlas API contract (docs/specs/atlas-api.md).
+import { normalizeRelayoutReview, normalizeStoreComparison } from '../lib/benchmark'
 import { categoryColorByIndex } from '../lib/colors'
+import { normalizeFlow } from '../lib/flow'
 import { normalizeJourney, segmentParam } from '../lib/journey'
-import { normalizeBriefList, normalizeCheck, normalizeDiagnosis, normalizePlan, normalizeProject } from '../lib/relayout'
+import { normalizeBriefList, normalizeCheck, normalizeDiagnosis, normalizePhasing, normalizePlan, normalizeProject } from '../lib/relayout'
 import { decodeAgUiMessage, readSseStream } from '../lib/sse'
 import {
   normalizeJobList,
@@ -19,6 +21,8 @@ import type {
   DrawingProfile,
   DrawingUploadRequest,
   FeatureCollection,
+  Flow,
+  FlowParams,
   Journey,
   JourneyParams,
   LayerMapping,
@@ -32,11 +36,16 @@ import type {
   RelayoutBriefSummary,
   RelayoutCheck,
   RelayoutDiagnosis,
+  RelayoutPhasing,
+  RelayoutPhasingRequest,
   RelayoutPlan,
   RelayoutPlanOptions,
   RelayoutProject,
+  RelayoutReview,
   RelayoutSelectRequest,
   ReviewRequest,
+  StoreComparison,
+  StoreComparisonParams,
   UploadJob,
   UploadJobCreated,
   UploadJobSummary,
@@ -53,6 +62,14 @@ export interface AtlasDataSource {
   getLayoutAlternatives(body: LayoutRequest): Promise<LayoutResponse>
   /** GET /api/analytics/journey; rejects with ApiError(404) when no journey matches. */
   getJourney(params: JourneyParams): Promise<Journey>
+  /** GET /api/spatial/flow: estimated traffic, popup candidates or the egress check (the UI state `flow`). */
+  getFlow(params: FlowParams): Promise<Flow>
+  /** GET /api/analytics/stores: the flagship against the peer stores. */
+  getStoreComparison(params: StoreComparisonParams): Promise<StoreComparison>
+  /** GET /api/analytics/relayout-review: sales before and after a revision took effect. */
+  getRelayoutReview(rev: string, windowDays?: number): Promise<RelayoutReview>
+  /** HTML report of the relayout review to open in a new tab; null when this source cannot provide one. */
+  relayoutReviewReportUrl(rev: string, windowDays?: number): string | null
   /** POST /api/chat and deliver each AG-UI event; resolves when the stream ends. */
   streamChat(body: ChatRequest, onEvent: (event: AgUiEvent) => void, signal?: AbortSignal): Promise<void>
   artifactFileUrl(rev: string, generator: string, file: ArtifactFile): string | null
@@ -65,6 +82,8 @@ export interface AtlasDataSource {
   planRelayout(briefId: string, options: RelayoutPlanOptions): Promise<RelayoutPlan>
   selectRelayoutAlternative(briefId: string, body: RelayoutSelectRequest): Promise<RelayoutProject>
   checkRelayout(briefId: string, rev: string): Promise<RelayoutCheck>
+  /** Construction order of an alternative (default: the decided one); stored in the project. */
+  phaseRelayout(briefId: string, body: RelayoutPhasingRequest): Promise<RelayoutPhasing>
   /** HTML proposal to open in a new tab; null when this source cannot provide one. */
   relayoutReportUrl(briefId: string): string | null
 
@@ -111,6 +130,46 @@ export function journeyQuery(params: JourneyParams): string {
   if (params.rev) query.set('rev', params.rev)
   const text = query.toString()
   return text ? `?${text}` : ''
+}
+
+const finiteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+
+/** `?mode=popup&segment=age_band:40s&day_type=weekend&hours=10-14` with empty parameters left out. */
+export function flowQuery(params: FlowParams): string {
+  const query = new URLSearchParams({ mode: params.mode })
+  if (params.rev) query.set('rev', params.rev)
+  if (params.floor) query.set('floor', params.floor)
+  const segment = segmentParam(params.segment)
+  if (segment) query.set('segment', segment)
+  if (params.day_type) query.set('day_type', params.day_type)
+  const hours = Array.isArray(params.hours)
+    ? params.hours.every(finiteNumber)
+      ? `${params.hours[0]}-${params.hours[1]}`
+      : ''
+    : (params.hours ?? '').trim()
+  if (hours) query.set('hours', hours)
+  if (params.category) query.set('category', params.category)
+  if (finiteNumber(params.min_width_m)) query.set('min_width_m', String(params.min_width_m))
+  if (finiteNumber(params.max_travel_m)) query.set('max_travel_m', String(params.max_travel_m))
+  return `?${query}`
+}
+
+/** `?level=floor&metric=sales_per_m2&floor=&category=` with empty parameters left out. */
+export function storesQuery(params: StoreComparisonParams): string {
+  const query = new URLSearchParams()
+  if (params.level) query.set('level', params.level)
+  if (params.metric) query.set('metric', params.metric)
+  if (params.floor) query.set('floor', params.floor)
+  if (params.category) query.set('category', params.category)
+  const text = query.toString()
+  return text ? `?${text}` : ''
+}
+
+/** `?rev=R2&window_days=90` (the window is left out when not given). */
+export function reviewQuery(rev: string, windowDays?: number): string {
+  const query = new URLSearchParams({ rev })
+  if (finiteNumber(windowDays) && windowDays > 0) query.set('window_days', String(Math.round(windowDays)))
+  return `?${query}`
 }
 
 /** FastAPI `detail`: a string, or a list of validation errors (`[{loc, msg}]`). */
@@ -183,6 +242,25 @@ export function createHttpSource(baseUrl = ''): AtlasDataSource {
       if (!journey) throw new ApiError(404, '동선 응답에 표시할 결제 기록이 없습니다.')
       return journey
     },
+    async getFlow(params) {
+      const flow = normalizeFlow(await request<unknown>(`/api/spatial/flow${flowQuery(params)}`))
+      if (!flow) throw new ApiError(500, '통로 집계 응답 형식이 계약과 다릅니다.')
+      return flow
+    },
+    async getStoreComparison(params) {
+      const result = normalizeStoreComparison(await request<unknown>(`/api/analytics/stores${storesQuery(params)}`))
+      if (!result) throw new ApiError(500, '점포 비교 응답 형식이 계약과 다릅니다.')
+      return result
+    },
+    async getRelayoutReview(rev, windowDays) {
+      const result = normalizeRelayoutReview(await request<unknown>(`/api/analytics/relayout-review${reviewQuery(rev, windowDays)}`))
+      if (!result) throw new ApiError(500, '개편 성과 응답 형식이 계약과 다릅니다.')
+      return result
+    },
+    relayoutReviewReportUrl: (rev, windowDays) => {
+      const window = finiteNumber(windowDays) && windowDays > 0 ? `?window_days=${Math.round(windowDays)}` : ''
+      return `${baseUrl}/api/reports/relayout-review/${enc(rev)}${window}`
+    },
     async streamChat(body, onEvent, signal) {
       const res = await fetch(`${baseUrl}/api/chat`, {
         method: 'POST',
@@ -223,6 +301,11 @@ export function createHttpSource(baseUrl = ''): AtlasDataSource {
       const check = normalizeCheck(await post<unknown>(relayout(briefId, 'check'), { rev }))
       if (!check) throw new ApiError(500, '도면 대조 응답 형식이 계약과 다릅니다.')
       return check
+    },
+    async phaseRelayout(briefId, body) {
+      const phasing = normalizePhasing(await post<unknown>(relayout(briefId, 'phasing'), body))
+      if (!phasing) throw new ApiError(500, '공사 순서 응답 형식이 계약과 다릅니다.')
+      return phasing
     },
     relayoutReportUrl: (briefId) => `${baseUrl}${relayout(briefId, 'report')}`,
 

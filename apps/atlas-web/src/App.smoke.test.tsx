@@ -7,10 +7,12 @@ import { normalizeMeta, type AtlasDataSource } from './api/client'
 import { createMockContext, type DataContextValue } from './api/source'
 import { LayoutPanel } from './components/LayoutPanel'
 import { DiagnosisView } from './components/RelayoutBrief'
+import { RelayoutPhasingPanel } from './components/RelayoutPhasing'
+import { ReviewPanel } from './components/ReviewPanel'
 import { SidePanel } from './components/SidePanel'
 import { UploadArea } from './components/UploadArea'
 import { QUICK_PROMPTS } from './lib/prompts'
-import { normalizeDiagnosis } from './lib/relayout'
+import { normalizeDiagnosis, normalizeProject } from './lib/relayout'
 import { setMockSpeed } from './mock/chatScripts'
 import { AppProviders } from './state/AppProviders'
 import { replaceOp, type AppAction, type AppState } from './state/reducer'
@@ -61,6 +63,8 @@ vi.mock('@deck.gl/react', async () => {
         'data-units': data('units').length,
         'data-journey-stops': data('journey-stops').length,
         'data-route-places': (data('route-places') as { role?: string }[]).map((d) => d.role).join(','),
+        'data-flow-paths': data('flow-paths').length,
+        'data-flow-markers': data('flow-markers').length,
       })
     },
   }
@@ -69,6 +73,8 @@ vi.mock('@deck.gl/react', async () => {
 const layerIds = () => screen.getByTestId('deck').getAttribute('data-layers')?.split(',') ?? []
 const journeyStops = () => screen.getByTestId('deck').getAttribute('data-journey-stops')
 const routePlaces = () => screen.getByTestId('deck').getAttribute('data-route-places')
+const flowPaths = () => Number(screen.getByTestId('deck').getAttribute('data-flow-paths'))
+const flowMarkers = () => screen.getByTestId('deck').getAttribute('data-flow-markers')
 const log = () => screen.getByRole('log')
 const floorTab = (code: string) => within(screen.getByRole('tablist', { name: '층' })).getByRole('tab', { name: new RegExp(`^${code}`) })
 
@@ -324,6 +330,62 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     const again = await screen.findByRole('region', { name: 'ENT-1 정문 → Cafe Halune(3F-C05)' })
     fireEvent.keyDown(within(again).getByRole('button', { name: '경로 지우기' }), { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('region', { name: /Cafe Halune/ })).toBeNull())
+  })
+
+  it('draws walkway aggregates with their box, floor marks and legend, alone, and clears them', async () => {
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '주말 팝업 어디가 좋아?' }))
+    const box = await screen.findByRole('region', { name: '전체 고객 기준 팝업 후보(주말)' })
+    await waitFor(() => expect(log().textContent).toContain('팝업 후보 5곳'))
+    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 2단계 · / })).toBeTruthy()
+
+    // Box: eyebrow, summary chips, the floors with data and the ranked candidates.
+    expect(box.querySelector('.flow-eyebrow')?.textContent).toBe('팝업 후보')
+    const chips = within(within(box).getByRole('list', { name: '팝업 후보 요약' })).getAllByRole('listitem')
+    expect(chips.map((c) => c.textContent)).toEqual([expect.stringMatching(/^고객-일 [\d,]+$/), expect.stringMatching(/^이동 [\d,]+건$/), '2개 층', '후보 5곳'])
+    const floorButtons = within(within(box).getByRole('list', { name: /표시가 있는 층/ })).getAllByRole('button')
+    expect(floorButtons.map((b) => b.getAttribute('aria-label'))).toEqual(['1층 팝업 후보 2곳, 도면 보기', '3층 팝업 후보 3곳, 도면 보기'])
+    const candidates = within(within(box).getByRole('list', { name: '팝업 후보 5곳' })).getAllByRole('button')
+    expect(candidates).toHaveLength(5)
+    // The titles already start with "후보 N", so the number is not repeated in the names.
+    expect(candidates[0].getAttribute('aria-label')).toMatch(/^후보 1 · 1F .+, 1층 도면에서 보기$/)
+    expect(candidates[4].getAttribute('aria-label')).toBe('후보 5 · 3F 3F-P01 팝업 매장(지금 Velmira), 3층 도면에서 보기')
+    expect(box.textContent).toContain('설치 가능 여부(소방·통로 폭)는 현장에서 확인해야 해요.')
+
+    // Map: the top candidate's floor with lines and numbered markers; tabs mark both floors; the legend explains it.
+    await waitFor(() => expect(floorTab('1F').getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() => expect(layerIds()).toEqual(expect.arrayContaining(['flow-casing', 'flow-paths', 'flow-markers', 'flow-marker-text'])))
+    expect(flowPaths()).toBeGreaterThan(10)
+    expect(flowMarkers()).toBe('2')
+    expect(floorTab('1F').textContent).toContain('(팝업 후보 2곳)')
+    expect(floorTab('3F').textContent).toContain('(팝업 후보 3곳)')
+    const legend = screen.getByRole('complementary', { name: '범례' })
+    expect(within(legend).getByRole('heading', { name: '팝업 후보' })).toBeTruthy()
+    for (const text of ['적음', '많음', '통로 위 후보 공간', '공실·팝업 매장', '단위 명(추정)']) expect(legend.textContent).toContain(text)
+
+    // A candidate on another floor moves the map there.
+    fireEvent.click(candidates[4])
+    await waitFor(() => expect(floorTab('3F').getAttribute('aria-selected')).toBe('true'))
+    await waitFor(() => expect(flowMarkers()).toBe('3'))
+    expect(floorButtons[1].getAttribute('aria-current')).toBe('true')
+
+    // Drawn alone: a route replaces the flow.
+    fireEvent.click(screen.getByRole('button', { name: '정문에서 3층까지 가는 길 알려줘' }))
+    expect(await screen.findByRole('region', { name: 'ENT-1 정문 → Cafe Halune(3F-C05)' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('region', { name: /팝업 후보/ })).toBeNull())
+    expect(layerIds()).not.toContain('flow-paths')
+    await waitFor(() => expect(log().textContent).toContain('통로망 최단 경로로 계산한 거리라서'))
+
+    // And the flow replaces the route; "표시 지우기" clears it from the map, the tabs and the legend.
+    fireEvent.click(screen.getByRole('button', { name: '주말 팝업 어디가 좋아?' }))
+    const again = await screen.findByRole('region', { name: '전체 고객 기준 팝업 후보(주말)' })
+    await waitFor(() => expect(screen.queryByRole('region', { name: /Cafe Halune/ })).toBeNull())
+    fireEvent.click(within(again).getByRole('button', { name: '표시 지우기' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: /팝업 후보/ })).toBeNull())
+    await waitFor(() => expect(layerIds()).not.toContain('flow-paths'))
+    expect(floorTab('1F').textContent).toBe('1F')
+    expect(floorTab('3F').textContent).toBe('3F')
+    expect(within(screen.getByRole('complementary', { name: '범례' })).queryByRole('heading', { name: '팝업 후보' })).toBeNull()
   })
 
   it('shows one live status line while working, then streams the answer', async () => {
@@ -588,6 +650,131 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
       expect(within(table).getAllByRole('row')).toHaveLength(12)
       expect(screen.getByRole('button', { name: '처음 8곳만 보기' }).getAttribute('aria-expanded')).toBe('true')
     })
+
+    it('computes the construction order with its options and busy state, and shows the stored one on load', async () => {
+      const context = await renderWith(<LayoutPanel />, async (ctx) => {
+        await ctx.source.planRelayout('FW2026', { objective: 'commission', max_moves: 6, downtime_weeks: 2, movable: 'expiring' })
+        return ctx
+      })
+      const block = (await screen.findByRole('heading', { name: '공사 순서' })).closest('section')!
+      expect(block.textContent).toContain('아직 결정한 대안이 없어 순효과가 가장 큰 ALT-1의 공사 순서를 정합니다.')
+      const options = within(block).getByText('계산 조건').closest('details')!
+      expect(options.open).toBe(false)
+      expect(options.textContent).toContain('동시 공사 2곳 · 공사 2주 · 임시 매장 사용')
+      fireEvent.click(within(block).getByText('계산 조건'))
+      const crews = within(block).getByRole('spinbutton', { name: '동시 공사 수' }) as HTMLInputElement
+      expect([crews.min, crews.max, crews.value]).toEqual(['1', '6', '2'])
+      expect((within(block).getByRole('spinbutton', { name: '공사 기간(주)' }) as HTMLInputElement).value).toBe('2')
+      fireEvent.change(crews, { target: { value: '9' } })
+      expect(crews.value).toBe('6')
+      fireEvent.change(crews, { target: { value: '1' } })
+      fireEvent.click(within(block).getByRole('checkbox', { name: '임시 매장 사용' }))
+      expect(options.textContent).toContain('동시 공사 1곳 · 공사 2주 · 임시 매장 안 씀')
+
+      const run = within(block).getByRole('button', { name: '공사 순서 계산' })
+      fireEvent.click(run)
+      // Busy: the button says so and every relayout action waits; a live region announces it.
+      expect(run.textContent).toBe('계산하는 중…')
+      expect(run.hasAttribute('disabled')).toBe(true)
+      expect(block.getAttribute('aria-busy')).toBe('true')
+      expect(screen.getByRole('button', { name: '대안 다시 만들기' }).hasAttribute('disabled')).toBe(true)
+      expect(screen.getAllByRole('status').some((s) => s.textContent === '공사 순서를 계산하는 중입니다.')).toBe(true)
+
+      const table = await within(block).findByRole('table', { name: '주차별 공사 순서 (0주차가 공사 시작)' })
+      await waitFor(() => expect(screen.getAllByRole('status').some((s) => s.textContent === '공사 순서를 계산했습니다. ALT-1 총 4주, 영업 손실 추정 0원.')).toBe(true))
+      expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['주차', '매장', '작업', '브랜드/비고'])
+      const rows = within(table).getAllByRole('row').slice(1)
+      expect(rows.map((r) => within(r).getAllByRole('cell').map((c) => c.textContent))).toEqual([
+        ['0주', '3F-E01', '퇴점', '1. Quorelle'],
+        ['0주', '3F-E02', '퇴점', '2. Ilvora Leather'],
+        ['0~2주', '3F-E01', '이전', '3. Lumivane3F-C06에서'],
+        ['2~4주', '3F-C06', '입점', '4. Norvane Outdoor4주차 개점 · 3번 작업 뒤'],
+      ])
+      expect(within(rows[2]).getByText('이전').getAttribute('title')).toBe('이전 공사')
+      const kpi = (label: string) => within(block).getByText(label).nextElementSibling!.textContent!
+      expect(kpi('대상 대안')).toBe('ALT-1 (FW2026-A1)')
+      expect(kpi('전체 기간')).toBe('4주 (동시 공사 1곳 · 공사 2주)')
+      expect(kpi('영업 손실(추정)')).toMatch(/^0원 \(모두 공사 기간만큼 휴점하면 [\d,.]+(만|억) 원\)$/)
+      expect(within(block).queryByText('입점 지연 기회 손실')).toBeNull()
+      expect(within(block).getByText(/4주차 개점$/, { selector: 'li' }).textContent).toBe('Norvane Outdoor 3F-C06 · 4주차 개점')
+      expect(within(block).getByRole('list', { name: '공사 순서의 가정과 한계' })).toBeTruthy()
+      // The backend's notes on demand.
+      expect(within(table).queryByText('기존 매장 3F-C06에서 영업하다가 공사가 끝나면 옮겨요.')).toBeNull()
+      const notes = within(block).getByRole('button', { name: '작업 설명 보기' })
+      fireEvent.click(notes)
+      expect(notes.getAttribute('aria-pressed')).toBe('true')
+      expect(within(table).getByText('기존 매장 3F-C06에서 영업하다가 공사가 끝나면 옮겨요.')).toBeTruthy()
+      expect(within(block).getByRole('button', { name: '공사 순서 다시 계산' })).toBeTruthy()
+
+      // Stored in the project: shown again on load, with its conditions as the defaults.
+      cleanup()
+      render(
+        <AppProviders context={context}>
+          <LayoutPanel />
+        </AppProviders>,
+      )
+      const reloaded = (await screen.findByRole('heading', { name: '공사 순서' })).closest('section')!
+      expect(await within(reloaded).findByText(/^ALT-1 · 총 4주 · 영업 손실 0원$/)).toBeTruthy()
+      expect(within(reloaded).getByRole('table', { name: '주차별 공사 순서 (0주차가 공사 시작)' })).toBeTruthy()
+      expect(within(reloaded).getByText('계산 조건').closest('details')!.textContent).toContain('동시 공사 1곳 · 공사 2주 · 임시 매장 안 씀')
+    })
+
+    it('shows the totals with the entry delay, cycles, many steps and a notice when the order is for another alternative', () => {
+      const steps = Array.from({ length: 13 }, (_, i) => ({
+        step: i + 1,
+        start_week: Math.floor(i / 2) * 2,
+        end_week: Math.floor(i / 2) * 2 + 2,
+        action: i === 0 ? 'close' : i % 3 === 0 ? 'entry' : 'move',
+        action_label: i === 0 ? '임시 휴점' : null,
+        unit_code: `4F-C${String(i + 1).padStart(2, '0')}`,
+        brand_name: `브랜드 ${i + 1}`,
+        from_unit: i === 0 ? '4F-C06' : `4F-W${String(i + 1).padStart(2, '0')}`,
+        closed_weeks: i === 0 ? 4 : 0,
+        lost_krw: i === 0 ? 66_481_534 : 0,
+        waits_for: i > 1 ? [i] : [],
+      }))
+      const project = normalizeProject({
+        brief: { brief_id: 'FW2026', title: '2026 F/W MD 개편', base_rev: 'R2', downtime_weeks: 2 },
+        plan: { alternatives: [{ alt_id: 'ALT-1', kpi: { net_krw: 1 } }, { alt_id: 'ALT-2', kpi: { net_krw: 2 } }] },
+        selected_alt_id: 'ALT-1',
+        phasing: {
+          alt_id: 'ALT-2',
+          rev_id: 'FW2026-A2',
+          params: { crews: 2, fitout_weeks: 2, use_temporary: true },
+          steps,
+          total_weeks: 10,
+          lost_krw: 66_481_534,
+          naive_lost_krw: 616_032_748,
+          saved_krw: 549_551_214,
+          entry_delay_krw: 147_000_000,
+          entries: [{ brand_name: 'Norvane Outdoor', unit_code: '6F-S02B', open_week: 8, earliest_week: 6 }],
+          cycles: [{ brands: ['Novier & Co', 'Kaelova Intimates'], units: ['4F-C06', '4F-C20'], breaker: 'Novier & Co', resolved_by: 'close', unit_code: null, weeks: 4 }],
+          summary: 'ALT-2의 공사 9건을 공사팀 2개로 나눠 10주 만에 끝내요.',
+          caveats: ['추정치예요.'],
+        },
+      })
+      const onPhase = vi.fn().mockResolvedValue(true)
+      render(<RelayoutPhasingPanel project={project} busy={null} error={null} onPhase={onPhase} />)
+      const kpi = (label: string) => screen.getByText(label).nextElementSibling!.textContent!
+      expect(kpi('전체 기간')).toBe('10주 (동시 공사 2곳 · 공사 2주)')
+      expect(kpi('영업 손실(추정)')).toBe('6,648만 원 (모두 공사 기간만큼 휴점하면 6.2억 원)')
+      expect(kpi('입점 지연 기회 손실')).toBe('1.5억 원 (공사팀이 모자라 늦게 여는 기간)')
+      expect(screen.getByText('ALT-2 기준으로 계산한 결과입니다. 지금 대상은 ALT-1이니 다시 계산해 주세요.')).toBeTruthy()
+      expect(screen.getByText('서로 자리를 바꾸는 순환(Novier & Co ↔ Kaelova Intimates)은 Novier & Co 매장이 4주 동안 휴점해서 풉니다.')).toBeTruthy()
+      expect(screen.getByText('(가장 빠르면 6주차)')).toBeTruthy()
+      const table = screen.getByRole('table', { name: '주차별 공사 순서 (0주차가 공사 시작)' })
+      expect(within(table).getAllByRole('row')).toHaveLength(9)
+      expect(within(table).getByText('휴점').className).toContain('down')
+      expect(within(table).getByText('4F-C06 휴점 4주 · 손실 6,648만 원')).toBeTruthy()
+      const more = screen.getByRole('button', { name: '모두 보기 (13)' })
+      fireEvent.click(more)
+      expect(within(table).getAllByRole('row')).toHaveLength(14)
+      expect(more.getAttribute('aria-expanded')).toBe('true')
+      // The decided alternative is the target; the request leaves alt_id to the backend.
+      expect(screen.getByText('결정한 대안 ALT-1의 공사 순서를 영업 손실이 가장 적도록 정합니다.')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: '공사 순서 다시 계산' }))
+      expect(onPhase).toHaveBeenCalledWith({ crews: 2, fitout_weeks: 2, use_temporary: true })
+    })
   })
   describe('업로드 (review tab)', () => {
     it('validates, uploads a drawing, follows the job, saves a layer mapping and opens the new revision', async () => {
@@ -676,7 +863,14 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
       expect(within(rejected).getByText(/기존 데이터는 바뀌지 않았습니다/)).toBeTruthy()
 
       const table = await screen.findByRole('table', { name: '종류별 메타데이터 현재 상태' })
-      expect(within(table).getAllByRole('row')).toHaveLength(7)
+      expect(within(table).getAllByRole('row')).toHaveLength(9)
+      expect(within(table).getByText('비교 점포')).toBeTruthy()
+      expect(within(table).getByText('점포 실적')).toBeTruthy()
+      // The store benchmark tables are CSV·XLSX kinds.
+      expect(within(kind).getByRole('option', { name: '비교 점포 (stores)' })).toBeTruthy()
+      fireEvent.change(kind, { target: { value: 'store_kpis' } })
+      expect(file.accept).toBe('.csv,.xlsx')
+      expect(screen.getByText(/필수 store_id, period, floor, category, area_m2, sales_krw/)).toBeTruthy()
 
       fireEvent.change(kind, { target: { value: 'relayout_brief' } })
       const yaml = 'brief_id: SS2027\ntitle: 2027 S/S 개편\nseason: SS\nyear: 2027\neffective_date: 2027-03-01\nbase_rev: R2\nfloors: [3F]\n'
@@ -688,6 +882,32 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
       await waitFor(() => expect(within(screen.getByRole('table', { name: '종류별 메타데이터 현재 상태' })).getByText('FW2026, SS2027')).toBeTruthy())
       fireEvent.click(within(accepted).getByRole('button', { name: '시즌 개편에서 열기' }))
       expect(latest.ui.panel).toEqual({ type: 'layout', payload: { brief_id: 'SS2027' } })
+    })
+  })
+
+  describe('개편 성과 보고서 (review tab)', () => {
+    it('links the review report of a revision that replaced another and has sales, with a 30/90-day window', async () => {
+      await renderWith(<ReviewPanel />)
+      // R2, the default revision, replaced R1 and has sales after its effective date.
+      const link = await screen.findByRole('link', { name: '개편 성과 보고서(90일) 열기' })
+      expect(link.getAttribute('href')).toBe('blob:mock-report')
+      expect(link.getAttribute('target')).toBe('_blank')
+      expect(link.getAttribute('rel')).toBe('noopener noreferrer')
+      fireEvent.change(screen.getByRole('combobox', { name: '비교 기간' }), { target: { value: '30' } })
+      expect(screen.getByRole('link', { name: '개편 성과 보고서(30일) 열기' })).toBeTruthy()
+      // The first revision has nothing to compare with.
+      act(() => dispatch({ type: 'ui/patch', ops: [replaceOp('/rev', 'R0')] }))
+      await waitFor(() => expect(screen.queryByRole('link', { name: /개편 성과 보고서/ })).toBeNull())
+      expect(screen.queryByRole('combobox', { name: '비교 기간' })).toBeNull()
+      act(() => dispatch({ type: 'ui/patch', ops: [replaceOp('/rev', 'R1')] }))
+      expect(await screen.findByRole('link', { name: '개편 성과 보고서(30일) 열기' })).toBeTruthy()
+    })
+
+    it('leaves it out for a drawing uploaded for the coming season (no sales yet)', async () => {
+      await renderWith(<ReviewPanel />, withUploadedR3)
+      act(() => dispatch({ type: 'ui/patch', ops: [replaceOp('/rev', 'R3')] }))
+      expect(await screen.findByText('R2 → R3')).toBeTruthy()
+      expect(screen.queryByRole('link', { name: /개편 성과 보고서/ })).toBeNull()
     })
   })
 

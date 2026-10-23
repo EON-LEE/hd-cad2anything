@@ -16,7 +16,7 @@ export const JOURNEY_REV = 'R2'
 
 // Corridor centerlines of the mock floor template (see world.ts BASE_WALKWAYS); the atrium center is
 // left out because the R1 popup store stands in it.
-const CORRIDORS: readonly [Pt, Pt][] = [
+export const CORRIDORS: readonly [Pt, Pt][] = [
   [[15, 15], [105, 15]],
   [[15, 65], [105, 65]],
   [[15, 15], [15, 65]],

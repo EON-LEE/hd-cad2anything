@@ -10,6 +10,9 @@ import {
   unitFillColor,
   unitLabels,
   type EdgeRender,
+  type FlowMarkerRender,
+  type FlowPathRender,
+  type FlowRender,
   type HighlightRender,
   type JourneyNoteRender,
   type JourneyPathRender,
@@ -46,6 +49,8 @@ export interface LayerInput {
   journey: JourneyRender
   /** The route between two places on this floor (empty render data when off). */
   route: RouteRender
+  /** Walkway aggregates on this floor (empty render data when off). */
+  flow: FlowRender
   zoom: number
 }
 
@@ -80,6 +85,13 @@ export function routeMarkerRadiusPx(zoom: number): number {
 export function routeMarkerFontPx(radius: number): number {
   return Math.min(12, Math.max(10, Math.round(radius * 0.72)))
 }
+
+/** Flow markers are ~1.6 m in world units, clamped like the journey stops. */
+const FLOW_MARKER_RADIUS_M = 1.6
+export const FLOW_MARKER_MIN_PX = 11
+export const FLOW_MARKER_MAX_PX = 15
+/** White casing around flow lines, in pixels on top of the line width. */
+export const FLOW_CASING_PX = 3
 
 const rings = (d: PolygonItem) => d.rings
 
@@ -269,6 +281,8 @@ export function buildLayers(input: LayerInput): Layer[] {
       capRounded: true,
     }),
   )
+  // Walkway aggregates lie on the walkways, under compare outlines, highlights and labels.
+  result.push(...flowPathLayers(input.flow))
 
   if (input.compareModel) {
     result.push(
@@ -375,9 +389,61 @@ export function buildLayers(input: LayerInput): Layer[] {
       ),
     )
   }
+  result.push(...flowMarkerLayers(input.flow))
   result.push(...routeLayers(input.route, input.zoom))
   result.push(...journeyLayers(input.journey, input.zoom))
   return result
+}
+
+/** Walkway aggregate lines: white casing, then width and color by weight (or the backend's color). */
+export function flowPathLayers(flow: FlowRender): Layer[] {
+  if (!flow.paths.length) return []
+  const pathProps = {
+    data: flow.paths,
+    getPath: (d: FlowPathRender) => d.path,
+    widthUnits: 'pixels' as const,
+    capRounded: true,
+    jointRounded: true,
+  }
+  return [
+    new PathLayer<FlowPathRender>({ id: 'flow-casing', ...pathProps, getColor: [255, 255, 255, 220], getWidth: (d) => d.width + FLOW_CASING_PX }),
+    new PathLayer<FlowPathRender>({
+      id: 'flow-paths',
+      ...pathProps,
+      getColor: (d) => d.color,
+      getWidth: (d) => d.width,
+      pickable: true,
+      autoHighlight: true,
+      highlightColor: [255, 255, 255, 110],
+    }),
+  ]
+}
+
+/** Numbered flow markers (popup candidates, egress warnings) above the labels and edges. */
+export function flowMarkerLayers(flow: FlowRender): Layer[] {
+  if (!flow.markers.length) return []
+  return [
+    new ScatterplotLayer<FlowMarkerRender>({
+      id: 'flow-markers',
+      data: flow.markers,
+      getPosition: (d) => d.position,
+      getFillColor: (d) => d.color,
+      getLineColor: [255, 255, 255, 255],
+      stroked: true,
+      getRadius: FLOW_MARKER_RADIUS_M,
+      radiusUnits: 'common',
+      radiusMinPixels: FLOW_MARKER_MIN_PX,
+      radiusMaxPixels: FLOW_MARKER_MAX_PX,
+      getLineWidth: 2,
+      lineWidthUnits: 'pixels',
+      pickable: true,
+    }),
+    textLayer(
+      'flow-marker-text',
+      flow.markers.filter((m) => m.text).map((m) => ({ key: m.key, position: m.position, text: m.text, color: [255, 255, 255, 255] as Rgba, size: 12 })),
+      { fontWeight: 700, outlineWidth: 0 },
+    ),
+  ]
 }
 
 /** Route between two places, above highlights and edges: cased blue line, start/end markers with place names, floor-change notes. */
