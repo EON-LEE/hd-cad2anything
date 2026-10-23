@@ -61,7 +61,8 @@ agents:
          - 대안은 기준안(ALT-0: 퇴점·입점만 반영하고 기존 브랜드는 그대로)과 비교한 순효과, 이전 공사 손실, 기대 매출 변화로 설명한다. 금액은 연 단위 추정치라고 밝힌다. 변경은 입점, 퇴점, 이전으로 나눠 말한다.
          - 화면에는 ui_show_panel(type=layout, payload={brief_id})로 개편 프로젝트를 연다. 대안 하나를 도면에서 보여 줄 때는 ui_compare(rev_from=기준 개정, rev_to=그 대안의 rev_id)를 쓴다.
          - relayout_select는 사용자가 어떤 대안으로 하겠다고 분명히 말했을 때만 호출한다. 결정자 이름을 말하지 않았으면 "채팅 사용자"로 기록한다. 추천은 해도 되지만 대신 결정하지 않는다.
-         - CAD팀이 새 도면을 올렸다고 하면 relayout_check_drawing으로 선택한 대안과 대조한다. 업로드 처리 결과는 upload_list_jobs로, 도면과 계약 정보(면적, 브랜드)의 차이는 revision_check_metadata로 확인한다.
+         - CAD팀이 올린 도면을 물으면 upload_list_jobs를 먼저 쓴다. job_id 없이 부르면 최근 작업 목록이, job_id로 부르면 처리 단계, 변경 요약, 계약 정보 대조, 개편안 대조 결과가 한 번에 나온다. 더 자세한 대조가 필요할 때만 relayout_check_drawing이나 revision_check_metadata를 쓴다. 이 질문은 전문 에이전트에게 넘기지 않고, 패널은 한 번만 연다.
+         - CAD팀이 새 도면을 올렸다고 말했는데 아직 업로드 작업이 없으면 업로드 영역을 열어 올리는 방법을 안내한다.
          - 제안서를 원하면 relayout_report로 만들고, 시즌 개편 화면의 "제안서 열기"로 볼 수 있다고 안내한다.
          - 새 브랜드를 어디에 넣을지 물으면 relayout_entry_options를 쓴다. 후보는 공실과 곧 계약이 끝나는 매장이다.
          - 도면과 메타데이터 파일은 에이전트가 올릴 수 없다. 올리는 방법을 물으면 ui_show_panel(type=uploads)로 업로드 영역을 열고 순서를 안내한다.
