@@ -12,7 +12,7 @@ defaults:
   ui_state: {rev: R2, floor: 3F, selection: []}
   expect:
     # 답변은 대화체여야 한다. 도구 이름이나 JSON이 답변에 나오면 실패다.
-    answer_none: ["analytics_", "spatial_", "registry_", "revision_diff", "ui_show", "ui_set", "ui_highlight", "ui_draw", "consult_specialist", "{\"", "```json"]
+    answer_none: ["analytics_", "spatial_", "registry_", "revision_diff", "relayout_", "upload_", "revision_check", "ui_show", "ui_set", "ui_highlight", "ui_draw", "consult_specialist", "{\"", "```json"]
 cases:
   - id: rev-ss-changes
     scenario: 개정 반영
@@ -184,3 +184,41 @@ cases:
     expect:
       answer_any: ["직접", "화면", "검토"]
       answer_none: ["승인했습니다", "승인 처리했습니다"]
+
+  - id: relayout-fw-diagnose
+    scenario: 시즌 개편
+    question: 2026 F/W 개편 계획 기준으로 진단해줘. 어떤 매장이 개편 후보야?
+    expect:
+      tools_any: [relayout_diagnose]
+      answer_any: ["Ravandre Nuit", "4F-E05", "Merelle Nuit", "4F-E02"]
+
+  - id: relayout-fw-plan
+    scenario: 시즌 개편
+    question: F/W 개편 대안을 만들어서 비교해 주고, 제일 나은 안을 도면에서 보여줘.
+    expect:
+      tools_any: [relayout_plan]
+      tools_none: [relayout_select]
+      ui_any: [ui_show_panel, ui_compare]
+      answer_any: ["순효과", "기준안"]
+
+  - id: relayout-entry-options
+    scenario: 시즌 개편
+    question: 아웃도어 브랜드를 하나 새로 들이려면 어느 매장이 좋을까? 계약이 곧 끝나는 자리도 포함해서 봐줘.
+    expect:
+      tools_any: [relayout_entry_options]
+      answer_any: ["6F-", "6층"]
+
+  - id: upload-howto
+    scenario: 도면·메타 업로드
+    question: CAD팀이 다음 시즌 도면을 그렸어. 어디서 어떻게 올리면 돼?
+    expect:
+      ui_any: [ui_show_panel]
+      tools_none: [revision_process]
+      answer_any: ["업로드", "개정 검토"]
+
+  - id: metadata-contract-qa
+    scenario: 도면·메타 업로드
+    question: R2 도면이랑 계약 정보가 안 맞는 매장이 있어?
+    expect:
+      tools_any: [revision_check_metadata]
+      answer_any: ["6F-C14", "7F-N05", "2F-N06", "3F-C13"]

@@ -443,28 +443,48 @@ class LayerClassifier(Protocol):
 # --- manifest ----------------------------------------------------------------------------------------
 
 
+def _layer_name_map(layers: Any) -> dict[str, str]:
+    """Layer name -> semantic from a ``{semantic: name | [names]}`` mapping (unknown semantics ignored)."""
+    mapping: dict[str, str] = {}
+    for semantic, names in dict(layers or {}).items():
+        if semantic not in SEMANTICS:
+            continue
+        for name in [names] if isinstance(names, str) else list(names):
+            mapping[str(name)] = semantic
+    return mapping
+
+
 class ManifestClassifier:
-    """Uses the manifest ``layers`` mapping (semantic -> layer name or list of names) when present."""
+    """Uses the manifest ``layers`` mapping (semantic -> layer name or list of names) when present.
+
+    ``layers_by_floor`` (``{floor: {semantic: names}}``, e.g. human review answers for one floor) wins over
+    ``layers`` on its floor.
+    """
 
     method = "manifest"
 
     def __init__(self, manifest: Mapping[str, Any] | None) -> None:
-        self.mapping: dict[str, str] = {}
-        for semantic, names in dict((manifest or {}).get("layers") or {}).items():
-            if semantic not in SEMANTICS:
-                continue
-            for name in [names] if isinstance(names, str) else list(names):
-                self.mapping[str(name)] = semantic
+        manifest = manifest or {}
+        self.mapping: dict[str, str] = _layer_name_map(manifest.get("layers"))
+        self.by_floor: dict[str, dict[str, str]] = {
+            str(floor): _layer_name_map(layers)
+            for floor, layers in dict(manifest.get("layers_by_floor") or {}).items()
+        }
+
+    def _decide(self, f: LayerFeatures) -> LayerDecision | None:
+        floor_map = self.by_floor.get(f.floor, {})
+        if f.layer in floor_map:
+            semantic = floor_map[f.layer]
+            return LayerDecision(
+                semantic, 1.0, self.method, [f"매니페스트 layers_by_floor 매핑({f.floor}): {semantic}"]
+            )
+        if f.layer in self.mapping:
+            semantic = self.mapping[f.layer]
+            return LayerDecision(semantic, 1.0, self.method, [f"매니페스트 layers 매핑: {semantic}"])
+        return None
 
     def classify(self, layers: Sequence[LayerFeatures]) -> list[LayerDecision | None]:
-        return [
-            LayerDecision(
-                self.mapping[f.layer], 1.0, self.method, [f"매니페스트 layers 매핑: {self.mapping[f.layer]}"]
-            )
-            if f.layer in self.mapping
-            else None
-            for f in layers
-        ]
+        return [self._decide(f) for f in layers]
 
 
 # --- heuristics --------------------------------------------------------------------------------------

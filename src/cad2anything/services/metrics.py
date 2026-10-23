@@ -1,7 +1,8 @@
 """Unit metrics for heatmaps and the productivity API, computed by the analytics toolkit.
 
-Actual revisions use annualized sales from transactions. Hypothetical revisions have no transactions, so
-their sales metrics are the layout scoring model's expected sales (estimates).
+Actual revisions use annualized sales from transactions. Hypothetical revisions, and actual revisions that
+took effect after the last transaction day (for example an uploaded next-season drawing), have no
+transactions, so their sales metrics are the layout scoring model's expected sales (estimates).
 """
 
 from __future__ import annotations
@@ -10,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 
-from cad2anything.model import RevisionKind
 from cad2anything.services.tools import ToolError, Toolkit
 
 METRICS = ("sales_per_m2", "sales_krw", "aov_krw", "gmrof", "walk_to_escalator_m", "low_efficiency")
@@ -31,9 +31,11 @@ def unit_metric(toolkit: Toolkit, metric: str, rev: str, floor: str | None) -> d
         if features is None:
             raise ToolError("공간 특징을 계산할 수 없습니다.")
         return _values(features[features["floor"] == floor] if floor else features, metric)
-    if toolkit._model(rev).revision.kind != RevisionKind.ACTUAL:
+    if not toolkit._has_sales(rev):
         if metric not in EXPECTED_METRICS:
-            raise ToolError("가상 개정은 sales_per_m2와 sales_krw(기대 매출 추정치)만 표시할 수 있습니다.")
+            raise ToolError(
+                "가상 개정이나 아직 실적이 없는 개정은 sales_per_m2와 sales_krw(기대 매출 추정치)만 표시할 수 있습니다."
+            )
         expected = toolkit.expected_unit_sales(rev)
         expected = expected[expected["brand_id"].notna()]
         return _values(expected[expected["floor"] == floor] if floor else expected, EXPECTED_METRICS[metric])

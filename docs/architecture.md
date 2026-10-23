@@ -46,16 +46,16 @@ flowchart TB
 - Orchestrator는 prompt agent다. 화면 제어와 전문 에이전트 상담은 클라이언트 측 함수 도구로 정의하고, Atlas의 에이전트 브리지가 실행한다. 필요하면 hosted agent로 바꿀 수 있다.
 - 전문 에이전트는 Foundry 프로젝트 연결(`RemoteTool`, 사용자 지정 키)을 통해 Atlas의 `/mcp`를 호출한다. 에이전트별로 허용 도구를 제한한다.
 - 작업공간 파일은 PostgreSQL 테이블 `workspace_file`에 미러한다. 구독 정책이 Storage의 공용 네트워크 접근을 막기 때문이다. VNet 통합과 프라이빗 엔드포인트를 갖춘 환경에서는 `WORKSPACE_MIRROR=blob`으로 Blob Storage를 쓸 수 있다.
-- 개정 업로드 이벤트의 자동 처리는 아직 연결하지 않았다. 현재는 API(`POST /api/revisions/{rev}/process`)로 처리한다.
+- 사람이 만든 도면과 메타데이터는 Atlas 업로드 API(`/api/uploads/*`)로 받는다. 도면 처리(파싱 → 층 합치기 → diff → 계약 정보 대조 → 영향 분석 → 재생성 → 개편안 대조)는 Atlas 안의 작업자 스레드 하나가 순서대로 실행한다. 작업 상태는 작업공간(`uploads/jobs/`)에 저장해 미러한다. Event Grid 기반 자동 처리는 연결하지 않았다.
 
 ## 3. 에이전트
 
 | 에이전트 | 형태 | 역할 | 도구 |
 |---|---|---|---|
 | Orchestrator | Prompt agent + Atlas 에이전트 브리지(함수 도구) | 자연어 진입, 계획, 라우팅, 개정 workflow, 승인 요청, 화면 제어 이벤트 | 전문 에이전트 상담, 화면 제어 함수, MCP 조회 도구 |
-| CAD Change Interpreter | Prompt agent | 도면 의미 해석, 개정 diff를 업무 언어로 요약, 신뢰도가 낮은 항목 확인 요청 | `cad.*`, `revision.*`, `spatial.*` |
+| CAD Change Interpreter | Prompt agent | 도면 의미 해석, 개정 diff를 업무 언어로 요약, 업로드 처리 결과와 계약 정보 대조 확인, 신뢰도가 낮은 항목 확인 요청 | `cad.*`, `revision.*`, `upload.*`, `spatial.*` |
 | Space Productivity Analyst | Prompt agent | 평효율, GMROF, 노출도, 교차구매, 층간 이동, 고객 한 명의 하루 결제 순서, 개편 전후 비교, 원인 분해 | `analytics.*`, `spatial.*`, Code Interpreter |
-| Layout Planner | Prompt agent | 제약 기반 배치 대안 생성(가상 개정), 비교, 설명 | `layout.*`, `whatif.*`, `revision.*` |
+| Layout Planner | Prompt agent | 제약 기반 배치 대안 생성(가상 개정), 시즌 개편 진단·대안, 신규 브랜드 위치 추천, 비교, 설명 | `layout.*`, `whatif.*`, `relayout.*`, `revision.*` |
 | Generator | Prompt agent | 등록된 생성기 실행, 즉석 산출물 조합, 등록안 제안 | `registry.*`, `render.*` |
 | Market & Benchmark Researcher | Prompt agent | 공개 업계 동향과 벤치마크 조사(인용 포함) | 웹 검색, 파일 검색 |
 | QA Reviewer | Prompt agent | 검증 규칙 실행, 승인 패키지 작성 | `registry.validate`, `spatial.*` |
@@ -85,6 +85,31 @@ flowchart TB
 | 확인 | 답의 근거를 도면에 표시해 사람이 확인한다. | UI 함수 도구(`ui_show_route` 등)와 `STATE_DELTA` |
 
 도구는 세 단으로 나눈다. 자유 질문은 범용 공간 도구를 조합해 답한다. 생산성, 교차구매, 인접 효과처럼 검증된 지표는 분석 도구가 낸다. 시즌 개편, 개정 반영처럼 절차와 승인이 정해진 일은 워크플로로 처리한다. 질문마다 도구를 새로 만들지 않는다. 범용 도구로 답할 수 없는 질문이 반복될 때만 어휘나 도구를 추가한다.
+
+### 4.2 사람의 입력과 시즌 개편 워크플로
+
+에이전트가 처리하는 입력은 사람이 만든다. 도면은 CAD팀이, 브랜드·계약·개편 브리프는 MD팀과 리싱팀이 올린다. 에이전트는 이 입력을 검증하고 계산 도구를 실행하고 결과를 설명한다. 결정은 사람이 한다.
+
+```mermaid
+flowchart LR
+    B["개편 브리프<br/>(사람: 시즌, 층, 목적, 입점·퇴점)"] --> D["진단<br/>시즌 지수 · 계약 만료 · 저효율"]
+    L["계약 정보 leases<br/>(사람)"] --> D
+    D --> P["대안 계산<br/>기준안 + 최적화 대안<br/>가상 개정 저장"]
+    P --> S{"사람이 대안 선택"}
+    S --> C["CAD팀이 도면 작성·업로드"]
+    C --> U["업로드 처리<br/>파싱 · diff · 계약 대조 · 재생성"]
+    U --> K["계획안과 도면 대조<br/>일치율 · 차이"]
+    K --> R["제안서<br/>(HTML)"]
+```
+
+| 단계 | 사람 | 시스템 |
+|---|---|---|
+| 입력 | 브리프, 계약 정보, 브랜드 표, 도면 규약 프로필을 올린다. | 형식과 참조를 검증하고, 거부하면 이유를 알려 준다. 이전 파일은 백업한다. |
+| 진단·대안 | 조건(목적, 이동 수, 공사 기간)을 바꿔 다시 요청한다. | 결정론적 최적화로 대안을 만든다. 계산 방법은 [MCP 도구](specs/mcp-tools.md) 5절에 있다. |
+| 결정 | 대안 하나를 고른다. | 결정자와 시각을 기록한다. 에이전트는 사용자가 분명히 고른 경우에만 기록한다. |
+| 도면 반영 | CAD팀이 도면을 그려 올리고, 레이어 검토 큐에 답한다. | 올린 층만 바꾸고 나머지 층은 부모 개정에서 가져온다. 계약 정보와 선택한 대안에 대조한다. |
+
+도면 규약은 고객사마다 다르다(레이어 이름, 매장 코드 체계, 단위). 파서는 규약을 코드에 고정하지 않고 [도면 규약 프로필](specs/drawing-profile.md)로 받는다. 기본 프로필은 합성 도면 규약이다. 다른 규약은 합성 "고객사 형식" 도면으로만 검증했다.
 
 ## 5. 개정 루프
 

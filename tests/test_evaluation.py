@@ -39,6 +39,8 @@ def test_golden_cases_load_and_cover_every_scenario(tmp_path):
         "승인 경계",
         "고객 동선",
         "공간 질의",
+        "시즌 개편",
+        "도면·메타 업로드",
     } <= {c["scenario"] for c in cases}
     assert all("consult_specialist" in c["expect"]["answer_none"] for c in cases)
     bad = tmp_path / "bad.yaml"

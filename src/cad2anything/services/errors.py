@@ -10,3 +10,7 @@ except ImportError:  # pragma: no cover - the toolkit also runs without the MCP 
 
 class ToolError(_BaseToolError):
     """Raised for invalid tool arguments or missing data; the message is shown to the agent."""
+
+
+class NotFoundToolError(ToolError):
+    """A ToolError for a missing resource (REST maps it to 404)."""

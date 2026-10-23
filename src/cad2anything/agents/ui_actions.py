@@ -57,8 +57,12 @@ PANEL_PLACES = {
     "layout": "오른쪽 레이아웃 대안 탭을 열었습니다.",
     "table": "도면 아래 표 패널에 표를 열었습니다.",
     "journey": "도면 왼쪽 위에 동선 카드를 열었습니다.",
+    "uploads": "오른쪽 개정 검토 탭에서 도면·메타데이터 업로드 영역을 열었습니다.",
     "none": "패널을 닫았습니다.",
 }
+RELAYOUT_PLACE = (
+    "오른쪽 레이아웃 탭에서 시즌 개편 프로젝트(진단, 대안, 결정, 도면 대조, 제안서)를 열었습니다."
+)
 
 
 @dataclass
@@ -304,7 +308,11 @@ class UiActionHandler:
             payload = table
             output["rows"] = len(table["rows"])
         panel = {"type": panel_type, "payload": payload}
-        output["shown"] = PANEL_PLACES.get(panel_type, "")
+        output["shown"] = (
+            RELAYOUT_PLACE
+            if panel_type == "layout" and payload.get("brief_id")
+            else PANEL_PLACES.get(panel_type, "")
+        )
         return UiActionResult(json.dumps(output, ensure_ascii=False), [_replace("/panel", panel)])
 
     def _ui_clear(self, args: dict[str, Any], ui_state: dict[str, Any]) -> UiActionResult:

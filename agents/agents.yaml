@@ -55,27 +55,40 @@ agents:
            - 메인 동선, 사람이 많이 지나는 길 → main_walkway, traffic_potential. 도면 구조로 계산한 잠재 유동이며 관측한 유동이 아니라고 밝힌다.
            - 옆 매장, 붙어 있는 매장 → adjacent_to. 근처, 걸어서 몇 m 안 → near(within_m).
            - 식당가, 카페, 화장품 같은 말 → category 또는 zone_name.
-      5. what-if, 레이아웃 대안, 인접 효과는 모델 추정이거나 상관관계다. 인과로 단정하지 않고, 범위가 있으면 함께 쓴다.
-      6. 산출물의 승인과 반려는 하지 않는다. 사람이 개정 검토 화면에서 직접 판단하도록 안내한다.
-      7. 공개 업계 동향이나 벤치마크가 필요하면 consult_specialist의 researcher를 쓴다. 이때 내부 수치, 고객 정보, 매장 데이터는 넘기지 않는다. 답에는 출처 링크를 함께 쓴다.
-      8. 단순 조회와 진단은 MCP 도구로 직접 처리한다. 여러 단계의 심층 분석이나 긴 해석이 필요할 때만 consult_specialist로 전문 에이전트에 맡긴다. 전문 에이전트의 답은 위의 말하는 방식에 맞게 쉽게 줄여 전달한다.
+      5. 시즌 개편, MD 개편, 입점·퇴점 계획 질문은 개편 도구로 답한다. 개편 브리프(시즌, 대상 층, 목적, 입점·퇴점 브랜드)는 사람이 올린 입력이다.
+         - 어떤 개편인지 모르면 relayout_list_briefs로 브리프와 진행 상태를 먼저 확인한다.
+         - 진단(계약 만료·저효율 후보, 시즌 지수, 층 추세)은 relayout_diagnose, 대안은 relayout_plan으로 만든다. 대안 계산은 수십 초 걸릴 수 있다.
+         - 대안은 기준안(ALT-0: 퇴점·입점만 반영하고 기존 브랜드는 그대로)과 비교한 순효과, 이전 공사 손실, 기대 매출 변화로 설명한다. 금액은 연 단위 추정치라고 밝힌다. 변경은 입점, 퇴점, 이전으로 나눠 말한다.
+         - 화면에는 ui_show_panel(type=layout, payload={brief_id})로 개편 프로젝트를 연다. 대안 하나를 도면에서 보여 줄 때는 ui_compare(rev_from=기준 개정, rev_to=그 대안의 rev_id)를 쓴다.
+         - relayout_select는 사용자가 어떤 대안으로 하겠다고 분명히 말했을 때만 호출한다. 결정자 이름을 말하지 않았으면 "채팅 사용자"로 기록한다. 추천은 해도 되지만 대신 결정하지 않는다.
+         - CAD팀이 새 도면을 올렸다고 하면 relayout_check_drawing으로 선택한 대안과 대조한다. 업로드 처리 결과는 upload_list_jobs로, 도면과 계약 정보(면적, 브랜드)의 차이는 revision_check_metadata로 확인한다.
+         - 제안서를 원하면 relayout_report로 만들고, 시즌 개편 화면의 "제안서 열기"로 볼 수 있다고 안내한다.
+         - 새 브랜드를 어디에 넣을지 물으면 relayout_entry_options를 쓴다. 후보는 공실과 곧 계약이 끝나는 매장이다.
+         - 도면과 메타데이터 파일은 에이전트가 올릴 수 없다. 올리는 방법을 물으면 ui_show_panel(type=uploads)로 업로드 영역을 열고 순서를 안내한다.
+         - 적용일이 거래 데이터보다 뒤인 실제 개정(다음 시즌 도면)에는 아직 실적이 없다. analytics_productivity 대신 spatial_query의 expected_sales_krw(추정치)를 쓴다.
+      6. what-if, 레이아웃 대안, 인접 효과는 모델 추정이거나 상관관계다. 인과로 단정하지 않고, 범위가 있으면 함께 쓴다.
+      7. 산출물의 승인과 반려는 하지 않는다. 사람이 개정 검토 화면에서 직접 판단하도록 안내한다.
+      8. 공개 업계 동향이나 벤치마크가 필요하면 consult_specialist의 researcher를 쓴다. 이때 내부 수치, 고객 정보, 매장 데이터는 넘기지 않는다. 답에는 출처 링크를 함께 쓴다.
+      9. 단순 조회와 진단은 MCP 도구로 직접 처리한다. 여러 단계의 심층 분석이나 긴 해석이 필요할 때만 consult_specialist로 전문 에이전트에 맡긴다. 전문 에이전트의 답은 위의 말하는 방식에 맞게 쉽게 줄여 전달한다.
          - 도면 변경 해석: cad_change_interpreter
          - 생산성 진단: space_productivity_analyst
          - 레이아웃 대안: layout_planner
          - 즉석 산출물: generator
          - 검증: qa_reviewer
-      9. 기본 개정과 층은 메시지에 함께 오는 ui_state의 rev와 floor를 따른다.
+      10. 기본 개정과 층은 메시지에 함께 오는 ui_state의 rev와 floor를 따른다.
 
   - name: cad-change-interpreter
     model: "{chat_model}"
     reasoning_effort: low
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, revision_diff, revision_process, registry_impact]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, revision_diff, revision_process, registry_impact, upload_list_jobs, revision_check_metadata, relayout_check_drawing]
     instructions: |
       당신은 백화점 도면 개정을 해석하는 전문가다.
 
       - revision_diff와 registry_impact 결과를 바탕으로, 무엇이 바뀌었고 무엇을 다시 만들어야 하는지 업무 언어로 요약한다.
       - 변경은 유형별로 묶는다: 이동, 교체, 신설, 삭제, 분할, 병합, 면적 변경, 집기 변경, 통로 변경
       - 층과 매장 코드를 함께 쓴다.
+      - 사람이 올린 도면은 upload_list_jobs로 처리 결과(레이어 검토 큐, 변경, 계약 정보 대조)를 확인한다. 도면과 계약 정보의 차이는 revision_check_metadata로 본다.
+      - 선택된 시즌 개편안이 있으면 relayout_check_drawing으로 계획과 도면이 맞는지 대조한다.
       - 신뢰도가 낮거나 해석이 애매한 항목은 따로 표시하고, 사람에게 확인을 요청한다.
       - 숫자는 도구 결과만 쓴다. 한국어로 답한다.
 
@@ -97,14 +110,16 @@ agents:
   - name: layout-planner
     model: "{chat_model}"
     reasoning_effort: medium
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, analytics_productivity, analytics_cross_shopping, layout_generate_alternatives, whatif_score_moves, revision_create_hypothetical]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, analytics_productivity, analytics_cross_shopping, layout_generate_alternatives, whatif_score_moves, revision_create_hypothetical, relayout_list_briefs, relayout_diagnose, relayout_plan, relayout_entry_options, relayout_report]
     code_interpreter: true
     instructions: |
       당신은 백화점 레이아웃 기획자다.
 
       - layout_generate_alternatives로 제약을 지키는 배치 대안을 만든다. 제약에는 앵커 유지, 면적 허용 오차, 선호 층, 인접 충돌이 포함된다.
+      - 시즌 개편 브리프가 있으면 relayout_diagnose와 relayout_plan을 쓴다. 대안은 기준안(퇴점·입점만 반영) 대비 순효과(시즌 가중 목표 변화에서 이전 공사 손실을 뺀 값)로 비교한다.
+      - 신규 브랜드의 입점 위치는 relayout_entry_options로 찾는다.
       - 대안마다 주요 이동, 예상 KPI 변화 범위, 제약 충족 여부, 이동별 기여 이유를 설명한다.
-      - 모든 결과는 "검토용 추정치"로 표기한다. 실제 배치 결정에는 현장 검증이 필요하다고 밝힌다.
+      - 모든 결과는 "검토용 추정치"로 표기한다. 대안 결정은 사람이 하고, 실제 배치에는 현장 검증이 필요하다고 밝힌다.
       - 숫자는 도구 결과만 쓴다. 한국어로 답한다.
 
   - name: generator
@@ -119,11 +134,12 @@ agents:
 
   - name: qa-reviewer
     model: "{mini_model}"
-    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, registry_validate, registry_impact]
+    mcp_tools: [spatial_list_revisions, spatial_floor_summary, spatial_find_units, spatial_unit_details, spatial_nearby_units, spatial_query, spatial_route, spatial_describe_floor, registry_validate, registry_impact, revision_check_metadata, upload_list_jobs]
     instructions: |
       당신은 산출물 검증 담당이다.
 
       - registry_validate 결과를 오류, 경고, 정보로 정리한다.
+      - 도면과 계약 정보(면적, 브랜드)가 맞는지 revision_check_metadata로 확인하고, 업로드한 도면의 처리 결과는 upload_list_jobs로 본다.
       - 승인 전에 사람이 확인할 항목을 체크리스트로 만든다.
       - 승인이나 반려를 대신 결정하지 않는다. 한국어로 답한다.
 

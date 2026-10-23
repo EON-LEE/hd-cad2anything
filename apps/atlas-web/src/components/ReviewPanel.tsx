@@ -7,8 +7,9 @@ import { APPROVAL_MODE_LABELS, ARTIFACT_STATUS_LABELS, RISK_LABELS, summarizeVal
 import { floorOfUnitCode } from '../lib/geometry'
 import { replaceOp } from '../state/reducer'
 import { useAppState, usePatchUi } from '../state/store'
-import { parentRevision } from '../state/uiState'
+import { panelPayloadString, parentRevision } from '../state/uiState'
 import type { Artifact, ChangeItem } from '../types/api'
+import { UploadArea, type UploadRequest } from './UploadArea'
 
 const STATUS_TONE: Record<string, string> = {
   awaiting_approval: 'warn',
@@ -164,6 +165,23 @@ export function ReviewPanel() {
   const artifacts = useCachedResource(cacheKeys.artifacts(mode, revTo), () => source.getArtifacts(revTo))
   const [overrides, setOverrides] = useState<Record<string, Artifact>>({})
   const [reviewer, setReviewer] = useState('공간기획 검토자')
+  // Upload area: collapsed until opened by the user or a `panel = {type: "uploads"}` request.
+  const [uploadsOpen, setUploadsOpen] = useState(false)
+  const [uploadsMounted, setUploadsMounted] = useState(false)
+  const [uploadRequest, setUploadRequest] = useState<UploadRequest | null>(null)
+  const uploadsRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    if (ui.panel?.type !== 'uploads') return
+    setUploadRequest({ jobId: panelPayloadString(ui.panel, 'uploads', 'job_id'), seq: panelSeq })
+    setUploadsOpen(true)
+    setUploadsMounted(true)
+    // Intentionally keyed on panelSeq only (like the other panel requests).
+  }, [panelSeq])
+
+  useEffect(() => {
+    if (uploadRequest) uploadsRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+  }, [uploadRequest])
 
   const groups = useMemo(() => {
     const items = changes.data?.change_set.items ?? []
@@ -203,6 +221,29 @@ export function ReviewPanel() {
         <h2>개정 검토</h2>
         <p className="muted">{revFrom ? `${revFrom} → ${revTo}` : `${revTo} (이전 개정 없음)`}</p>
       </header>
+
+      <section ref={uploadsRef} className="upload-section" aria-labelledby="uploads-title">
+        <h3 id="uploads-title">
+          <button
+            type="button"
+            className="disclosure"
+            aria-expanded={uploadsOpen}
+            aria-controls="uploads-body"
+            onClick={() => {
+              setUploadsOpen((open) => !open)
+              setUploadsMounted(true)
+            }}
+          >
+            <span className="disclosure-mark" aria-hidden="true">
+              ▸
+            </span>
+            도면·메타데이터 올리기
+          </button>
+        </h3>
+        <div id="uploads-body" hidden={!uploadsOpen}>
+          {uploadsMounted && <UploadArea request={uploadRequest} />}
+        </div>
+      </section>
 
       <section aria-labelledby="changes-title">
         <h3 id="changes-title">변경 목록{changes.data ? ` (${changes.data.change_set.items.length}건)` : ''}</h3>

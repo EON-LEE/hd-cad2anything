@@ -8,11 +8,20 @@ import type { PatchOperation } from '../lib/jsonPatch'
 /** The contract does not pin the facility shape; accept a plain string or an object. */
 export type Facility = string | { code?: string; name?: string; name_ko?: string }
 
+export type ModelSource = 'parsed' | 'truth' | 'uploaded' | 'hypothetical'
+
 export interface RevisionInfo {
   rev_id: string
   kind: 'actual' | 'hypothetical' | string
   parent_rev_id: string | null
   effective_date: string | null
+  /**
+   * Whether the actual revision's period has sales. `false` for an actual revision that starts after
+   * `data_through` (its analytics are estimates, like a hypothetical revision). Absent on older backends.
+   */
+  has_sales?: boolean
+  /** Model origin (`parsed`, `truth`, `uploaded`, `hypothetical`). Not the free-text `source` tool description. */
+  model_source?: ModelSource | string
   /** Optional extension (e.g. "S/S MD 개편"); shown in the revision selector when present. */
   notes?: string
 }
@@ -31,6 +40,8 @@ export interface CategoryInfo {
 
 export interface Meta {
   facility: Facility
+  /** Last date with transaction data (YYYY-MM-DD); absent on older backends. */
+  data_through?: string | null
   revisions: RevisionInfo[]
   floors: FloorInfo[]
   categories: CategoryInfo[]
@@ -226,6 +237,348 @@ export interface LayoutResponse {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Seasonal relayout ("시즌 개편"): /api/relayout/*
+// ---------------------------------------------------------------------------------------------
+
+export type RelayoutStatus = 'draft' | 'diagnosed' | 'planned' | 'selected' | 'checked'
+export type RelayoutObjective = 'sales' | 'commission'
+export type RelayoutMovable = 'expiring' | 'all'
+
+/** One row of GET /api/relayout/briefs (`entries`/`exits` are counts). */
+export interface RelayoutBriefSummary {
+  brief_id: string
+  title: string
+  season: string
+  year: number | null
+  effective_date: string | null
+  base_rev: string
+  floors: string[]
+  objective: RelayoutObjective | string
+  status: RelayoutStatus | string
+  entries: number
+  exits: number
+  updated_at: string | null
+}
+
+export interface RelayoutEntry {
+  brand_id: string
+  brand_name: string
+  category: string | null
+  category_name: string | null
+  /** [min, max] in m²; null when the brief does not say. */
+  target_area_m2: [number, number] | null
+  preferred_floors: string[]
+  commission_rate: number | null
+  note: string | null
+  /** True for a brand new to the store. */
+  new_brand: boolean | null
+  /** Brand drawing power used by the layout model (1 = average). */
+  attractiveness: number | null
+}
+
+export interface RelayoutExit {
+  brand_id: string
+  brand_name: string
+  unit_code: string | null
+  reason: string | null
+}
+
+export interface RelayoutBrief {
+  brief_id: string
+  title: string
+  season: string
+  /** e.g. "F/W(9~2월)" */
+  season_label: string | null
+  year: number | null
+  effective_date: string | null
+  base_rev: string
+  floors: string[]
+  objective: RelayoutObjective | string
+  /** e.g. "수수료 수익" */
+  objective_label: string | null
+  max_moves: number | null
+  downtime_weeks: number | null
+  movable: RelayoutMovable | string | null
+  keep_anchors: boolean | null
+  /** Allowed area difference for placing a brand (0.15 = ±15%). */
+  area_tolerance: number | null
+  entries: RelayoutEntry[]
+  exits: RelayoutExit[]
+  notes: string | null
+}
+
+export interface DatePeriod {
+  start: string
+  end: string
+  days?: number | null
+}
+
+export interface RelayoutCandidate {
+  unit_code: string
+  floor: string | null
+  brand_id: string | null
+  brand_name: string | null
+  category_name: string | null
+  lease_end: string | null
+  sales_per_m2: number | null
+  /** 0..100. */
+  percentile: number | null
+  low_efficiency: boolean
+  reasons: string[]
+}
+
+export interface RelayoutDiagnosis {
+  season: { code: string; label: string; year: number | null; last: DatePeriod | null; previous: DatePeriod | null }
+  /** Period of the efficiency figures (sales per m², percentiles). */
+  period: DatePeriod | null
+  /** Category's season daily sales / annual daily sales (above 1 = strong in the season). */
+  season_factors: { category: string; category_name: string; factor: number }[]
+  floors: { floor: string; sales_per_m2: number | null; yoy_pct: number | null; low_efficiency: number | null }[]
+  candidates: RelayoutCandidate[]
+  /** All candidates found (the list may be cut short). */
+  candidate_total: number | null
+  vacancies: { unit_code: string; floor: string | null; area_m2: number | null }[]
+  entries: (RelayoutEntry & { feasible_units: number | null; feasible_unit_codes: string[]; season_factor: number | null })[]
+  exits: RelayoutExit[]
+  notes: string[]
+}
+
+export type RelayoutChangeType = 'move' | 'entry' | 'exit'
+
+export interface RelayoutChange {
+  type: RelayoutChangeType | string
+  brand_id: string
+  brand_name: string
+  category_name: string | null
+  /** Absent for an entry. */
+  from_unit: string | null
+  /** Absent for an exit. */
+  to_unit: string | null
+  from_floor: string | null
+  to_floor: string | null
+  delta_krw: number | null
+  explanation: string | null
+}
+
+/** Changes against the plan `baseline` (exits and entries only), except the `vs_current_*` values. */
+export interface RelayoutKpi {
+  sales_delta_krw: number | null
+  sales_low_krw: number | null
+  sales_high_krw: number | null
+  objective_delta_krw: number | null
+  move_cost_krw: number | null
+  /** objective_delta_krw - move_cost_krw */
+  net_krw: number | null
+  vs_current_sales_krw: number | null
+  vs_current_objective_krw: number | null
+  moves: number | null
+}
+
+export interface RelayoutAlternative {
+  /** `ALT-0` is the baseline (exits and entries only, deltas 0); then ALT-1..n. */
+  alt_id: string
+  /** Hypothetical revision saved for this alternative (`{brief_id}-A{n}`). */
+  rev_id: string | null
+  summary: string
+  kpi: RelayoutKpi
+  changes: RelayoutChange[]
+  constraints: { name: string; ok: boolean; detail?: string }[]
+  explanations: string[]
+}
+
+export interface RelayoutPlanOptions {
+  objective?: RelayoutObjective
+  n_alternatives?: number
+  max_moves?: number
+  downtime_weeks?: number
+  movable?: RelayoutMovable
+  extra_exits?: string[]
+  extra_entries?: string[]
+}
+
+export interface RelayoutPlan {
+  params: Record<string, unknown>
+  current: { sales_krw: number | null; objective_krw: number | null }
+  baseline: { sales_krw: number | null; objective_krw: number | null; note: string | null }
+  alternatives: RelayoutAlternative[]
+  /** Entry brands that found no unit. */
+  unplaced: { brand_id: string; brand_name: string; reason: string }[]
+  caveats: string[]
+}
+
+export type RelayoutCheckStatus = 'match' | 'different_unit' | 'missing' | 'not_exited'
+
+export interface RelayoutCheckItem {
+  type: RelayoutChangeType | string
+  /** Korean type name from the backend (e.g. "이전"); null when absent. */
+  type_label: string | null
+  brand_name: string
+  from_unit: string | null
+  planned_unit: string | null
+  actual_unit: string | null
+  status: RelayoutCheckStatus | string
+  /** Korean status name from the backend (e.g. "다른 매장"); null when absent. */
+  status_label: string | null
+}
+
+/** Planned alternative vs the actual drawing the CAD team uploaded. */
+export interface RelayoutCheck {
+  rev: string
+  plan_rev: string | null
+  alt_id: string | null
+  conformance_pct: number | null
+  items: RelayoutCheckItem[]
+  /** Units whose brand changed outside the plan; `*_brand` are brand IDs, `*_brand_name` display names. */
+  unexpected: {
+    unit_code: string
+    before_brand: string | null
+    after_brand: string | null
+    before_brand_name: string | null
+    after_brand_name: string | null
+  }[]
+  area_changes: { unit_code: string; before_m2: number | null; after_m2: number | null; delta_pct: number | null }[]
+  summary: string
+}
+
+/** GET /api/relayout/{brief_id}: diagnosis, plan and check are null until made. */
+export interface RelayoutProject {
+  brief: RelayoutBrief
+  status: RelayoutStatus | string
+  diagnosis: RelayoutDiagnosis | null
+  plan: RelayoutPlan | null
+  selected_alt_id: string | null
+  decided_by: string | null
+  decided_at: string | null
+  check: RelayoutCheck | null
+  report_url: string | null
+  updated_at: string | null
+}
+
+export interface RelayoutSelectRequest {
+  alt_id: string
+  decided_by: string
+}
+
+// ---------------------------------------------------------------------------------------------
+// Drawing and metadata uploads: /api/uploads/*
+// ---------------------------------------------------------------------------------------------
+
+export type UploadJobStatus = 'queued' | 'running' | 'needs_review' | 'done' | 'failed'
+export type UploadStepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed'
+
+export interface DrawingUploadRequest {
+  /** Several DXF files (floor code in each name) or one ZIP. */
+  files: File[]
+  rev_id: string
+  /** Default: latest actual revision with sales. */
+  parent_rev?: string | null
+  /** YYYY-MM-DD */
+  effective_date: string
+  /** Default: the profile's units. */
+  units?: 'm' | 'mm' | null
+  /** Default: `default`. */
+  profile?: string | null
+  /** Default: true. */
+  run_generators?: boolean
+}
+
+export interface UploadJobCreated {
+  job_id: string
+  status: UploadJobStatus | string
+}
+
+export interface UploadJobSummary {
+  job_id: string
+  kind: string
+  status: UploadJobStatus | string
+  rev_id: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface UploadJobStep {
+  name: string
+  label: string
+  status: UploadStepStatus | string
+  message: string | null
+}
+
+/** A layer whose meaning the parser was not sure about. */
+export interface LayerReviewItem {
+  floor: string | null
+  layer: string
+  semantic: string | null
+  /** 0..1 */
+  confidence: number | null
+  alternatives: string[]
+  samples: string[]
+  question: string | null
+}
+
+export interface UploadQaIssue {
+  severity: string
+  code: string
+  unit_code: string | null
+  message: string
+}
+
+export interface UploadJob extends UploadJobSummary {
+  parent_rev: string | null
+  effective_date: string | null
+  profile: string | null
+  files: { name: string; floor: string | null; bytes: number | null }[]
+  floors_uploaded: string[]
+  floors_inherited: string[]
+  steps: UploadJobStep[]
+  parse: { units: number | null; issues: { error: number; warning: number; info: number }; review_queue: LayerReviewItem[] } | null
+  changes: { total: number; by_type: Record<string, number> } | null
+  impact: { generator: string; title_ko: string; risk_tier: string }[]
+  artifacts: { generator: string; status: string }[]
+  qa: { errors: number; warnings: number; infos: number; issues: UploadQaIssue[] } | null
+  relayout_check: { brief_id: string; alt_id: string | null; conformance_pct: number | null; summary: string } | null
+  error: string | null
+}
+
+export interface LayerMapping {
+  layer: string
+  semantic: string
+  floor?: string | null
+}
+
+export interface DrawingProfile {
+  profile_id: string
+  title: string
+  description: string | null
+  units: string | null
+}
+
+export type MetadataKind = 'brands' | 'tenancies' | 'leases' | 'pos_terminals' | 'relayout_brief' | 'drawing_profile'
+
+/** POST /api/uploads/metadata (rejections also come back as 200 with `errors`). */
+export interface MetadataUploadResult {
+  kind: MetadataKind | string
+  status: 'accepted' | 'rejected' | string
+  rows: number | null
+  columns: string[]
+  errors: string[]
+  warnings: string[]
+  /** Where the previous file was kept before replacing the table. */
+  backup: string | null
+  /** Brief or profile ID. */
+  id: string | null
+}
+
+export interface MetadataStatus {
+  kind: MetadataKind | string
+  present: boolean
+  rows: number | null
+  updated_at: string | null
+  required_columns: string[]
+  /** Brief or profile IDs (empty for tables). */
+  items: string[]
+}
+
+// ---------------------------------------------------------------------------------------------
 // GET /api/analytics/journey  (one customer's purchase sequence on one day; also UI state `journey`)
 // ---------------------------------------------------------------------------------------------
 
@@ -402,7 +755,7 @@ export type AgUiEventType = AgUiEvent['type']
 // UI state model (target of STATE_DELTA patches)
 // ---------------------------------------------------------------------------------------------
 
-export type PanelType = 'changes' | 'artifact' | 'layout' | 'table' | 'journey' | 'none'
+export type PanelType = 'changes' | 'artifact' | 'layout' | 'table' | 'journey' | 'uploads' | 'none'
 
 export interface Highlight {
   unit_code: string

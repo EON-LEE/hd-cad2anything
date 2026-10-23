@@ -110,6 +110,8 @@ describe('chat run fold: labels', () => {
     expect(toolLabel('consult_specialist')).toBe('전문 에이전트에게 확인')
     expect(toolLabel('code_interpreter')).toBe('계산 실행')
     expect(toolLabel('analytics_new_metric')).toBe('데이터 분석')
+    expect(toolLabel('relayout_diagnose')).toBe('시즌 개편 확인')
+    expect(toolLabel('upload_job_status')).toBe('업로드 확인')
     expect(toolLabel('mystery')).toBe('작업 중')
     expect(toolLabel('')).toBe('작업 중')
   })
@@ -158,6 +160,11 @@ describe('chat run fold: labels', () => {
       ['화면 바꾸기', 'done'],
     ])
     expect(describeUiChange(null, [{ op: 'replace', path: '/panel', value: { type: 'table', payload: { title: '4층 평효율' } } }])).toBe('표 열기 · 4층 평효율')
+    expect(describeUiChange('ui_show_panel', [{ op: 'replace', path: '/panel', value: { type: 'uploads', payload: { job_id: 'J1' } } }])).toBe('도면 업로드 열기')
+    expect(describeUiChange('ui_show_panel', [{ op: 'replace', path: '/panel', value: { type: 'layout', payload: { brief_id: 'FW2026' } } }])).toBe(
+      '시즌 개편 열기 · FW2026',
+    )
+    expect(describeUiChange('ui_show_panel', [{ op: 'replace', path: '/panel', value: { type: 'layout', payload: { floors: ['3F'] } } }])).toBe('재배치 대안 열기')
     expect(describeUiChange(null, [{ op: 'replace', path: '/rev', value: 'R1' }, { op: 'replace', path: '/compareRev', value: 'R0' }])).toBe(
       'R1 개정 보기 · R0 → R1 비교',
     )

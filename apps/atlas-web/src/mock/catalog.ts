@@ -51,6 +51,9 @@ export const MOCK_FLOORS = [
   { code: '3F', ordinal: 2, name: '여성 컨템포러리', program: ['WOMEN_CONTEMPORARY', 'CAFE', 'ACCESSORIES'] },
 ] as const
 
+/** Last date of the mock transaction data (`data_through`); later actual revisions have no sales. */
+export const MOCK_DATA_THROUGH = '2026-09-30'
+
 export interface GeneratorSpec {
   name: string
   title_ko: string

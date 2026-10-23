@@ -5,20 +5,45 @@ import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType
 
 export const DEFAULT_LAYERS: LayerToggles = { fixtures: false, walkways: true, labels: true }
 
-export const PANEL_TYPES: readonly PanelType[] = ['changes', 'artifact', 'layout', 'table', 'journey', 'none']
+export const PANEL_TYPES: readonly PanelType[] = ['changes', 'artifact', 'layout', 'table', 'journey', 'uploads', 'none']
 
 export function sortedFloors(meta: Meta | null | undefined) {
   return [...(meta?.floors ?? [])].sort((a, b) => a.ordinal - b.ordinal)
 }
 
-/** Latest actual revision (by effective date, then list order); falls back to the last revision. */
+/**
+ * Latest actual revision with sales (`has_sales !== false`, by effective date, then list order).
+ * Falls back to the latest actual revision, then to the last revision.
+ */
 export function pickDefaultRevision(meta: Meta | null | undefined): string {
   const revisions = meta?.revisions ?? []
   const actual = revisions
     .map((r, index) => ({ r, index }))
     .filter(({ r }) => r.kind !== 'hypothetical')
     .sort((a, b) => (a.r.effective_date ?? '').localeCompare(b.r.effective_date ?? '') || a.index - b.index)
-  return actual.at(-1)?.r.rev_id ?? revisions.at(-1)?.rev_id ?? 'R0'
+  const withSales = actual.filter(({ r }) => r.has_sales !== false)
+  return withSales.at(-1)?.r.rev_id ?? actual.at(-1)?.r.rev_id ?? revisions.at(-1)?.rev_id ?? 'R0'
+}
+
+/** Side panel tab that a `panel` request opens; null keeps the current tab. */
+export function panelTab(panel: UiState['panel']): 'review' | 'layout' | null {
+  switch (panel?.type) {
+    case 'changes':
+    case 'artifact':
+    case 'uploads':
+      return 'review'
+    case 'layout':
+      return 'layout'
+    default:
+      return null
+  }
+}
+
+/** Non-empty string payload field of a panel request of the given type (e.g. `uploads` → `job_id`). */
+export function panelPayloadString(panel: UiState['panel'], type: PanelType, key: string): string | null {
+  if (panel?.type !== type) return null
+  const value = panel.payload[key]
+  return typeof value === 'string' && value.trim() !== '' ? value : null
 }
 
 export function pickDefaultFloor(meta: Meta | null | undefined): string {

@@ -185,7 +185,8 @@ def _floor_ko(code: str | None) -> str:
 
 class SpatialTools:
     """Mixin for Toolkit; needs ``_model``, ``_model_key``, ``_memo``, ``unit_features``, ``productivity_frame``,
-    ``expected_unit_sales``, ``_adjacency``, ``_route_planner``, ``_table``, ``_resolve_category``."""
+    ``expected_unit_sales``, ``_adjacency``, ``_route_planner``, ``_table``, ``_resolve_category``,
+    ``_has_sales``."""
 
     # Data --------------------------------------------------------------------------------------------
     def _vocabulary(self, rev: str) -> pd.DataFrame:
@@ -227,7 +228,8 @@ class SpatialTools:
                     "vacant"
                 ].astype(bool)
             period = None
-            if model.revision.kind == RevisionKind.ACTUAL:
+            estimated = False
+            if model.revision.kind == RevisionKind.ACTUAL and self._has_sales(rev):
                 try:
                     kpi = self.productivity_frame(rev, "unit", start, end)
                 except (ToolError, KeyError, ValueError):
@@ -248,10 +250,12 @@ class SpatialTools:
                         on="unit_code",
                         how="left",
                     )
+                    estimated = True
                 except (ToolError, KeyError, ValueError):
                     pass
             frame.attrs["period"] = period
             frame.attrs["kind"] = model.revision.kind.value
+            frame.attrs["estimated"] = estimated
             return frame
 
         return self._memo(key, compute)
@@ -539,6 +543,10 @@ class SpatialTools:
         if table.attrs.get("kind") == RevisionKind.HYPOTHETICAL.value:
             notes.append(
                 "가상 개정이라 실적 대신 레이아웃 모형의 기대 매출(expected_sales_krw, 추정치)을 씁니다."
+            )
+        elif table.attrs.get("estimated"):
+            notes.append(
+                "아직 거래 실적이 없는 개정이라 레이아웃 모형의 기대 매출(expected_sales_krw, 추정치)을 씁니다."
             )
         result["notes"] = list(dict.fromkeys(notes))
         return _json(result)

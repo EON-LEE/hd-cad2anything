@@ -39,20 +39,31 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | layout | `layout_generate_alternatives` | `rev`, `floors?`, `keep_anchors?`, `area_tolerance?`, `max_moves?`, `n_alternatives?`, `movable_categories?`, `allow_cross_floor?`, `save?` | 대안별 이동, KPI 변화 범위, 제약 충족표, 설명, 가상 개정 ID |
 | layout | `whatif_score_moves` | `rev`, `moves` | 이동안의 예상 영향(추정치) |
 | analytics | `analytics_customer_journey` | `customer_id?`, `date?`, `segment?`, `rank?`, `min_stops?`, `start?`, `end?`, `rev?` | 가명 고객 한 명의 하루 결제 순서(시각, 층, 매장, 금액, 경과 시간)와 다음 후보. `rev`를 주면 그 개정이 쓰인 기간에서 고른다. 실제 이동 경로가 아님 |
+| relayout | `relayout_list_briefs` | — | 사람이 올린 개편 브리프와 프로젝트 진행 상태(`draft`·`diagnosed`·`planned`·`selected`·`checked`), 선택된 대안 |
+| relayout | `relayout_diagnose` | `brief_id` | 카테고리 시즌 지수, 대상 층의 ㎡당 매출과 1년 전 같은 시즌 대비 증감, 계약 만료·저효율 후보, 공실, 입점 브랜드별 들어갈 수 있는 매장 수 |
+| relayout | `relayout_plan` | `brief_id`, `objective?`, `n_alternatives?`, `max_moves?`, `downtime_weeks?`, `movable?`, `extra_exits?`, `extra_entries?` | 기준안(ALT-0)과 대안(ALT-1~)별 변경(입점·퇴점·이전), 순효과·목표 변화·이전 비용·기대 매출 변화(추정치), 제약 충족표, 가상 개정 ID(`{brief_id}-A{n}`) |
+| relayout | `relayout_select` | `brief_id`, `alt_id`, `decided_by?` | 사람이 고른 대안을 기록한 프로젝트 |
+| relayout | `relayout_check_drawing` | `brief_id`, `rev`, `alt_id?` | 계획한 변경마다 일치·다른 매장·도면에 없음·퇴점 안 됨, 일치율, 계획에 없는 변경, 3% 넘는 면적 변화 |
+| relayout | `relayout_report` | `brief_id` | 개편 제안서(HTML) 링크와 포함한 절 |
+| relayout | `relayout_entry_options` | `brand?`, `category?`, `rev?`, `floors?`, `season?`, `include_expiring?`, `top?` | 신규 브랜드를 넣을 공실·계약 만료 예정 매장 후보와 기대 매출 범위(추정치), 매장 특징 |
+| upload | `upload_list_jobs` | `job_id?`, `limit?` | 최근 도면 업로드 작업 목록, 또는 작업 하나의 단계·검토 큐·변경·계약 정보 대조·개편안 대조 요약 |
+| upload | `revision_check_metadata` | `rev`, `floors?` | 도면과 계약 정보(`leases`)의 차이: 계약 매장이 도면에 없음, 브랜드 불일치, 면적 3% 초과 차이, 계약 없는 매장 |
 
-금액은 합성 표본 거래에 표본 가중치를 곱한 전체 규모 값이다. 실적 지표는 개정 적용 기간의 합계를 연 단위로 환산한다. 실제 개정의 분석 기간은 그 개정의 적용일부터 다음 실제 개정 적용일 전날까지다.
+금액은 합성 표본 거래에 표본 가중치를 곱한 전체 규모 값이다. 실적 지표는 개정 적용 기간의 합계를 연 단위로 환산한다. 실제 개정의 분석 기간은 그 개정의 적용일부터 다음 실제 개정 적용일 전날까지다. 적용일이 거래 데이터의 마지막 날 뒤인 실제 개정(예: 다음 시즌용으로 올린 도면)은 실적이 없다. 이 개정에서 `analytics_productivity`는 오류를 돌려주고, `spatial_query`는 가상 개정처럼 기대 매출(`expected_sales_krw`, 추정치)을 쓴다.
 
 ## 3. 에이전트별 허용 도구
 
 | 에이전트 | 허용 도구 |
 |---|---|
 | Orchestrator | 전체 MCP 도구 + UI 함수 도구 + `consult_specialist` |
-| CAD Change Interpreter | `spatial_*`, `revision_diff`, `revision_process`, `registry_impact` |
+| CAD Change Interpreter | `spatial_*`, `revision_diff`, `revision_process`, `registry_impact`, `upload_list_jobs`, `revision_check_metadata`, `relayout_check_drawing` |
 | Space Productivity Analyst | `spatial_*`, `analytics_*` |
-| Layout Planner | `spatial_*`, `analytics_productivity`, `analytics_cross_shopping`, `layout_generate_alternatives`, `whatif_score_moves`, `revision_create_hypothetical` |
+| Layout Planner | `spatial_*`, `analytics_productivity`, `analytics_cross_shopping`, `layout_generate_alternatives`, `whatif_score_moves`, `revision_create_hypothetical`, `relayout_list_briefs`, `relayout_diagnose`, `relayout_plan`, `relayout_entry_options`, `relayout_report` |
 | Generator | `spatial_*`, `registry_list_generators`, `registry_run`, `render_adhoc_table` |
-| QA Reviewer | `spatial_*`, `registry_validate`, `registry_impact` |
+| QA Reviewer | `spatial_*`, `registry_validate`, `registry_impact`, `revision_check_metadata`, `upload_list_jobs` |
 | Market & Benchmark Researcher | MCP 없음. 웹 검색만 사용 |
+
+대안 결정(`relayout_select`)은 Orchestrator만 쓸 수 있다. Orchestrator는 사용자가 대안을 분명히 고른 경우에만 호출한다.
 
 ## 4. 공간 어휘
 
@@ -70,3 +81,28 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | `distance_m`(`near` 조건) | 에스컬레이터 근처, 걸어서 30m 안 | 통로망을 따라 걷는 거리. 매장은 통로에 접한 면의 가운데에서 잰다. |
 
 **합성 도면에서 확인한 점:** N·S·E·W 매장 코드가 나타내는 방향과 `side`가 R2의 해당 매장 199개 모두에서 일치한다. 층마다 에스컬레이터 승하차 지점 앞 매장이 `escalator_front`로 잡히고, 여기에는 R1 개편에서 에스컬레이터 정면으로 옮긴 3F-C05가 포함된다.
+
+## 5. 시즌 개편 계산
+
+개편 대안은 LLM이 고르지 않는다. `relayout_plan`이 아래 최적화 문제를 결정론적 탐색(탐욕 개선 → 모의 담금질 3,000회 → 탐욕 마무리, 시드 고정)으로 푼다. 결과는 찾은 배치 중 가장 좋은 것이며 최적해를 증명하지 않는다.
+
+**입력(사람이 정함):** 개편 브리프(시즌, 적용일, 기준 개정, 대상 층, 목적, 최대 이동 수, 공사 기간, 이동 대상, 입점·퇴점 브랜드), 계약 정보(`leases`), 브랜드 카탈로그(목표 면적, 선호 층, 상충 카테고리).
+
+**목적 함수:**
+
+$$\max \sum_{b} w_b \, S(b, u_b) \;-\; \sum_{b \in \text{이전}} w_b \, S(b, u_b^{0}) \cdot \frac{\text{공사 주}}{52}$$
+
+- $S(b, u)$: 브랜드 $b$를 매장 $u$에 둘 때의 연 기대 매출. 기존 [what-if 점수 모델](../../src/cad2anything/layout/whatif.py)(면적 탄력성, 에스컬레이터 보행거리, 인접 교차구매 보너스)이다.
+- $w_b$: 브랜드 가중치 = 카테고리 시즌 지수 × (목적이 수수료 수익이면 수수료율, 매출이면 1).
+- 시즌 지수 = 카테고리의 해당 시즌 월 일평균 매출 ÷ 연간 일평균 매출(2년 거래).
+- 둘째 항은 이전 공사 기간에 잃는 매출(가중치 적용)이다. 입점 브랜드에는 붙지 않는다.
+
+**제약:** 대상 층만 바꾼다. 앵커는 고정한다. 이동 대상(`movable=expiring`)은 적용일 전에 계약이 끝나는 브랜드다. 이동 수는 `max_moves` 이하다. 옮긴 브랜드와 입점 브랜드는 목표 면적 ±허용 오차와 선호 층을 지킨다. 바뀐 인접 쌍에 상충 카테고리가 없어야 한다.
+
+**절차:**
+
+1. 퇴점 브랜드를 빼고, 입점 브랜드를 가중 기대 매출이 가장 큰 빈 매장부터 넣는다. 이것이 기준안(ALT-0)이다.
+2. 기준안에서 위 문제를 풀어 대안(ALT-1~)을 만든다. 두 번째 대안부터는 앞 대안과 같은 이동에 벌점을 줘서 서로 다른 안을 낸다. 입점 브랜드의 위치 조정은 이동 수에 넣지 않는다.
+3. 대안마다 기준안 대비 순효과, 목표 변화, 이전 비용, 기대 매출 변화와 범위, 지금 배치 대비 매출 변화, 제약 충족표를 계산하고 가상 개정으로 저장한다.
+
+사람은 대안 하나를 고른다(`relayout_select`). CAD팀이 그 대안대로 도면을 그려 올리면 `relayout_check_drawing`이 계획과 도면을 대조한다.

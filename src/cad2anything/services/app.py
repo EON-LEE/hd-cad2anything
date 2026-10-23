@@ -65,10 +65,8 @@ def foundry_runtime_factory(toolkit: Toolkit) -> AgentRuntime:
 
 
 def latest_actual_rev(toolkit: Toolkit) -> str:
-    actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
-    if not actual:
-        raise ValueError("실제 개정이 없습니다.")
-    return actual[-1].rev_id
+    """Latest actual revision with transactions (uploaded future revisions have no sales yet)."""
+    return toolkit.latest_sales_rev()
 
 
 def warm_up(toolkit: Toolkit) -> None:
@@ -76,9 +74,8 @@ def warm_up(toolkit: Toolkit) -> None:
     started = time.monotonic()
     try:
         toolkit._journey_rows()
-        actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
-        if actual:
-            toolkit.unit_table(actual[-1].rev_id)
+        if toolkit._actual_revisions():
+            toolkit.unit_table(toolkit.latest_sales_rev())
         logger.info("analytics caches warmed in %.1fs", time.monotonic() - started)
     except Exception:  # warm-up is best effort; requests compute the same caches on demand
         logger.exception("analytics warm-up failed")

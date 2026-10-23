@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useAppState } from '../state/store'
+import { panelTab } from '../state/uiState'
 import { ChatPanel } from './ChatPanel'
 import { GraphPanel } from './GraphPanel'
 import { LayoutPanel } from './LayoutPanel'
@@ -30,9 +31,8 @@ export function SidePanel() {
   // Agent `ui_show_panel` -> switch to the matching tab.
   useEffect(() => {
     if (panelSeq === 0) return
-    const type = ui.panel?.type
-    if (type === 'changes' || type === 'artifact') setActive('review')
-    else if (type === 'layout') setActive('layout')
+    const tab = panelTab(ui.panel)
+    if (tab) setActive(tab)
     // Intentionally keyed on panelSeq only.
   }, [panelSeq])
 

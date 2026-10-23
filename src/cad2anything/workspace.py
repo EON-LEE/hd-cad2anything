@@ -2,12 +2,16 @@
 
 Layout under the root directory (mirrored to PostgreSQL or Azure Blob Storage when configured)::
 
-    drawings/{rev}/{variant}/manifest.json, *.dxf   CAD inputs
+    drawings/{rev}/{variant}/manifest.json, *.dxf   CAD inputs (uploads use variant "uploaded")
     models/{rev}.json                                SpatialModel.to_dict() plus a "meta" block
     changes/{rev_from}__{rev_to}.json                ChangeSet.to_dict() plus a "meta" block
     reports/{rev}.json                               CAD parse reports
-    business/*.csv[.gz], planted_effects.json        synthetic business tables
+    business/*.csv[.gz], planted_effects.json        business tables (synthetic or uploaded)
+    business/relayout_briefs/{brief_id}.yaml         seasonal relayout briefs (human input)
+    business/drawing_profiles/{profile_id}.yaml      drawing convention profiles (human input)
     artifacts/{rev}/{generator}/...                  generator outputs and artifact.json
+    projects/relayout/{brief_id}.json                relayout projects (diagnosis, plan, decision, check)
+    uploads/jobs/{job_id}.json                       upload job state and results
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import pandas as pd
 from cad2anything.model import ChangeSet, Revision, RevisionKind, SpatialModel
 
 ACTUAL_ORDER = {RevisionKind.ACTUAL: 0, RevisionKind.HYPOTHETICAL: 1}
+SUBDIRS = ("drawings", "models", "changes", "reports", "business", "artifacts", "projects", "uploads")
 
 
 class Workspace:
@@ -30,8 +35,9 @@ class Workspace:
         self.mirror = mirror
         self._lock = threading.RLock()
         self._models: dict[str, tuple[float, SpatialModel, dict[str, Any]]] = {}
+        self._headers: dict[str, tuple[tuple[int, int], Revision, dict[str, Any]]] = {}
         self._tables: dict[str, tuple[float, pd.DataFrame]] = {}
-        for sub in ("drawings", "models", "changes", "reports", "business", "artifacts"):
+        for sub in SUBDIRS:
             (self.root / sub).mkdir(parents=True, exist_ok=True)
 
     # Paths -----------------------------------------------------------------------------------------
@@ -53,12 +59,22 @@ class Workspace:
             self.mirror.push(path, self.root)
 
     # Models ----------------------------------------------------------------------------------------
+    def _header(self, path: Path) -> tuple[Revision, dict[str, Any]]:
+        """Revision and meta block of a model file, cached per file version (no geometry is built)."""
+        stat = path.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+        with self._lock:
+            cached = self._headers.get(path.stem)
+            if cached and cached[0] == key:
+                return cached[1], cached[2]
+        data = json.loads(path.read_text(encoding="utf-8"))
+        revision, meta = Revision.from_dict(data["revision"]), data.get("meta", {})
+        with self._lock:
+            self._headers[path.stem] = (key, revision, meta)
+        return revision, meta
+
     def revisions(self) -> list[Revision]:
-        revisions = []
-        for path in sorted((self.root / "models").glob("*.json")):
-            with path.open(encoding="utf-8") as handle:
-                data = json.load(handle)
-            revisions.append(Revision.from_dict(data["revision"]))
+        revisions = [self._header(path)[0] for path in sorted((self.root / "models").glob("*.json"))]
         return sorted(
             revisions, key=lambda r: (ACTUAL_ORDER[r.kind], r.effective_date or "9999-12-31", r.rev_id)
         )
@@ -70,7 +86,10 @@ class Workspace:
         return self._load_model(rev_id)[0]
 
     def model_meta(self, rev_id: str) -> dict[str, Any]:
-        return self._load_model(rev_id)[1]
+        path = self._model_path(rev_id)
+        if not path.exists():
+            raise KeyError(f"revision {rev_id} has no spatial model")
+        return self._header(path)[1]
 
     def _load_model(self, rev_id: str) -> tuple[SpatialModel, dict[str, Any]]:
         path = self._model_path(rev_id)
@@ -140,6 +159,10 @@ class Workspace:
     def has_table(self, name: str) -> bool:
         return self._table_path(name) is not None
 
+    def table_path(self, name: str) -> Path | None:
+        """Path of a business table (``.csv`` or ``.csv.gz``), or None."""
+        return self._table_path(name)
+
     def table(self, name: str) -> pd.DataFrame:
         path = self._table_path(name)
         if path is None:
@@ -151,13 +174,54 @@ class Workspace:
                 return cached[1]
             frame = pd.read_csv(path, low_memory=False)
             stat = path.stat()
-            frame.attrs["fingerprint"] = f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}"
+            frame.attrs["fingerprint"] = f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
             self._tables[name] = (mtime, frame)
             return frame
 
     def business_json(self, name: str) -> dict[str, Any] | None:
         path = self.root / "business" / f"{name}.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    # Generic files ---------------------------------------------------------------------------------
+    def write_bytes(self, rel_path: str | Path, data: bytes, publish: bool = True) -> Path:
+        """Atomically write ``data`` under the root (parents created) and mirror it unless ``publish`` is False."""
+        path = self.root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        if publish:
+            self._publish(path)
+        return path
+
+    def write_text(self, rel_path: str | Path, text: str, publish: bool = True) -> Path:
+        return self.write_bytes(rel_path, text.encode("utf-8"), publish)
+
+    def write_json(self, rel_path: str | Path, data: Any, publish: bool = True) -> Path:
+        text = json.dumps(data, ensure_ascii=False, indent=1, default=str)
+        return self.write_bytes(rel_path, text.encode("utf-8"), publish)
+
+    def read_json(self, rel_path: str | Path) -> Any | None:
+        path = self.root / rel_path
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def publish(self, path: Path) -> None:
+        """Mirror one file under the root (no-op without a mirror)."""
+        self._publish(Path(path))
+
+    def delete_file(self, rel_path: str | Path) -> bool:
+        """Delete a workspace file and its mirrored copy; True when the local file existed."""
+        path = self.root / rel_path
+        existed = path.is_file()
+        path.unlink(missing_ok=True)
+        with self._lock:
+            if path.parent.name == "models":
+                self._models.pop(path.stem, None)
+                self._headers.pop(path.stem, None)
+        delete = getattr(self.mirror, "delete", None)
+        if callable(delete):
+            delete(Path(rel_path).as_posix())
+        return existed
 
     def publish_tree(self, path: Path) -> None:
         """Mirror every file under ``path`` (for example a generator output directory)."""

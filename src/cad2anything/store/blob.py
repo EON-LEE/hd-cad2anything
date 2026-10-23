@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PREFIXES = ("models/", "changes/", "reports/", "business/", "drawings/", "artifacts/")
+DEFAULT_PREFIXES = (
+    "models/",
+    "changes/",
+    "reports/",
+    "business/",
+    "drawings/",
+    "artifacts/",
+    "projects/",
+    "uploads/",
+)
 
 
 def _credential() -> Any:
@@ -39,6 +49,12 @@ class BlobMirror:
         name = Path(path).relative_to(root).as_posix()
         with Path(path).open("rb") as handle:
             self.container.upload_blob(name, handle, overwrite=True)
+
+    def delete(self, name: str) -> None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        with contextlib.suppress(ResourceNotFoundError):
+            self.container.delete_blob(name)
 
     def push_tree(self, root: Path, prefixes: tuple[str, ...] = DEFAULT_PREFIXES) -> int:
         count = 0
