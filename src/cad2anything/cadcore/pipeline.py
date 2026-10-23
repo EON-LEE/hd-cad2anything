@@ -47,14 +47,27 @@ from cad2anything.cadcore.geometry import (
 )
 from cad2anything.cadcore.labels import (
     LINK_NAMES_KO,
-    UNIT_CODE_RE,
     label_amenities,
     label_openings,
     label_units,
     label_vertical_links,
     label_zones,
 )
-from cad2anything.cadcore.reader import DrawingSet, FloorDrawing, Issue, Primitive, read_revision
+from cad2anything.cadcore.profile import (
+    DrawingProfile,
+    active_profile,
+    merge_layers,
+    resolve_profile,
+    use_profile,
+)
+from cad2anything.cadcore.reader import (
+    DrawingSet,
+    FloorDrawing,
+    Issue,
+    Primitive,
+    read_manifest,
+    read_revision,
+)
 from cad2anything.catalog import AMENITY_TYPES, CATEGORIES, FIXTURE_TYPES, FLOOR_HEIGHT_M, FLOOR_PROGRAMS
 from cad2anything.model import (
     Entity,
@@ -335,7 +348,7 @@ def _units(fl: _FloorLayers, result: _FloorResult, used: set[str]) -> list[Entit
                     floor,
                 )
             )
-        if not UNIT_CODE_RE.match(code):
+        if active_profile().is_nonstandard(code):
             result.issues.append(
                 Issue("info", "unit_code_nonstandard", f"표준 형식이 아닌 매장 코드: {code}", floor)
             )
@@ -866,6 +879,20 @@ def _relations(model: SpatialModel, mode: str, issues: list[Issue]) -> list[Rela
     return contains + [r for r in derived if r.type != RelationType.CONTAINS]
 
 
+def model_relations(model: SpatialModel, mode: str = "full") -> tuple[list[Relation], list[Issue]]:
+    """Relations of a whole model computed as ``parse_revision`` does (``full`` or ``basic``), plus issues
+    explaining any fallback. Used when floors from several sources are merged into one model."""
+    issues: list[Issue] = []
+    return _relations(model, mode, issues), issues
+
+
+def _classification_manifest(manifest: Mapping[str, Any], profile: DrawingProfile) -> Mapping[str, Any]:
+    """Manifest whose ``layers`` include the profile's layer names (manifest entries win on conflict)."""
+    if not profile.layers:
+        return manifest
+    return {**manifest, "layers": merge_layers(profile.layers, manifest.get("layers"))}
+
+
 # --- entry point -------------------------------------------------------------------------------------
 
 
@@ -879,17 +906,47 @@ def parse_revision(
     review_threshold: float = REVIEW_THRESHOLD,
     fixture_resolver: FixtureResolver | None = None,
     floors: Sequence[str] | None = None,
+    profile: DrawingProfile | Mapping[str, Any] | None = None,
 ) -> tuple[SpatialModel, ParseReport]:
     """Parse ``rev_dir`` (manifest + DXF per floor) into a spatial model and a QA report.
 
     ``brand_registry``: list of dicts, DataFrame or CSV path with ``brand_id``, ``brand_name``, ``category``.
     ``classifier``: optional layer classifier (e.g. ``LlmClassifier``) consulted for layers whose manifest or
     heuristic confidence is below ``review_threshold``. ``relations``: ``full`` (spatial.features when
-    available) or ``basic`` (CONTAINS and ON_FLOOR only).
+    available) or ``basic`` (CONTAINS and ON_FLOOR only). ``profile``: drawing conventions (``DrawingProfile``
+    or its document); default: the manifest's inline ``drawing_profile``, else the synthetic conventions.
     """
+    rev_dir = Path(rev_dir)
+    active = resolve_profile(profile, read_manifest(rev_dir))
+    with use_profile(active):
+        return _parse_revision(
+            rev_dir,
+            brand_registry,
+            classifier,
+            rev_id,
+            relations=relations,
+            review_threshold=review_threshold,
+            fixture_resolver=fixture_resolver,
+            floors=floors,
+            profile=active,
+        )
+
+
+def _parse_revision(
+    rev_dir: Path,
+    brand_registry: Any,
+    classifier: LayerClassifier | None,
+    rev_id: str | None,
+    *,
+    relations: str,
+    review_threshold: float,
+    fixture_resolver: FixtureResolver | None,
+    floors: Sequence[str] | None,
+    profile: DrawingProfile,
+) -> tuple[SpatialModel, ParseReport]:
     started = time.perf_counter()
     timings: dict[str, float] = {}
-    drawings = read_revision(Path(rev_dir), floors)
+    drawings = read_revision(rev_dir, floors, units=profile.units)
     timings["read"] = time.perf_counter() - started
     mark = time.perf_counter()
     geometry = {d.floor: build_layer_geometry(d) for d in drawings.floors}
@@ -897,7 +954,10 @@ def parse_revision(
     timings["geometry_features"] = time.perf_counter() - mark
     mark = time.perf_counter()
     classification = classify_layers(
-        features, drawings.manifest, fallback=classifier, threshold=review_threshold
+        features,
+        _classification_manifest(drawings.manifest, profile),
+        fallback=classifier,
+        threshold=review_threshold,
     )
     timings["classify"] = time.perf_counter() - mark
     mark = time.perf_counter()
@@ -954,6 +1014,7 @@ def parse_revision(
         layer_table=classification.table(),
         issues=issues,
         stats={
+            "profile_id": profile.profile_id,
             "floors": floor_stats,
             "totals": dict(totals),
             "entities": len(model.entities),

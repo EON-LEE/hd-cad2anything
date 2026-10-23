@@ -29,6 +29,8 @@ manifest.json + 층별 DXF
 
 레이어 의미는 다음 16개 중 하나다: `exterior`, `wall`, `unit`, `unit_label`, `zone`, `zone_label`, `walkway`, `escalator`, `elevator`, `stair`, `opening`, `amenity`, `amenity_label`, `fixture`, `annotation`, `noise`. 판정 단위는 (층, 레이어)다. 같은 이름의 레이어도 층마다 내용이 다를 수 있기 때문이다.
 
+레이어 이름, 매장 코드 체계, 단위가 고객사마다 다르면 [도면 규약 프로필](drawing-profile.md)로 맞춘다. 프로필의 레이어 매핑은 매니페스트 `layers`에 합쳐지고, 매장·존·수직동선·출입구 코드는 프로필의 패턴으로 읽어 표준 코드로 바꾼다. 사람이 업로드 작업의 검토 큐에서 고친 층별 매핑은 매니페스트 `layers_by_floor`에 저장되고 다른 매핑보다 먼저 쓰인다. 프로필을 지정하지 않으면 기본 프로필(`default`, 이 문서의 합성 도면 규약)을 쓴다.
+
 | 순서 | 단계 | 동작 | 결과 표시 |
 |---|---|---|---|
 | 1 | 매니페스트 | 매니페스트 `layers`(의미 → 레이어 이름)에 있는 레이어를 그대로 사용한다. | `method=manifest`, 신뢰도 1.0 |

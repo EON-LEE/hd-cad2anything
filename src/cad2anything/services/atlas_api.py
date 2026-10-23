@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from shapely.geometry import mapping
@@ -21,6 +21,7 @@ from cad2anything.generators import approve, load_specs, plan_impact, reject
 from cad2anything.generators.spatial import _category_color
 from cad2anything.model import EntityKind
 from cad2anything.services import metrics
+from cad2anything.services.errors import NotFoundToolError
 from cad2anything.services.tools import ToolError, Toolkit
 
 FEATURE_KINDS = (
@@ -70,6 +71,25 @@ class LayoutRequest(BaseModel):
     constraints: dict[str, Any] = Field(default_factory=dict)
 
 
+class RelayoutPlanRequest(BaseModel):
+    objective: str | None = Field(default=None, pattern="^(sales|commission)$")
+    n_alternatives: int = Field(default=3, ge=1, le=5)
+    max_moves: int | None = Field(default=None, ge=0, le=30)
+    downtime_weeks: float | None = Field(default=None, ge=0, le=26)
+    movable: str | None = Field(default=None, pattern="^(expiring|all)$")
+    extra_exits: list[str] = Field(default_factory=list, max_length=10)
+    extra_entries: list[str] = Field(default_factory=list, max_length=10)
+
+
+class RelayoutSelectRequest(BaseModel):
+    alt_id: str = Field(min_length=1, max_length=16)
+    decided_by: str = Field(min_length=1, max_length=60)
+
+
+class RelayoutCheckRequest(BaseModel):
+    rev: str = Field(min_length=1, max_length=32)
+
+
 LAYOUT_OPTIONS = {
     "keep_anchors",
     "area_tolerance",
@@ -102,10 +122,14 @@ def _tool_error(exc: ToolError) -> HTTPException:
 
 
 def _latest_actual_rev(toolkit: Toolkit) -> str:
-    actual = sorted(toolkit._actual_revisions(), key=lambda r: r.effective_date or "")
-    if not actual:
-        raise HTTPException(status_code=404, detail="실제 개정이 없습니다.")
-    return actual[-1].rev_id
+    try:
+        return toolkit.latest_sales_rev()
+    except ToolError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _relayout_error(exc: ToolError) -> HTTPException:
+    return HTTPException(status_code=404 if isinstance(exc, NotFoundToolError) else 400, detail=str(exc))
 
 
 def create_api(
@@ -131,8 +155,19 @@ def create_api(
 
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
+        through = toolkit.data_through()
         revisions = [
-            r.to_dict() | {"model_source": ws.model_meta(r.rev_id).get("source")} for r in ws.revisions()
+            r.to_dict()
+            | {
+                "model_source": ws.model_meta(r.rev_id).get("source"),
+                "has_sales": bool(
+                    through is not None
+                    and r.kind.value == "actual"
+                    and r.effective_date
+                    and r.effective_date <= through.isoformat()
+                ),
+            }
+            for r in ws.revisions()
         ]
         floors: list[dict[str, Any]] = []
         if revisions:
@@ -146,6 +181,7 @@ def create_api(
         ]
         return {
             "facility": {"code": FACILITY_CODE, "name": FACILITY_NAME},
+            "data_through": through.isoformat() if through else None,
             "revisions": revisions,
             "floors": floors,
             "categories": categories,
@@ -421,6 +457,58 @@ def create_api(
             )
         keys = ("rev", "fit_rev", "period", "constraints", "label", "caveats", "note")
         return {key: result.get(key) for key in keys} | {"alternatives": alternatives}
+
+    @app.get("/api/relayout/briefs")
+    def relayout_briefs() -> list[dict[str, Any]]:
+        return toolkit.relayout_briefs()
+
+    @app.get("/api/relayout/{brief_id}")
+    def relayout_project(brief_id: str) -> dict[str, Any]:
+        try:
+            return toolkit.relayout_project(brief_id)
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    @app.post("/api/relayout/{brief_id}/diagnose")
+    def relayout_diagnose(brief_id: str) -> dict[str, Any]:
+        try:
+            return toolkit.relayout_diagnose(brief_id)
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    @app.post("/api/relayout/{brief_id}/plan")
+    def relayout_plan(brief_id: str, request: RelayoutPlanRequest | None = None) -> dict[str, Any]:
+        body = request or RelayoutPlanRequest()
+        try:
+            return toolkit.relayout_plan(brief_id, **body.model_dump())
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    @app.post("/api/relayout/{brief_id}/select")
+    def relayout_select(brief_id: str, request: RelayoutSelectRequest) -> dict[str, Any]:
+        try:
+            return toolkit.relayout_select(brief_id, request.alt_id, request.decided_by)
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    @app.post("/api/relayout/{brief_id}/check")
+    def relayout_check(brief_id: str, request: RelayoutCheckRequest) -> dict[str, Any]:
+        try:
+            return toolkit.relayout_check_drawing(brief_id, request.rev)
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    @app.get("/api/relayout/{brief_id}/report", response_class=HTMLResponse)
+    def relayout_report(brief_id: str) -> HTMLResponse:
+        try:
+            return HTMLResponse(toolkit.relayout_report_html(brief_id))
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
+    if hasattr(toolkit, "upload_drawings"):
+        from cad2anything.services.upload_api import build_upload_router
+
+        app.include_router(build_upload_router(toolkit))
 
     web_dir = web_dir or (Path(os.environ["ATLAS_WEB_DIR"]) if os.environ.get("ATLAS_WEB_DIR") else None)
     if web_dir and web_dir.exists():

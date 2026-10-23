@@ -2,7 +2,8 @@
 
 Models come from parsing the drawings with the CAD pipeline when it is available. Otherwise the
 generator's ground-truth layouts are imported and labeled ``source: truth`` so that nobody mistakes
-them for parsed results.
+them for parsed results. Finally the synthetic relayout inputs (current leases and the FW2026 brief,
+``cad2anything.mockgen.relayout``) are added when missing.
 
 Usage:
     uv run --no-sync python -m cad2anything.bootstrap --source data/generated --root data/workspace
@@ -96,6 +97,13 @@ def bootstrap(source: Path, root: Path, mode: str = "auto", variant: str = "clea
             change_set = ChangeSet.from_dict(json.loads(truth_changes.read_text(encoding="utf-8")))
             workspace.save_change_set(change_set, {"source": "truth"})
             summary["changes"][f"{rev_from}->{rev_to}"] = "truth"
+    if workspace.has_table("brands") and workspace.has_table("tenancies"):
+        from cad2anything.mockgen.relayout import ensure_relayout_metadata
+
+        relayout = ensure_relayout_metadata(workspace)
+        summary["relayout"] = {
+            k: relayout.get(k) for k in ("written", "skipped", "leases", "entries", "exits")
+        }
     return summary
 
 

@@ -509,8 +509,9 @@ def discover_levels(rev_dir: Path) -> list[dict[str, Any]]:
     return levels
 
 
-def read_revision(rev_dir: Path, floors: Sequence[str] | None = None) -> DrawingSet:
-    """Read the manifest and every floor DXF (optionally only ``floors``)."""
+def read_revision(rev_dir: Path, floors: Sequence[str] | None = None, units: str | None = None) -> DrawingSet:
+    """Read the manifest and every floor DXF (optionally only ``floors``); ``units`` is the fallback when the
+    manifest has no ``units`` (for example a drawing profile's units)."""
     rev_dir = Path(rev_dir)
     manifest = read_manifest(rev_dir)
     issues: list[Issue] = []
@@ -529,5 +530,5 @@ def read_revision(rev_dir: Path, floors: Sequence[str] | None = None) -> Drawing
         if not path.is_file():
             issues.append(Issue("error", "file_missing", f"{floor} 도면 파일이 없다: {path.name}", floor))
             continue
-        drawings.append(read_floor(path, floor, manifest.get("units")))
+        drawings.append(read_floor(path, floor, manifest.get("units") or units))
     return DrawingSet(rev_dir, manifest, levels, drawings, issues)

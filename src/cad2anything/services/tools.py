@@ -28,7 +28,9 @@ from cad2anything.model import (
 )
 from cad2anything.services.analytics_tools import AnalyticsTools
 from cad2anything.services.errors import ToolError
+from cad2anything.services.relayout_tools import RelayoutTools
 from cad2anything.services.spatial_tools import SpatialTools
+from cad2anything.services.upload_tools import UploadTools
 from cad2anything.workspace import Workspace
 
 DEFAULT_LIMIT = 50
@@ -48,12 +50,13 @@ def _category_name(code: str | None) -> str:
     return CATEGORIES[code].name_ko if code in CATEGORIES else (code or "")
 
 
-class Toolkit(AnalyticsTools, SpatialTools):
+class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools):
     def __init__(self, workspace: Workspace, use_postgis: bool | None = None):
         self.ws = workspace
         self.use_postgis = bool(os.environ.get("POSTGRES_HOST")) if use_postgis is None else use_postgis
         self._features: dict[tuple[str, float], pd.DataFrame] = {}
         self._init_analytics()
+        self._init_uploads()
 
     # Helpers ---------------------------------------------------------------------------------------
     def _model(self, rev: str) -> SpatialModel:

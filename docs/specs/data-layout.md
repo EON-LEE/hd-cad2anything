@@ -21,6 +21,28 @@ data/generated/
   business/data_card.md
 ```
 
+### 1.1 작업공간
+
+`bootstrap`이 생성 데이터로 작업공간(`data/workspace/`, Git 제외)을 만든다. Atlas는 이 작업공간을 PostgreSQL에 미러하고, 업로드한 파일과 처리 결과도 같은 구조로 저장한다.
+
+```text
+data/workspace/
+  drawings/{rev}/{clean|messy|uploaded}/      # 도면. 업로드한 도면은 uploaded
+  models/{rev}.json                          # 공간 모델(실제·가상 개정)
+  changes/{from}__{to}.json                  # 변경 집합
+  reports/{rev}.json                         # 파싱 보고서
+  business/*.csv[.gz]                        # 업무 표(브랜드, 테넌시, POS, 고객, 거래)
+  business/leases.csv                        # 현재 계약: lease_id, brand_id, unit_code, lease_start, lease_end, contract_area_m2, commission_rate
+  business/relayout_briefs/{brief_id}.yaml   # 시즌 개편 브리프(사람 입력)
+  business/drawing_profiles/{id}.yaml        # 도면 규약 프로필(사람 입력)
+  business/_backup/                          # 메타데이터를 교체하기 전 파일
+  artifacts/{rev}/{generator}/               # 산출물
+  projects/relayout/{brief_id}.json|.html    # 개편 프로젝트(진단, 대안, 결정, 도면 대조)와 제안서
+  uploads/jobs/{job_id}.json                 # 도면 업로드 작업 상태와 결과
+```
+
+`leases.csv`와 `FW2026` 브리프는 합성 데이터다. `bootstrap`이 없을 때 만들고(`cad2anything.mockgen.relayout`), 계약 면적·브랜드 불일치 4건을 일부러 심는다(6F-C14, 2F-N06, 7F-N05 면적, 3F-C13 브랜드).
+
 ## 2. 개정과 기간
 
 | 개정 | 종류 | 적용일 | 설명 |
@@ -40,6 +62,8 @@ data/generated/
 - 매니페스트
 - 브랜드와 테넌시
 - 거래 수천 건
+- `metadata/`: 업로드 시연용 계약 정보(`leases.csv`)와 개편 브리프(`FW2026.yaml`)
+- `uploads/`: 기본 규약과 다른 "고객사 형식" 합성 도면(ZIP)과 그 도면 규약 프로필
 
 ## 4. 금지 사항
 

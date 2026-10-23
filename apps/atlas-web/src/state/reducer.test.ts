@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ChatRun } from '../lib/chatRun'
 import type { AgUiEvent, UiState } from '../types/api'
 import { appReducer, createAppState, touchedKeys, type AppAction, type AppState, type ChatItem } from './reducer'
-import { createInitialUiState } from './uiState'
+import { createInitialUiState, panelPayloadString, panelTab } from './uiState'
 
 const ui: UiState = createInitialUiState(null, { rev: 'R2', floor: '3F' })
 
@@ -194,6 +194,45 @@ describe('appReducer: chat runs', () => {
     expect(state.ui.journey).toBeNull()
     // "ENT-1" alone does not say which floor the walk starts on.
     expect(state.ui.route).toBeNull()
+  })
+
+  it('accepts the uploads panel and the layout brief payload, and still drops unknown panel types', () => {
+    let state = run(createAppState(ui), [
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'uploads', payload: { job_id: 'J20261023-0001' } } }] },
+    ])
+    expect(state.ui.panel).toEqual({ type: 'uploads', payload: { job_id: 'J20261023-0001' } })
+    expect(state.panelSeq).toBe(1)
+    expect(panelTab(state.ui.panel)).toBe('review')
+    expect(panelPayloadString(state.ui.panel, 'uploads', 'job_id')).toBe('J20261023-0001')
+
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'uploads' } }] }])
+    expect(state.ui.panel).toEqual({ type: 'uploads', payload: {} })
+    expect(panelPayloadString(state.ui.panel, 'uploads', 'job_id')).toBeNull()
+    expect(state.panelSeq).toBe(2)
+
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'layout', payload: { brief_id: 'FW2026' } } }] }])
+    expect(state.ui.panel).toEqual({ type: 'layout', payload: { brief_id: 'FW2026' } })
+    expect(panelTab(state.ui.panel)).toBe('layout')
+    expect(panelPayloadString(state.ui.panel, 'layout', 'brief_id')).toBe('FW2026')
+    expect(panelPayloadString(state.ui.panel, 'uploads', 'brief_id')).toBeNull()
+
+    // The older layout payload keeps working.
+    const alternatives = [{ id: 'ALT-3F-A', moves: [] }]
+    state = run(state, [
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'layout', payload: { rev: 'R2', floors: ['3F'], alternatives } } }] },
+    ])
+    expect(state.ui.panel).toEqual({ type: 'layout', payload: { rev: 'R2', floors: ['3F'], alternatives } })
+    expect(panelPayloadString(state.ui.panel, 'layout', 'brief_id')).toBeNull()
+
+    // A malformed payload is replaced by {}; an unknown type closes the panel without throwing.
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'uploads', payload: ['J1'] } }] }])
+    expect(state.ui.panel).toEqual({ type: 'uploads', payload: {} })
+    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'upload_wizard', payload: { job_id: 'J1' } } }] }])
+    expect(state.ui.panel?.type).toBe('none')
+    expect(panelTab(state.ui.panel)).toBeNull()
+    expect(panelPayloadString(state.ui.panel, 'uploads', 'job_id')).toBeNull()
+    expect(panelTab({ type: 'changes', payload: {} })).toBe('review')
+    expect(panelTab(null)).toBeNull()
   })
 
   it('handles RUN_ERROR, content without START, aborts and streams that end early', () => {

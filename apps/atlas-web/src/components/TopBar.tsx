@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { facilityName } from '../api/client'
 import { useData } from '../api/source'
-import { REVISION_KIND_LABELS } from '../lib/format'
+import { REVISION_KIND_LABELS, revisionMarkers } from '../lib/format'
 import { journeyStopCounts } from '../lib/journey'
 import { ROUTE_FLOOR_ROLE_LABELS, routeFloorRoles } from '../lib/route'
 import { replaceOp } from '../state/reducer'
@@ -20,6 +20,8 @@ export function TopBar() {
 
   const compareOn = !!ui.compareRev
   const knownRevisions = new Set(meta.revisions.map((r) => r.rev_id))
+  const current = meta.revisions.find((r) => r.rev_id === ui.rev)
+  const currentMarkers = current ? revisionMarkers(current) : []
   const defaultCompare = (rev: string) => parentRevision(meta, rev) ?? meta.revisions.find((r) => r.rev_id !== rev)?.rev_id ?? null
 
   const selectRevision = (rev: string) => {
@@ -62,10 +64,24 @@ export function TopBar() {
                   {r.rev_id} · {REVISION_KIND_LABELS[r.kind] ?? r.kind}
                   {r.effective_date ? ` · ${r.effective_date}` : ''}
                   {r.notes ? ` · ${r.notes}` : ''}
+                  {revisionMarkers(r).map((marker) => ` · ${marker}`).join('')}
                 </option>
               ))}
             </select>
           </label>
+          {currentMarkers.includes('업로드') && (
+            <span className="badge" title="사람이 올린 도면으로 만든 개정입니다.">
+              업로드
+            </span>
+          )}
+          {currentMarkers.includes('실적 없음') && (
+            <span
+              className="badge warn"
+              title={`적용 기간에 거래 실적이 없습니다${meta.data_through ? `(거래 데이터는 ${meta.data_through}까지)` : ''}. 분석 값은 추정치입니다.`}
+            >
+              실적 없음
+            </span>
+          )}
           <label className="toggle">
             <input
               type="checkbox"

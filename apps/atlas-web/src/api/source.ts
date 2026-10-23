@@ -7,6 +7,11 @@ export interface DataContextValue {
   meta: Meta
   /** Why mock mode is active (null in live mode). */
   mockReason: string | null
+  /**
+   * Reload `/api/meta` (e.g. after an upload created a revision) and publish it to the app.
+   * Provided by <AppProviders>; absent on hand-built context values.
+   */
+  refreshMeta?: () => Promise<Meta>
 }
 
 export const DataContext = createContext<DataContextValue | null>(null)

@@ -176,10 +176,21 @@ class LayoutAlternative:
     explanations: list[str]
     label: str = ESTIMATE_LABEL
     caveats: list[str] = field(default_factory=lambda: list(ENGINE_CAVEATS))
+    sales_before: float = math.nan
+    sales_after: float = math.nan
+    sales_low: float = math.nan
+    sales_high: float = math.nan
+    move_cost_krw: float = 0.0
+    objective_label: str = "기대 매출"
 
     @property
     def delta(self) -> float:
         return self.objective_after - self.objective_before
+
+    @property
+    def net_delta(self) -> float:
+        """Objective change minus the move (downtime) cost."""
+        return self.delta - self.move_cost_krw
 
     @property
     def all_constraints_satisfied(self) -> bool:
@@ -194,10 +205,16 @@ class LayoutAlternative:
             "label": self.label,
             "seed": self.seed,
             "summary": self.summary,
+            "objective_label": self.objective_label,
             "objective_before": self.objective_before,
             "objective_after": self.objective_after,
             "objective_low": self.objective_low,
             "objective_high": self.objective_high,
+            "sales_before": self.sales_before,
+            "sales_after": self.sales_after,
+            "sales_low": self.sales_low,
+            "sales_high": self.sales_high,
+            "move_cost_krw": self.move_cost_krw,
             "spillover_krw": self.spillover_krw,
             "moves": [asdict(m) for m in self.moves],
             "assignment": self.assignment,
@@ -218,11 +235,13 @@ def check_constraints(
     brands: pd.DataFrame | Mapping[str, BrandInfo],
     adjacency_pairs: pd.DataFrame | None,
     constraints: LayoutConstraints,
+    free: Collection[str] = (),
 ) -> pd.DataFrame:
     """Verify an assignment against the constraints; one row per rule with violations listed in ``detail``.
 
     Rules on relocated brands only; existing placements are grandfathered (an adjacency conflict counts
-    only when at least one of the two units changed brand).
+    only when at least one of the two units changed brand). ``free`` brands (new entries) are not moves:
+    they skip the anchor, filter, cross-floor and move-count rules but must fit area and preferred floor.
     """
     infos = brand_info(brands)
     base_assignment = normalize_assignment(base_assignment)
@@ -233,7 +252,9 @@ def check_constraints(
     base_pos = {b: u for u, b in base_assignment.items() if b is not None}
     counts = Counter(b for b in assignment.values() if b is not None)
     new_pos = {b: u for u, b in assignment.items() if b is not None}
-    moved = sorted(b for b, u in new_pos.items() if base_pos.get(b) != u)
+    free_ids = set(free)
+    moved = sorted(b for b, u in new_pos.items() if base_pos.get(b) != u and b not in free_ids)
+    placed = sorted({*moved, *(b for b in new_pos if b in free_ids)})
     changed_units = sorted(
         u for u in set(base_assignment) | set(assignment) if base_assignment.get(u) != assignment.get(u)
     )
@@ -276,7 +297,7 @@ def check_constraints(
     area_violations = []
     floor_violations = []
     cross_violations = []
-    for b in moved:
+    for b in placed:
         info, unit = infos.get(b), new_pos[b]
         if info is None:
             continue
@@ -288,14 +309,16 @@ def check_constraints(
             floor_violations.append(
                 f"{b}→{unit}({floor_of.get(unit, '?')}) 선호 층 {'/'.join(info.preferred_floors)}"
             )
-        if not constraints.allow_cross_floor and floor_of.get(unit) != floor_of.get(
-            base_pos.get(b, ""), None
+        if (
+            b not in free_ids
+            and not constraints.allow_cross_floor
+            and floor_of.get(unit) != floor_of.get(base_pos.get(b, ""), None)
         ):
             cross_violations.append(f"{b} {base_pos.get(b)}→{unit}")
     add(
         "면적 적합",
         f"목표 면적 범위 ±{constraints.area_tolerance:.0%} 안의 매장으로만 이동",
-        len(moved),
+        len(placed),
         area_violations,
     )
     add(
@@ -303,7 +326,7 @@ def check_constraints(
         "선호 층이 있는 브랜드는 선호 층으로만 이동"
         if constraints.require_preferred_floor
         else "선호 층 미적용",
-        len(moved),
+        len(placed),
         floor_violations,
     )
     add(
@@ -357,13 +380,21 @@ Change = list[tuple[int, int]]
 
 
 class _Search:
-    """Index-based search state over the units in scope (brands fixed outside the filter)."""
+    """Index-based search state over the units in scope (brands fixed outside the filter).
+
+    ``weights`` scale each brand's expected sales into the objective (for example season x commission);
+    ``move_cost`` is charged once for every non-free brand away from its base unit; ``free`` brands (new
+    entries pre-placed in the base assignment) may go to any feasible unit without counting as a move.
+    """
 
     def __init__(
         self,
         scorer: AssignmentScorer,
         base_assignment: Mapping[str, str | None],
         constraints: LayoutConstraints,
+        weights: Mapping[str, float] | None = None,
+        move_cost: Mapping[str, float] | None = None,
+        free: Collection[str] = (),
     ):
         self.scorer = scorer
         self.constraints = constraints
@@ -380,8 +411,17 @@ class _Search:
         for u, b in enumerate(self.base):
             if b >= 0:
                 self.base_pos[b] = u
+        free_ids = set(free)
+        self.free = [bid in free_ids for bid in self.bids]
+        self.weight = [float((weights or {}).get(bid, 1.0)) for bid in self.bids]
+        self.cost = [
+            0.0 if self.free[b] else float((move_cost or {}).get(bid, 0.0)) for b, bid in enumerate(self.bids)
+        ]
         self.info = [scorer.brands.get(b) for b in self.bids]
-        self.movable = [info is not None and constraints.is_movable(info) for info in self.info]
+        self.movable = [
+            info is not None and (self.free[b] or constraints.is_movable(info))
+            for b, info in enumerate(self.info)
+        ]
         self.dest: list[list[int]] = []
         self.dest_all: list[list[int]] = []
         self.value: list[dict[int, float]] = []
@@ -398,7 +438,10 @@ class _Search:
                 self.value.append({home: 0.0})
             else:
                 self.value.append(
-                    {u: scorer.location_value(self.bids[b], self.codes[u]) for u in self.dest_all[b]}
+                    {
+                        u: self.weight[b] * scorer.location_value(self.bids[b], self.codes[u])
+                        for u in self.dest_all[b]
+                    }
                 )
         self.dest_set = [set(d) for d in self.dest]
         self.movers = [b for b in range(len(self.bids)) if self.movable[b] and self.dest[b]]
@@ -415,6 +458,7 @@ class _Search:
             return False
         if (
             not self.constraints.allow_cross_floor
+            and not self.free[b]
             and unit.floor != self.scorer.units[self.codes[self.base_pos[b]]].floor
         ):
             return False
@@ -472,16 +516,24 @@ class _Search:
     def evaluate(
         self, st: _State, change: Change, mu: float, placed: Mapping[tuple[int, int], int]
     ) -> tuple[float, float, int] | None:
-        """(raw gain, penalized gain, change in moved-brand count), or None when a rule is violated."""
+        """(net gain, penalized gain, change in moved-brand count), or None when a rule is violated.
+
+        The net gain is the objective change minus the change in move costs."""
         new_pos = {b: u for u, b in change if b >= 0}
         moved_delta = sum(
-            int(u != self.base_pos[b]) - int(st.pos[b] != self.base_pos[b]) for b, u in new_pos.items()
+            int(u != self.base_pos[b]) - int(st.pos[b] != self.base_pos[b])
+            for b, u in new_pos.items()
+            if not self.free[b]
         )
         if st.n_moved + moved_delta > self.constraints.max_moves:
             return None
         for b, u in new_pos.items():
             if u != self.base_pos[b] and u not in self.dest_set[b]:
                 return None
+        cost_delta = sum(
+            self.cost[b] * (int(u != self.base_pos[b]) - int(st.pos[b] != self.base_pos[b]))
+            for b, u in new_pos.items()
+        )
         affected = {u for u, _ in change}
         for u, _ in change:
             affected.update(self.nbrs[u])
@@ -510,7 +562,7 @@ class _Search:
             st.state[u] = b
         if not ok:
             return None
-        raw = new - old
+        raw = new - old - cost_delta
         penalty = 0.0
         if mu > 0:
             for b, u in new_pos.items():
@@ -700,6 +752,25 @@ def _move_detail(
     )
 
 
+def _weighted(score: AssignmentScore, weights: Mapping[str, float]) -> tuple[float, float, float]:
+    """Weighted total and range (unit ranges in quadrature); the plain totals when there are no weights."""
+    if not weights:
+        return score.total, score.total_low, score.total_high
+    units = score.units
+    w = np.array(
+        [float(weights.get(b, 1.0)) if isinstance(b, str) else 0.0 for b in units["brand_id"]], dtype=float
+    )
+    expected = units["expected_sales"].to_numpy(dtype=float)
+    low = units["low"].to_numpy(dtype=float)
+    high = units["high"].to_numpy(dtype=float)
+    total = float((expected * w).sum())
+    return (
+        total,
+        total - math.sqrt(float((((expected - low) * w) ** 2).sum())),
+        total + math.sqrt(float((((high - expected) * w) ** 2).sum())),
+    )
+
+
 def generate_alternatives(
     base_assignment: Mapping[str, str | None],
     unit_features: pd.DataFrame,
@@ -712,24 +783,39 @@ def generate_alternatives(
     max_iter: int = 3000,
     affinity_pairs: pd.DataFrame | None = None,
     diversity_weight: float = 0.5,
+    weights: Mapping[str, float] | None = None,
+    move_cost: Mapping[str, float] | None = None,
+    free: Collection[str] = (),
+    objective_label: str = "기대 매출",
 ) -> list[LayoutAlternative]:
-    """Up to ``n_alternatives`` distinct, constraint-satisfying layouts that raise expected sales.
+    """Up to ``n_alternatives`` distinct, constraint-satisfying layouts that raise the objective.
+
+    The objective is the expected sales of the units in scope, each brand's sales multiplied by
+    ``weights[brand]`` (default 1), minus ``move_cost[brand]`` for every relocated non-free brand.
+    ``free`` brands are new entries already placed in ``base_assignment``; they may take any feasible
+    unit without counting as a move. Without weights, costs and free brands this maximizes expected sales.
 
     Deterministic for a given ``seed``. Each alternative runs greedy improvement, ``max_iter`` simulated
     annealing steps and a final greedy polish (a heuristic: the best layout found, not a proven optimum).
-    Later alternatives pay ``diversity_weight * (average gain per move of the first alternative)`` for
-    every relocation already used by an earlier alternative. Alternatives without a strict improvement
-    are not returned, so the list may be shorter (or empty).
+    Later alternatives pay ``diversity_weight * (average gain per relocation of the first alternative)``
+    for every relocation already used by an earlier alternative. Alternatives without a strict net
+    improvement are not returned, so the list may be shorter (or empty).
     """
     constraints = constraints or LayoutConstraints()
     base_assignment = normalize_assignment(base_assignment)
     infos = brand_info(brands)
+    weights = dict(weights or {})
+    move_cost = dict(move_cost or {})
+    free_ids = frozenset(free)
     scorer = AssignmentScorer(unit_features, infos, model_params, affinity_pairs, adjacency_pairs)
-    search = _Search(scorer, base_assignment, constraints)
+    search = _Search(scorer, base_assignment, constraints, weights, move_cost, free_ids)
     scope_base = {code: base_assignment.get(code) for code in search.codes}
     before = scorer.score(scope_base)
-    search.tol = 1e-9 * max(1.0, abs(before.total))
+    objective_before, _, _ = _weighted(before, weights)
+    search.tol = 1e-9 * max(1.0, abs(before.total), abs(objective_before))
     before_units = before.units.set_index("unit_code")
+    base_pos = {b: u for u, b in scope_base.items() if b is not None}
+    custom = bool(weights or move_cost or free_ids)
     placed: Counter[tuple[int, int]] = Counter()
     seen: list[frozenset[tuple[int, int]]] = []
     alternatives: list[LayoutAlternative] = []
@@ -750,27 +836,51 @@ def generate_alternatives(
             break
         scope_after = search.assignment(accepted)
         after = scorer.score(scope_after)
-        if after.total <= before.total + search.tol:
+        new_pos = {b: u for u, b in scope_after.items() if b is not None}
+        moved = sorted(
+            (b for b, u in new_pos.items() if b not in free_ids and base_pos.get(b) != u),
+            key=lambda b: (floor_sort_key(scorer.units[base_pos[b]].floor), base_pos[b]),
+        )
+        shifted = sorted(b for b, u in new_pos.items() if b in free_ids and base_pos.get(b) != u)
+        cost = sum(move_cost.get(b, 0.0) for b in moved)
+        objective_after, objective_low, objective_high = _weighted(after, weights)
+        if objective_after - cost <= objective_before + search.tol:
             break
         full = {**dict(base_assignment), **scope_after}
         after_units = after.units.set_index("unit_code")
-        base_pos = {b: u for u, b in scope_base.items() if b is not None}
-        moved = sorted(
-            (b for u, b in scope_after.items() if b is not None and base_pos.get(b) != u),
-            key=lambda b: (floor_sort_key(scorer.units[base_pos[b]].floor), base_pos[b]),
-        )
-        new_pos = {b: u for u, b in scope_after.items() if b is not None}
         move_list = [_move_detail(b, base_pos[b], new_pos[b], before_units, after_units) for b in moved]
         delta = after.total - before.total
-        spillover = delta - sum(m.delta for m in move_list)
+        shift_deltas = {
+            b: float(after_units.loc[new_pos[b], "expected_sales"])
+            - float(before_units.loc[base_pos[b], "expected_sales"])
+            for b in shifted
+        }
+        spillover = delta - sum(m.delta for m in move_list) - sum(shift_deltas.values())
+        net = objective_after - cost - objective_before
         alt_id = f"ALT-{len(alternatives) + 1}"
-        summary = (
-            f"[{ESTIMATE_LABEL}] {alt_id}: 브랜드 {len(move_list)}건 이동, 대상 범위 기대 매출 "
-            f"{format_krw(before.total)} → {format_krw(after.total)} ({format_krw_delta(delta)}, "
-            f"{delta / before.total * 100 if before.total else math.nan:+.1f}%, 범위 "
-            f"{format_krw_delta(after.total_low - before.total)}~{format_krw_delta(after.total_high - before.total)})."
-        )
+        if custom:
+            summary = (
+                f"[{ESTIMATE_LABEL}] {alt_id}: 기존 브랜드 {len(move_list)}건 이동"
+                + (f", 신규 입점 위치 조정 {len(shifted)}건" if shifted else "")
+                + f", {objective_label} {format_krw(objective_before)} → {format_krw(objective_after)}"
+                f" (이전 공사 손실 {format_krw(cost)}, 순효과 {format_krw_delta(net)}), 기대 매출 "
+                f"{format_krw_delta(delta)} (범위 {format_krw_delta(after.total_low - before.total)}~"
+                f"{format_krw_delta(after.total_high - before.total)})."
+            )
+        else:
+            summary = (
+                f"[{ESTIMATE_LABEL}] {alt_id}: 브랜드 {len(move_list)}건 이동, 대상 범위 기대 매출 "
+                f"{format_krw(before.total)} → {format_krw(after.total)} ({format_krw_delta(delta)}, "
+                f"{delta / before.total * 100 if before.total else math.nan:+.1f}%, 범위 "
+                f"{format_krw_delta(after.total_low - before.total)}~{format_krw_delta(after.total_high - before.total)})."
+            )
         explanations = [m.explanation for m in move_list]
+        for b in shifted:
+            name = infos[b].brand_name if b in infos else b
+            explanations.append(
+                f"신규 입점 {name} 위치 {base_pos[b]}→{new_pos[b]}: 기대 매출 "
+                f"{format_krw_delta(shift_deltas[b])} ({ESTIMATE_LABEL})."
+            )
         if abs(spillover) > search.tol:
             explanations.append(
                 f"이웃 매장 인접 친화도 변화에 따른 파급 효과: {format_krw_delta(spillover)} ({ESTIMATE_LABEL})."
@@ -781,22 +891,28 @@ def generate_alternatives(
                 seed=seed,
                 assignment=full,
                 moves=move_list,
-                objective_before=before.total,
-                objective_after=after.total,
-                objective_low=after.total_low,
-                objective_high=after.total_high,
+                objective_before=objective_before,
+                objective_after=objective_after,
+                objective_low=objective_low,
+                objective_high=objective_high,
                 spillover_krw=spillover,
                 kpi_deltas=_kpi_deltas(before, after),
                 constraint_checks=check_constraints(
-                    base_assignment, full, unit_features, infos, adjacency_pairs, constraints
+                    base_assignment, full, unit_features, infos, adjacency_pairs, constraints, free_ids
                 ),
                 summary=summary,
                 explanations=explanations,
+                sales_before=before.total,
+                sales_after=after.total,
+                sales_low=after.total_low,
+                sales_high=after.total_high,
+                move_cost_krw=cost,
+                objective_label=objective_label,
             )
         )
         placements = search.placements(accepted)
         seen.append(placements)
         placed.update(placements)
         if len(alternatives) == 1:
-            mu = diversity_weight * delta / max(1, len(move_list))
+            mu = diversity_weight * net / max(1, len(move_list) + len(shifted))
     return alternatives

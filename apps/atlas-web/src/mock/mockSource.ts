@@ -1,19 +1,31 @@
 // In-browser implementation of the Atlas API backed by the synthetic mock world.
 import { ApiError, type AtlasDataSource } from '../api/client'
+import { pickDefaultRevision } from '../state/uiState'
 import type { Artifact, ChatRequest } from '../types/api'
 import { buildMockArtifacts, mockLayoutAlternatives, mockProductivity, planImpact } from './analytics'
 import { buildMockScript, playScript, sleep } from './chatScripts'
 import { buildMockFloor, buildMockMeta } from './floors'
 import { mockJourney } from './journey'
-import { changesBetween, getWorld } from './world'
+import { createMockRelayout } from './relayout'
+import { createMockUploads } from './uploads'
+import { changesBetween, getWorld, type MockWorld } from './world'
 
 const clone = <T>(value: T): T => structuredClone(value)
 
 export function createMockSource(): AtlasDataSource {
-  const world = getWorld()
-  const meta = buildMockMeta(world)
+  const shared = getWorld()
+  // Revisions made by relayout plans and uploads stay in this source (tests create several sources).
+  const world: MockWorld = { brands: shared.brands, revisions: new Map(shared.revisions), order: [...shared.order] }
   const artifacts = new Map<string, Artifact[]>()
   let runCounter = 0
+
+  /** Make a revision visible in /api/meta (and drop artifacts cached for an earlier upload of it). */
+  const publish = (rev: string) => {
+    if (!world.order.includes(rev)) world.order.push(rev)
+    artifacts.delete(rev)
+  }
+  const relayout = createMockRelayout(world, publish)
+  const uploads = createMockUploads(world, relayout, { publish, defaultParent: () => pickDefaultRevision(buildMockMeta(world)) })
 
   const artifactsFor = (rev: string): Artifact[] => {
     let list = artifacts.get(rev)
@@ -34,7 +46,7 @@ export function createMockSource(): AtlasDataSource {
     mode: 'mock',
     async getMeta() {
       await sleep(40)
-      return clone(meta)
+      return clone(buildMockMeta(world))
     },
     async getFloor(rev, floor, includeFixtures) {
       await sleep(80)
@@ -96,6 +108,62 @@ export function createMockSource(): AtlasDataSource {
     },
     artifactFileUrl(_rev, _generator, file) {
       return file.url ?? null
+    },
+
+    async listRelayoutBriefs() {
+      await sleep(60)
+      return relayout.listBriefs()
+    },
+    async getRelayoutProject(briefId) {
+      await sleep(80)
+      return relayout.getProject(briefId)
+    },
+    async diagnoseRelayout(briefId) {
+      await sleep(300)
+      return relayout.diagnose(briefId)
+    },
+    async planRelayout(briefId, options) {
+      // The real optimizer can take tens of seconds; keep the busy state visible in the demo.
+      await sleep(1500)
+      return relayout.plan(briefId, options)
+    },
+    async selectRelayoutAlternative(briefId, body) {
+      await sleep(150)
+      return relayout.select(briefId, body)
+    },
+    async checkRelayout(briefId, rev) {
+      await sleep(300)
+      return relayout.check(briefId, rev)
+    },
+    relayoutReportUrl: (briefId) => relayout.reportUrl(briefId),
+
+    async uploadDrawings(request) {
+      await sleep(300)
+      return uploads.uploadDrawings(request)
+    },
+    async listUploadJobs() {
+      await sleep(60)
+      return uploads.listJobs()
+    },
+    async getUploadJob(jobId) {
+      await sleep(60)
+      return uploads.getJob(jobId)
+    },
+    async submitLayerMapping(jobId, mappings) {
+      await sleep(150)
+      return uploads.submitLayerMapping(jobId, mappings)
+    },
+    async listDrawingProfiles() {
+      await sleep(40)
+      return uploads.listProfiles()
+    },
+    async uploadMetadata(kind, file) {
+      await sleep(250)
+      return uploads.uploadMetadata(kind, file)
+    },
+    async getMetadataStatus() {
+      await sleep(60)
+      return uploads.metadataStatus()
     },
   }
 }

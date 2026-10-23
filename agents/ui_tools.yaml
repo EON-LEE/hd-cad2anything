@@ -68,14 +68,15 @@ tools:
       additionalProperties: false
   - name: ui_show_panel
     description: >-
-      패널을 연다. changes·artifact는 오른쪽 개정 검토 탭, layout은 오른쪽 레이아웃 대안 탭, table은 도면 아래 표 패널,
+      패널을 연다. changes·artifact·uploads는 오른쪽 개정 검토 탭, layout은 오른쪽 레이아웃 탭, table은 도면 아래 표 패널,
       journey는 도면 왼쪽 위 동선 카드에 열린다. payload 형식은 type마다 다르다.
-      changes는 {rev_from, rev_to}, artifact는 {generator}, layout은 {rev, floors},
-      table은 {title, columns, rows}다. table의 rows에는 도구 결과의 실제 값을 columns 순서대로 넣는다.
+      changes는 {rev_from, rev_to}, artifact는 {generator}, layout은 재배치 대안이면 {rev, floors}, 시즌 개편 프로젝트면 {brief_id},
+      uploads는 {job_id}(생략하면 업로드 영역만 연다), table은 {title, columns, rows}다.
+      table의 rows에는 도구 결과의 실제 값을 columns 순서대로 넣는다.
     parameters:
       type: object
       properties:
-        type: { type: string, enum: [changes, artifact, layout, table, journey, none] }
+        type: { type: string, enum: [changes, artifact, layout, table, journey, uploads, none] }
         payload:
           type: object
           properties:
@@ -90,6 +91,8 @@ tools:
             generator: { type: string }
             rev: { type: string }
             floors: { type: array, items: { type: string } }
+            brief_id: { type: string, description: "시즌 개편 브리프 ID. 예: FW2026" }
+            job_id: { type: string, description: "업로드 작업 ID. 예: J20261023-0001" }
       required: [type]
       additionalProperties: false
   - name: ui_clear

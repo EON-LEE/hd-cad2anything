@@ -3,7 +3,8 @@
 Labels are matched to geometry by point-in-polygon on the estimated text center, falling back to the
 nearest polygon within a small distance. Unit labels may be one combined text (``3F-C02 Brand`` or MTEXT
 ``3F-C02\\nBrand``) or a code text with a separate brand text near the centroid; ``(공실)``/``공실`` marks a
-vacancy.
+vacancy. Code patterns come from the active drawing profile (``cadcore.profile``; default: the synthetic
+conventions), which also rewrites codes to the canonical form.
 """
 
 from __future__ import annotations
@@ -16,30 +17,22 @@ from dataclasses import dataclass, field
 from shapely.geometry import LineString, Point, Polygon
 from shapely.strtree import STRtree
 
+from cad2anything.cadcore.profile import BARE_UNIT_CODE_RE, UNIT_CODE_IN_TEXT_RE, active_profile
+from cad2anything.cadcore.profile import LINK_PREFIX_TYPES as LINK_PREFIX_TYPES
+from cad2anything.cadcore.profile import LINK_RE as LINK_RE
+from cad2anything.cadcore.profile import LINK_WORDS as LINK_WORDS
+from cad2anything.cadcore.profile import OPENING_RE as OPENING_RE
+from cad2anything.cadcore.profile import UNIT_CODE_RE as UNIT_CODE_RE
+from cad2anything.cadcore.profile import VACANCY_RE as VACANCY_RE
+from cad2anything.cadcore.profile import ZONE_RE as ZONE_RE
 from cad2anything.cadcore.reader import Issue, Primitive
 
-UNIT_CODE_RE = re.compile(r"^(B\d|\d+F)-[NSEWCP]\d{2}[A-Z]?M?$")
-_UNIT_CODE_IN_TEXT = re.compile(r"(?<![A-Za-z0-9])(?:B\d+|\d+F)-[NSEWCP]\d{2}[A-Z]?M?(?![A-Za-z0-9])")
-_BARE_UNIT_CODE = re.compile(r"^[NSEWCP]\d{2}[A-Z]?M?$")
-ZONE_RE = re.compile(r"^\s*(?P<code>(?:(?:B\d+|\d+F)-)?Z\d+)(?![A-Za-z0-9])\s*(?P<name>.*)$", re.DOTALL)
-LINK_RE = re.compile(r"(?<![A-Za-z0-9])(?P<id>(?:ESC|EV|ST)-[A-Z0-9]{1,3})(?![A-Za-z0-9])")
-OPENING_RE = re.compile(r"(?<![A-Za-z0-9])(?P<id>(?:ENT|DOOR|GATE|EXIT)-[A-Z0-9]{1,4})(?![A-Za-z0-9])")
+# Default-convention patterns, kept importable; parsing uses the active profile's patterns.
+_UNIT_CODE_IN_TEXT = UNIT_CODE_IN_TEXT_RE
+_BARE_UNIT_CODE = BARE_UNIT_CODE_RE
 NUMERIC_RE = re.compile(r"^[\d\s.,+\-/xX×±@]+$")
-VACANCY_RE = re.compile(r"^[\(\[]?\s*(공실|VACANT|임대\s*중|임대\s*예정)\s*[\)\]]?$", re.IGNORECASE)
 _SEPARATORS = " \t\n-:/|·,"
 
-LINK_PREFIX_TYPES: dict[str, str] = {"ESC": "escalator", "EV": "elevator", "ST": "stair"}
-LINK_WORDS: dict[str, str] = {
-    "에스컬레이터": "escalator",
-    "ESCALATOR": "escalator",
-    "엘리베이터": "elevator",
-    "승강기": "elevator",
-    "ELEVATOR": "elevator",
-    "LIFT": "elevator",
-    "계단": "stair",
-    "STAIR": "stair",
-    "STAIRS": "stair",
-}
 LINK_NAMES_KO: dict[str, str] = {"escalator": "에스컬레이터", "elevator": "엘리베이터", "stair": "계단"}
 AMENITY_TOKENS: dict[str, str] = {
     "WC": "RESTROOM",
@@ -66,23 +59,28 @@ _TOKEN_SPLIT = re.compile(r"[^0-9A-Za-z\uac00-\ud7a3]+")
 # --- text classification -----------------------------------------------------------------------------
 
 
-def find_unit_code(text: str) -> tuple[str | None, str]:
-    """``(unit_code, remainder)`` for the first unit code in ``text`` (remainder stripped)."""
-    match = _UNIT_CODE_IN_TEXT.search(text)
+def find_unit_code(text: str, floor: str | None = None) -> tuple[str | None, str]:
+    """``(unit_code, remainder)`` for the first unit code in ``text`` (remainder stripped).
+
+    The code is canonical for the active profile; ``floor`` (the drawing's floor) fills a missing floor.
+    """
+    profile = active_profile()
+    match = profile.unit_pattern.search(text)
     if not match:
         return None, text.strip()
     rest = (text[: match.start()] + " " + text[match.end() :]).strip(_SEPARATORS)
-    return match.group(0), " ".join(rest.split())
+    return profile.unit_code(match, floor), " ".join(rest.split())
 
 
 def link_info(text: str) -> tuple[str | None, str | None]:
     """``(link_id, link_type)`` from a vertical link label (ID or Korean/English name)."""
+    profile = active_profile()
     upper = text.upper()
-    match = LINK_RE.search(upper)
-    link_id = match.group("id") if match else None
-    link_type = LINK_PREFIX_TYPES.get(link_id.split("-")[0]) if link_id else None
+    match = profile.link_pattern.search(upper)
+    link_id = profile.link_id(match) if match else None
+    link_type = profile.link_type(link_id) if link_id else None
     if link_type is None:
-        for word, kind in LINK_WORDS.items():
+        for word, kind in profile.link_words.items():
             if word in upper:
                 link_type = kind
                 break
@@ -104,19 +102,20 @@ def text_kind(text: str) -> str:
     """Coarse role of a text: unit_code, unit_combined, zone_code, link, opening, amenity, vacancy,
     numeric, title or free."""
     value = text.strip()
+    profile = active_profile()
     code, rest = find_unit_code(value)
     if code:
         return "unit_combined" if rest else "unit_code"
-    if ZONE_RE.match(value):
+    if profile.zone_pattern.match(value):
         return "zone_code"
-    if OPENING_RE.search(value.upper()):
+    if profile.opening_pattern.search(value.upper()):
         return "opening"
     link_id, _ = link_info(value)
-    if link_id or "".join(value.upper().split()) in LINK_WORDS:
+    if link_id or "".join(value.upper().split()) in profile.link_words:
         return "link"
     if len(value) <= 24 and amenity_type(value):
         return "amenity"
-    if VACANCY_RE.match(value):
+    if profile.vacancy_pattern.match(value):
         return "vacancy"
     if NUMERIC_RE.match(value):
         return "numeric"
@@ -170,15 +169,17 @@ class _Token:
 
 
 def _tokens(texts: Sequence[Primitive], floor: str) -> list[_Token]:
+    profile = active_profile()
     tokens: list[_Token] = []
     for prim in texts:
         value = prim.text.strip()
         point = prim.anchor or (prim.points[0] if prim.points else (0.0, 0.0))
-        code, rest = find_unit_code(value)
+        code, rest = find_unit_code(value, floor)
         if code is None:
             words = value.split()
-            if words and _BARE_UNIT_CODE.match(words[0]):
-                code, rest = f"{floor}-{words[0]}", " ".join(words[1:])
+            bare = profile.bare_unit_code(words[0], floor) if words else None
+            if bare is not None:
+                code, rest = bare, " ".join(words[1:])
         brand = " ".join(rest.split()) if rest else None
         if code is None and (brand is None or NUMERIC_RE.match(brand)):
             continue
@@ -189,7 +190,7 @@ def _tokens(texts: Sequence[Primitive], floor: str) -> list[_Token]:
 def _brand_value(brand: str | None) -> tuple[str | None, bool | None]:
     if brand is None:
         return None, None
-    if VACANCY_RE.match(brand.strip()):
+    if active_profile().vacancy_pattern.match(brand.strip()):
         return None, True
     return brand, False
 
@@ -269,13 +270,8 @@ def label_units(
 
 
 def parse_zone_label(text: str, floor: str) -> tuple[str, str] | None:
-    match = ZONE_RE.match(text.strip())
-    if not match:
-        return None
-    code = match.group("code")
-    if "-" not in code:
-        code = f"{floor}-{code}"
-    return code, " ".join(match.group("name").split())
+    """``(zone_code, zone_name)`` of a zone label (active profile), else None."""
+    return active_profile().zone_label(text, floor)
 
 
 def label_zones(
@@ -357,11 +353,12 @@ def label_amenities(
 
 
 def parse_opening_label(text: str) -> tuple[str | None, str]:
-    match = OPENING_RE.search(text.upper())
+    profile = active_profile()
+    match = profile.opening_pattern.search(text.upper())
     if not match:
         return None, text.strip()
     name = (text[: match.start()] + " " + text[match.end() :]).strip(_SEPARATORS)
-    return match.group("id"), " ".join(name.split())
+    return profile.opening_id(match), " ".join(name.split())
 
 
 def label_openings(

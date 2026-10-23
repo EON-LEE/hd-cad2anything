@@ -1,8 +1,8 @@
 // Mock GET /api/meta and GET /api/floors/{rev}/{floor} built from the synthetic world.
 import { categoryColorByIndex } from '../lib/colors'
-import type { Feature, FeatureCollection, FeatureProps, Geometry, Meta } from '../types/api'
-import { BUILDING, MOCK_CATEGORIES, MOCK_FACILITY, MOCK_FLOORS } from './catalog'
-import { OPENINGS, VERTICAL_LINKS, rectArea, rectRing, unitFixtures, type MockWorld, type Rect } from './world'
+import type { Feature, FeatureCollection, FeatureProps, Geometry, Meta, RevisionInfo } from '../types/api'
+import { BUILDING, MOCK_CATEGORIES, MOCK_DATA_THROUGH, MOCK_FACILITY, MOCK_FLOORS } from './catalog'
+import { OPENINGS, VERTICAL_LINKS, rectArea, rectRing, unitFixtures, type MockRevision, type MockWorld, type Rect } from './world'
 
 const AMENITY_NAMES: Record<string, string> = {
   RESTROOM: '화장실',
@@ -12,10 +12,23 @@ const AMENITY_NAMES: Record<string, string> = {
   LOUNGE: '고객라운지',
 }
 
+function revisionMeta(revision: MockRevision): RevisionInfo {
+  const { info } = revision
+  const hypothetical = info.kind === 'hypothetical'
+  return {
+    ...info,
+    // Actual revisions that start after the last transaction date have no sales yet.
+    ...(hypothetical ? {} : { has_sales: !!info.effective_date && info.effective_date <= MOCK_DATA_THROUGH }),
+    model_source: revision.modelSource ?? (hypothetical ? 'hypothetical' : 'parsed'),
+    notes: revision.notes,
+  }
+}
+
 export function buildMockMeta(world: MockWorld): Meta {
   return {
     facility: { ...MOCK_FACILITY },
-    revisions: world.order.map((rev) => ({ ...world.revisions.get(rev)!.info, notes: world.revisions.get(rev)!.notes })),
+    data_through: MOCK_DATA_THROUGH,
+    revisions: world.order.map((rev) => revisionMeta(world.revisions.get(rev)!)),
     floors: MOCK_FLOORS.map((f) => ({ code: f.code, ordinal: f.ordinal, name: f.name })),
     categories: MOCK_CATEGORIES.map((c, i) => ({ code: c.code, name_ko: c.name_ko, color: categoryColorByIndex(i) })),
   }

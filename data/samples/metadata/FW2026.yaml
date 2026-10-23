@@ -1,0 +1,38 @@
+brief_id: FW2026
+title: 2026 F/W MD 개편
+season: FW
+year: 2026
+effective_date: '2026-10-01'
+base_rev: R2
+floors:
+- 4F
+- 5F
+- 6F
+objective: commission
+max_moves: 6
+downtime_weeks: 2
+movable: expiring
+keep_anchors: true
+entries:
+- brand_id: BR0441
+  brand_name: Tovine Alpine
+  note: F/W 아웃도어 수요에 맞춘 신규 유치
+- brand_id: BR0258
+  brand_name: Holara Weekend
+  note: 저효율 란제리 자리에 캐주얼 브랜드 유치
+- brand_id: BR0318
+  brand_name: Daresse Lingerie
+  note: 란제리 브랜드 교체
+- brand_id: BR0373
+  brand_name: Wynine Supply
+  note: 5층 공실 해소
+exits:
+- brand_id: BR0327
+  brand_name: Ravandre Nuit
+  unit_code: 4F-E05
+  reason: 계약 만료·저효율
+- brand_id: BR0322
+  brand_name: Merelle Nuit
+  unit_code: 4F-E02
+  reason: 계약 만료·저효율
+notes: F/W 시즌 가중 수수료 수익을 높인다. 계약 기간이 남은 브랜드는 옮기지 않는다. 이전 공사 기간은 매장당 2주로 본다.

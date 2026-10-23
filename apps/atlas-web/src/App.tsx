@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
-import { DataContext, resolveDataSource, type DataContextValue } from './api/source'
+import { useEffect, useState } from 'react'
+import { resolveDataSource, type DataContextValue } from './api/source'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { SidePanel } from './components/SidePanel'
 import { TopBar } from './components/TopBar'
 import { FloorCanvas } from './map/FloorCanvas'
-import { createAppState } from './state/reducer'
-import { StoreProvider } from './state/store'
-import { createInitialUiState } from './state/uiState'
+import { AppProviders } from './state/AppProviders'
 
 function Shell() {
   return (
@@ -25,13 +23,10 @@ function Shell() {
 }
 
 function Ready({ context }: { context: DataContextValue }) {
-  const initialState = useMemo(() => createAppState(createInitialUiState(context.meta)), [context.meta])
   return (
-    <DataContext value={context}>
-      <StoreProvider initialState={initialState}>
-        <Shell />
-      </StoreProvider>
-    </DataContext>
+    <AppProviders context={context}>
+      <Shell />
+    </AppProviders>
   )
 }
 

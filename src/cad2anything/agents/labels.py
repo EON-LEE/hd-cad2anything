@@ -32,6 +32,15 @@ TOOL_LABELS = {
     "spatial_describe_floor": "층 구조 확인",
     "layout_generate_alternatives": "재배치 대안 계산",
     "whatif_score_moves": "이동 효과 추정",
+    "relayout_list_briefs": "개편 계획 확인",
+    "relayout_diagnose": "개편 진단",
+    "relayout_plan": "개편 대안 계산",
+    "relayout_select": "개편안 결정 기록",
+    "relayout_check_drawing": "개편안과 도면 대조",
+    "relayout_report": "개편 제안서 만들기",
+    "relayout_entry_options": "입점 위치 추천",
+    "upload_list_jobs": "업로드 작업 확인",
+    "revision_check_metadata": "도면과 계약 정보 대조",
     "ui_set_floor": "층 이동",
     "ui_show_heatmap": "도면 색칠",
     "ui_highlight_units": "매장 강조",
@@ -67,6 +76,7 @@ PANEL_LABELS = {
     "artifact": "산출물 열기",
     "layout": "재배치 대안 열기",
     "journey": "고객 동선 목록 열기",
+    "uploads": "업로드 화면 열기",
     "none": "패널 닫기",
 }
 AGE_NAMES = {"20s": "20대", "30s": "30대", "40s": "40대", "50s": "50대", "60s+": "60대 이상"}
@@ -127,6 +137,14 @@ def tool_label(name: str | None, args: dict[str, Any] | None = None) -> str:
     if name == "layout_generate_alternatives":
         floors = args.get("floors") or []
         return f"{', '.join(floor_ko(f) for f in floors)} {base}" if floors else base
+    if name == "relayout_entry_options" and (args.get("brand") or args.get("category")):
+        return f"{args.get('brand') or args.get('category')} {base}"
+    if name == "relayout_check_drawing" and args.get("rev"):
+        return f"{args['rev']} 도면과 개편안 대조"
+    if name.startswith("relayout_") and args.get("brief_id"):
+        return f"{args['brief_id']} {base}"
+    if name == "revision_check_metadata" and args.get("rev"):
+        return f"{args['rev']} {base}"
     if name == "revision_diff" and args.get("rev_from") and args.get("rev_to"):
         return f"{args['rev_from']}→{args['rev_to']} {base}"
     if name == "ui_set_floor" and args.get("floor"):
@@ -146,11 +164,12 @@ def tool_label(name: str | None, args: dict[str, Any] | None = None) -> str:
         return f"{args['rev_from']}→{args['rev_to']} 변경 표시"
     if name == "ui_show_panel":
         panel = str(args.get("type"))
+        payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
         if panel == "table":
-            title = (
-                (args.get("payload") or {}).get("title") if isinstance(args.get("payload"), dict) else None
-            )
+            title = payload.get("title")
             return f"표 열기: {title}" if title else "표 열기"
+        if panel == "layout" and payload.get("brief_id"):
+            return "시즌 개편 화면 열기"
         return PANEL_LABELS.get(panel, base)
     if name == "consult_specialist":
         return f"{SPECIALIST_LABELS.get(str(args.get('agent')), '전문 에이전트')}에게 확인"

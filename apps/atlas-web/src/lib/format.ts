@@ -83,9 +83,43 @@ export function formatWalk(meters: number | null | undefined): string {
   return `${(meters / 1000).toFixed(1).replace(/\.0$/, '')}km`
 }
 
+/** 3.2 -> "3.2%", signed: "+3.2%" / "−1.5%". */
+export function formatPercent(value: number | null | undefined, signed = false, digits = 1): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '–'
+  const text = formatNumber(Math.abs(value), digits).replace(/\.0+$/, '')
+  const sign = value < 0 ? '−' : signed && value > 0 ? '+' : ''
+  return `${sign}${text}%`
+}
+
+/** ISO date-time -> "2026-10-23 10:00" (local time); other strings are returned as is. */
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '–'
+  const date = new Date(value)
+  if (!/T\d{2}:\d{2}/.test(value) || Number.isNaN(date.getTime())) return value
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 export const REVISION_KIND_LABELS: Record<string, string> = {
   actual: '실제',
   hypothetical: '가상(what-if)',
+}
+
+/**
+ * Markers of a revision in selectors: "업로드" for a model made from uploaded drawings and
+ * "실적 없음" for an actual revision whose period has no sales (hypothetical ones already say 가상).
+ */
+export function revisionMarkers(revision: { kind: string; has_sales?: boolean; model_source?: string }): string[] {
+  return [
+    ...(revision.model_source === 'uploaded' ? ['업로드'] : []),
+    ...(revision.kind === 'actual' && revision.has_sales === false ? ['실적 없음'] : []),
+  ]
+}
+
+/** Efficiency percentile (0..100, low = inefficient) as "하위 2%"; the lowest unit reads "하위 1%". */
+export function bottomPercentText(percentile: number | null | undefined): string {
+  if (percentile === null || percentile === undefined || !Number.isFinite(percentile)) return '–'
+  return `하위 ${Math.min(100, Math.max(1, Math.round(percentile)))}%`
 }
 
 export const RISK_LABELS: Record<string, string> = { high: '고위험', medium: '중위험', low: '저위험' }

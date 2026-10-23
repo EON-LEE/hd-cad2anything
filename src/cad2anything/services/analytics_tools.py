@@ -190,6 +190,16 @@ def _alternative_summary(alternative: Any) -> dict[str, Any]:
     data = alternative.to_dict()
     for key in ("assignment", "label", "caveats", "seed"):
         data.pop(key, None)
+    if not alternative.move_cost_krw and alternative.objective_label == "기대 매출":
+        for key in (
+            "objective_label",
+            "sales_before",
+            "sales_after",
+            "sales_low",
+            "sales_high",
+            "move_cost_krw",
+        ):
+            data.pop(key, None)
     data["moves"] = [{k: move.get(k) for k in MOVE_FIELDS} for move in data["moves"]]
     data["delta_krw"] = alternative.delta
     data["all_constraints_satisfied"] = alternative.all_constraints_satisfied
@@ -253,20 +263,63 @@ class AnalyticsTools:
     def _actual_revisions(self) -> list[Any]:
         return [r for r in self.ws.revisions() if r.kind == RevisionKind.ACTUAL and r.effective_date]
 
+    def data_through(self) -> date | None:
+        """Last day with transactions (None without transaction data).
+
+        Reads only the timestamp column and caches it per file version, outside the analytics lock, so
+        that metadata requests do not wait for the analytics warm-up."""
+        path = self.ws.table_path("transactions")
+        if path is None:
+            return None
+        stat = path.stat()
+        key = (path.name, stat.st_size, stat.st_mtime_ns)
+        cached = getattr(self, "_through_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        stamps = pd.to_datetime(pd.read_csv(path, usecols=["ts"])["ts"], errors="coerce")
+        through = stamps.max().date() if stamps.notna().any() else None
+        self._through_cache = (key, through)
+        return through
+
+    def _has_sales(self, rev: str) -> bool:
+        """True for an actual revision that took effect on or before the last transaction day."""
+        revision = self._model(rev).revision
+        if revision.kind != RevisionKind.ACTUAL or not revision.effective_date:
+            return False
+        through = self.data_through()
+        return through is not None and revision.effective_date <= through.isoformat()
+
+    def latest_sales_rev(self) -> str:
+        """Latest actual revision with transactions (falls back to the latest actual revision)."""
+        actual = sorted(self._actual_revisions(), key=lambda r: r.effective_date or "")
+        if not actual:
+            raise ToolError("실제 개정이 없습니다.")
+        through = self.data_through()
+        with_sales = [r for r in actual if through is not None and r.effective_date <= through.isoformat()]
+        return (with_sales or actual)[-1].rev_id
+
     def _fit_revision(self, rev: str) -> str:
-        """The revision itself when actual, else its nearest actual ancestor."""
+        """The revision itself when it is actual with sales, else its nearest such ancestor (without
+        transaction data every actual revision qualifies)."""
+        through = self.data_through()
+
+        def usable(revision: Any) -> bool:
+            return revision.kind == RevisionKind.ACTUAL and (
+                through is None or (revision.effective_date or "") <= through.isoformat()
+            )
+
         current = self._model(rev).revision
         seen: set[str] = set()
-        while current.kind != RevisionKind.ACTUAL:
+        while not usable(current):
             parent = current.parent_rev_id
             if not parent or parent in seen:
-                raise ToolError(f"{rev}의 기준이 되는 실제 개정을 찾을 수 없습니다.")
+                raise ToolError(f"{rev}의 기준이 되는, 실적이 있는 실제 개정을 찾을 수 없습니다.")
             seen.add(current.rev_id)
             current = self._model(parent).revision
         return current.rev_id
 
     def _enriched(self) -> pd.DataFrame:
-        actual = self._actual_revisions()
+        actual = [r for r in self._actual_revisions() if self._has_sales(r.rev_id)]
         key = ("enriched", self._data_key(), tuple((r.rev_id, self._model_key(r.rev_id)) for r in actual))
 
         def compute() -> pd.DataFrame:
@@ -313,6 +366,11 @@ class AnalyticsTools:
                 rev_end = date.fromisoformat(actual[index + 1].effective_date) - timedelta(days=1)
         s = max(_parse_date(start, "start") or rev_start, first)
         e = min(_parse_date(end, "end", end=True) or rev_end, last)
+        if s > e and rev_start > last:
+            raise ToolError(
+                f"{rev}는 {rev_start}부터 적용되는 개정이라 아직 거래 실적이 없습니다(데이터 {last}까지). "
+                "기대 매출 추정이 필요하면 whatif_score_moves나 개편 도구를 쓰세요."
+            )
         if s > e:
             raise ToolError(f"{rev}의 분석 기간에 거래 데이터가 없습니다(데이터 기간 {first}~{last}).")
         return s.isoformat(), e.isoformat(), (e - s).days + 1

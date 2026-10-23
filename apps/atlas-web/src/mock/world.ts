@@ -48,6 +48,8 @@ export interface MockRevision {
   floors: Record<string, MockFloor>
   /** Change items from the parent revision. */
   changes: ChangeItem[]
+  /** Model origin reported in /api/meta (`model_source`); defaults by kind. */
+  modelSource?: string
 }
 
 export interface MockWorld {
@@ -195,6 +197,9 @@ const BRANDS: readonly [string, string, string, number][] = [
   ['BR1201', 'Isken Horology', 'JEWELRY_WATCH', 1.14],
   ['BR1202', 'Kaelune Jewels', 'JEWELRY_WATCH', 1.06],
   ['BR1203', 'Atelier Corvane', 'JEWELRY_WATCH', 0.97],
+  // Entry brands of the mock seasonal relayout brief (not placed in R0~R2).
+  ['BR3301', 'Norvane Outdoor', 'OUTDOOR', 1.22],
+  ['BR3302', 'Velkira Knit', 'WOMEN_CASUAL', 1.05],
 ]
 
 const unit = (code: string, rect: Rect, facing: Facing, band: string, category: string, brandId: string | null): MockUnit => ({
@@ -456,6 +461,60 @@ class RevisionEditor {
     })
   }
 
+  /** A brand leaves; the unit stays as a vacancy. */
+  vacate(floor: string, code: string, reason: string) {
+    const u = this.unit(floor, code)
+    if (!u.brandId) throw new Error(`mock unit already vacant: ${code}`)
+    const brandId = u.brandId
+    const name = this.brandName(brandId)
+    u.brandId = null
+    this.record({
+      change_type: 'reassign',
+      floor,
+      unit_codes_before: [code],
+      unit_codes_after: [code],
+      brand_ids_before: [brandId],
+      brand_ids_after: [],
+      summary: `${floor} ${code} ${name} 퇴점 → 공실 (${reason})`,
+      details: { brand_name_before: name, brand_name_after: null, reason },
+    })
+  }
+
+  /** A new brand opens in a vacant unit. */
+  enter(floor: string, code: string, brandId: string, reason: string) {
+    const u = this.unit(floor, code)
+    const brand = this.brands.get(brandId)
+    if (!brand || u.brandId) throw new Error(`invalid mock entry ${brandId} -> ${code}`)
+    u.brandId = brand.id
+    u.category = brand.category
+    this.record({
+      change_type: 'reassign',
+      floor,
+      unit_codes_before: [code],
+      unit_codes_after: [code],
+      brand_ids_before: [],
+      brand_ids_after: [brand.id],
+      summary: `${floor} ${code} 신규 입점: ${brand.name}(${categoryName(brand.category)}) (${reason})`,
+      details: { brand_name_before: null, brand_name_after: brand.name, category_after: brand.category, reason },
+    })
+  }
+
+  resize(floor: string, code: string, rect: Rect, reason: string) {
+    const u = this.unit(floor, code)
+    const before = rectArea(u.rect)
+    u.rect = [...rect] as Rect
+    this.record({
+      change_type: 'resize',
+      floor,
+      unit_codes_before: [code],
+      unit_codes_after: [code],
+      brand_ids_before: u.brandId ? [u.brandId] : [],
+      brand_ids_after: u.brandId ? [u.brandId] : [],
+      summary: `${floor} ${code} 면적 변경: ${before}㎡ → ${rectArea(u.rect)}㎡ (${reason})`,
+      details: { area_before_m2: before, area_after_m2: rectArea(u.rect), reason },
+    })
+  }
+
   boundaryShift(floor: string, grow: string, shrink: string, shift: number) {
     const g = this.unit(floor, grow)
     const s = this.unit(floor, shrink)
@@ -697,4 +756,90 @@ export function changesBetween(world: MockWorld, from: string, to: string): Chan
   const common = ancestors(world, from).find((rev) => ancestors(world, to).includes(rev))
   if (!common) return []
   return [...forward(world, common, from).map(invertChange).reverse(), ...forward(world, common, to)]
+}
+
+// --- seasonal relayout and uploaded drawings (mock) ---------------------------------------------
+
+/** One planned change of a seasonal relayout alternative (unit codes carry the floor). */
+export interface SeasonChange {
+  type: 'exit' | 'entry' | 'move'
+  brandId: string
+  /** Unit the brand leaves (exit, move). */
+  from?: string
+  /** Unit the brand opens in (entry, move). */
+  to?: string
+  reason: string
+}
+
+const SEASON_ORDER: Record<SeasonChange['type'], number> = { exit: 0, move: 1, entry: 2 }
+
+/** Exits first (they free units), then moves, then entries. Changes that no longer fit are skipped. */
+function applySeasonChanges(editor: RevisionEditor, changes: readonly SeasonChange[]): void {
+  const sorted = [...changes].sort((a, b) => SEASON_ORDER[a.type] - SEASON_ORDER[b.type])
+  for (const change of sorted) {
+    const floor = (change.from ?? change.to ?? '').split('-')[0]
+    try {
+      if (change.type === 'exit' && change.from) editor.vacate(floor, change.from, change.reason)
+      else if (change.type === 'move' && change.from && change.to) editor.move(floor, change.from, change.to, change.reason)
+      else if (change.type === 'entry' && change.to) editor.enter(floor, change.to, change.brandId, change.reason)
+    } catch {
+      // The parent revision differs from the one the plan was made for; keep the rest of the plan.
+    }
+  }
+}
+
+/** Hypothetical revision of one relayout alternative, drawn on `parentRev`. */
+export function buildSeasonRevision(
+  world: MockWorld,
+  revId: string,
+  parentRev: string,
+  changes: readonly SeasonChange[],
+  notes: string,
+): MockRevision | null {
+  const parent = world.revisions.get(parentRev)
+  if (!parent) return null
+  const editor = new RevisionEditor(parent.floors, world.brands)
+  applySeasonChanges(editor, changes)
+  return { info: revisionInfo(revId, 'hypothetical', parentRev, null), notes, floors: editor.floors, changes: editor.items }
+}
+
+/**
+ * What the CAD team "drew" for the mock F/W relayout on R2: the FW2026 ALT-1 plan, except that
+ * Lumivane went to 3F-E02 instead of 3F-E01, plus a brand swap and a resized unit nobody planned.
+ */
+const DRAWN_SEASON_CHANGES: readonly SeasonChange[] = [
+  { type: 'exit', brandId: 'BR3011', from: '3F-E01', reason: '계약 만료' },
+  { type: 'exit', brandId: 'BR3101', from: '3F-E02', reason: '계약 만료' },
+  { type: 'move', brandId: 'BR3014', from: '3F-C06', to: '3F-E02', reason: 'F/W 개편 이전' },
+  { type: 'entry', brandId: 'BR3301', to: '3F-C06', reason: 'F/W 신규 입점' },
+]
+
+/** Revision registered by a mock drawing upload (`seasonDrawing`: apply the drawn F/W relayout). */
+export function buildUploadedRevision(
+  world: MockWorld,
+  revId: string,
+  parentRev: string,
+  effectiveDate: string,
+  seasonDrawing: boolean,
+): MockRevision | null {
+  const parent = world.revisions.get(parentRev)
+  if (!parent) return null
+  const editor = new RevisionEditor(parent.floors, world.brands)
+  if (seasonDrawing) {
+    applySeasonChanges(editor, DRAWN_SEASON_CHANGES)
+    try {
+      editor.reassign('3F', '3F-N02', 'BR3007', '현장 협의로 브랜드 교체')
+      editor.resize('3F', '3F-C06', [79, 43, 102, 62], '입점 공사 도면 반영')
+    } catch {
+      // parent without these units: keep the drawn relayout only
+    }
+  }
+  return {
+    info: revisionInfo(revId, 'actual', parentRev, effectiveDate),
+    // The revision selector already marks uploads (model_source); no extra note.
+    notes: '',
+    floors: editor.floors,
+    changes: editor.items,
+    modelSource: 'uploaded',
+  }
 }

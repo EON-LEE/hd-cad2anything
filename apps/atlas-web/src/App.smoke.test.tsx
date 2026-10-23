@@ -1,12 +1,25 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { Dispatch, ReactNode } from 'react'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
-import type { AtlasDataSource } from './api/client'
+import { normalizeMeta, type AtlasDataSource } from './api/client'
 import { createMockContext, type DataContextValue } from './api/source'
+import { LayoutPanel } from './components/LayoutPanel'
+import { DiagnosisView } from './components/RelayoutBrief'
+import { SidePanel } from './components/SidePanel'
+import { UploadArea } from './components/UploadArea'
 import { QUICK_PROMPTS } from './lib/prompts'
+import { normalizeDiagnosis } from './lib/relayout'
 import { setMockSpeed } from './mock/chatScripts'
+import { AppProviders } from './state/AppProviders'
+import { replaceOp, type AppAction, type AppState } from './state/reducer'
+import { useAppDispatch, useAppState } from './state/store'
 import type { AgUiEvent } from './types/api'
+
+// All screen tests share this file so that the slow jsdom environment is set up once per run.
+// On a busy machine one test can take several seconds, so the screen tests get a longer timeout.
+const SCREEN_TEST_TIMEOUT = 20_000
 
 // jsdom has no WebGL, and importing the full deck.gl module graph is slow under the test runner.
 // Replace deck.gl with light stand-ins: layers keep their props, and <DeckGL> renders a probe that
@@ -88,7 +101,7 @@ async function renderWithStream(streamChat: AtlasDataSource['streamChat']) {
   fireEvent.keyDown(input, { key: 'Enter' })
 }
 
-describe('Atlas smoke test (mock mode, jsdom)', () => {
+describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }, () => {
   beforeAll(() => {
     setMockSpeed(0)
     // Give the canvas a size so the view state (and the deck probe) is created.
@@ -382,5 +395,339 @@ describe('Atlas smoke test (mock mode, jsdom)', () => {
     expect(within(log()).getByText('공간 생산성 계산')).toBeTruthy()
     expect(log().textContent).not.toContain('analytics_productivity')
     expect(log().textContent).not.toContain('raw summary')
+  })
+})
+
+// --- 시즌 개편 and upload screens ----------------------------------------------------------------
+
+let latest: AppState
+let dispatch: Dispatch<AppAction>
+
+/** Exposes the store to the test. */
+function Probe() {
+  latest = useAppState()
+  dispatch = useAppDispatch()
+  return null
+}
+
+async function renderWith(ui: ReactNode, prepare?: (context: DataContextValue) => Promise<DataContextValue>) {
+  let context = await createMockContext('테스트용 모의 데이터')
+  if (prepare) context = await prepare(context)
+  render(
+    <AppProviders context={context}>
+      {ui}
+      <Probe />
+    </AppProviders>,
+  )
+  return context
+}
+
+/** Upload R3 (drawn F/W relayout on R2) through the mock source and wait for the job to finish. */
+async function withUploadedR3(context: DataContextValue): Promise<DataContextValue> {
+  const { source } = context
+  const created = await source.uploadDrawings({ files: [new File(['0'], 'R3_3F.dxf')], rev_id: 'R3', effective_date: '2026-10-01', profile: 'customer_style' })
+  for (let i = 0; i < 10 && (await source.getUploadJob(created.job_id)).status !== 'done'; i += 1);
+  return { ...context, meta: normalizeMeta(await source.getMeta()) }
+}
+
+describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }, () => {
+  const createObjectURL = URL.createObjectURL
+
+  beforeAll(() => {
+    setMockSpeed(0)
+    // jsdom has no blob URLs; the mock report link needs one.
+    URL.createObjectURL = () => 'blob:mock-report'
+  })
+
+  afterEach(() => cleanup())
+
+  afterAll(() => {
+    setMockSpeed(1)
+    URL.createObjectURL = createObjectURL
+  })
+
+  describe('시즌 개편 (layout tab)', () => {
+    it('diagnoses, plans with options, previews on the map, records a decision and checks the drawing', async () => {
+      await renderWith(<LayoutPanel />, withUploadedR3)
+      // The default revision skips R3 (uploaded, no sales yet).
+      expect(latest.ui.rev).toBe('R2')
+      expect(screen.getByRole('tab', { name: '시즌 개편' }).getAttribute('aria-selected')).toBe('true')
+      const picker = (await screen.findByRole('combobox', { name: '개편 브리프' })) as HTMLSelectElement
+      await waitFor(() => expect(picker.value).toBe('FW2026'))
+      expect(within(picker).getByRole('option', { name: '2026 F/W MD 개편 (FW2026) · 초안' })).toBeTruthy()
+      expect(await screen.findByRole('heading', { name: '2026 F/W MD 개편' })).toBeTruthy()
+      expect(screen.getByText('4F, 5F, 6F')).toBeTruthy()
+
+      fireEvent.click(screen.getByRole('button', { name: '진단하기' }))
+      const candidates = await screen.findByRole('table', { name: '계약 만료 또는 저효율 후보 매장' })
+      expect(within(candidates).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['매장', '브랜드', '계약 만료', '효율', '사유'])
+      const quorelle = within(candidates).getByText('Quorelle').closest('tr')!
+      // Brand and category share one cell; the percentile reads 하위 n%.
+      expect(within(quorelle).getAllByRole('cell')[1].textContent).toMatch(/^Quorelle\S/)
+      expect(within(quorelle).getByText(/^하위 \d+%$/)).toBeTruthy()
+      expect(within(quorelle).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['계약 만료', '저효율'])
+      expect(within(screen.getByRole('list', { name: '강세 카테고리' })).getAllByRole('listitem')[0].textContent).toBe('아웃도어 ×1.32')
+      expect(screen.getByText(/들어갈 수 있는 매장 2곳/)).toBeTruthy()
+      const diagnosisBlock = screen.getByText('진단 결과').closest('details')!
+      expect(diagnosisBlock.open).toBe(true)
+
+      fireEvent.change(screen.getByRole('combobox', { name: '목적' }), { target: { value: 'sales' } })
+      fireEvent.click(screen.getByRole('radio', { name: '전체' }))
+      fireEvent.click(screen.getByRole('button', { name: '대안 만들기' }))
+      // Busy state while the (long) plan call runs.
+      expect((screen.getByRole('button', { name: /대안을 만드는 중/ }) as HTMLButtonElement).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: '다시 진단하기' }).hasAttribute('disabled')).toBe(true)
+
+      expect(await screen.findByRole('heading', { name: 'ALT-1' })).toBeTruthy()
+      // With alternatives the diagnosis folds away (its summary stays) and opens again on demand.
+      await waitFor(() => expect(screen.getByText('진단 결과').closest('details')!.open).toBe(false))
+      expect(screen.queryByRole('table', { name: '계약 만료 또는 저효율 후보 매장' })).toBeNull()
+      expect(screen.getByText(/^후보 매장 \d+곳 · 강세 아웃도어/)).toBeTruthy()
+      fireEvent.click(screen.getByText('진단 결과'))
+      expect(await screen.findByRole('table', { name: '계약 만료 또는 저효율 후보 매장' })).toBeTruthy()
+
+      const cards = screen.getAllByRole('article')
+      expect(cards.map((c) => c.querySelector('h4')?.textContent)).toEqual(['ALT-0 기준안', 'ALT-1', 'ALT-2', 'ALT-3'])
+      const toggles = cards.map((c, i) => within(c).getByRole('button', { name: `ALT-${i} 자세히` }))
+      // Only the best alternative by net effect is open; the others show the summary and KPIs.
+      expect(toggles.map((t) => t.getAttribute('aria-expanded'))).toEqual(['false', 'true', 'false', 'false'])
+      expect(within(cards[2]).queryByRole('button', { name: 'ALT-2 도면에서 보기' })).toBeNull()
+      const alt1 = cards[1]
+      const kpi = (card: HTMLElement, label: string) => within(card).getByText(label).nextElementSibling!.textContent!
+      for (const label of ['순효과', '목표 변화', '이전 비용']) expect(within(alt1).getByText(label)).toBeTruthy()
+      expect(kpi(alt1, '목표 변화')).toContain('(매출)')
+      expect(kpi(alt1, '기준안 대비 매출 변화')).toMatch(/^\+6\.2억 원 \(범위 \+3\.4억 원 ~ \+8\.8억 원\)$/)
+      expect(kpi(alt1, '지금 대비 매출 변화')).not.toContain('범위')
+      expect(['입점', '퇴점', '이전'].map((label) => within(alt1).getByText(label).tagName)).toEqual(['SPAN', 'SPAN', 'SPAN'])
+      expect(within(alt1).getByText('Lumivane').closest('li')!.textContent).toMatch(/^3FLumivane 3F-C06 → 3F-E01 · /)
+      expect(within(alt1).getByText('제약 3개 모두 충족')).toBeTruthy()
+      expect(within(alt1).queryByRole('list', { name: 'ALT-1 제약 조건' })).toBeNull()
+      fireEvent.click(within(alt1).getByRole('button', { name: 'ALT-1 제약 전체 보기' }))
+      expect(within(within(alt1).getByRole('list', { name: 'ALT-1 제약 조건' })).getAllByRole('listitem')).toHaveLength(3)
+
+      // Explanations stay folded until 근거 보기; the card's notes are listed as 참고.
+      expect(within(alt1).queryByText(/파급 효과/)).toBeNull()
+      fireEvent.click(within(alt1).getByRole('button', { name: 'ALT-1 근거 보기' }))
+      expect(within(alt1).getByText(/^Norvane Outdoor\(3F-C06\) 입점: /)).toBeTruthy()
+      expect(within(alt1).getByRole('heading', { name: '참고' })).toBeTruthy()
+      expect(within(alt1).getByText(/파급 효과/)).toBeTruthy()
+
+      expect(within(cards[3]).getByText('제약 위반 1')).toBeTruthy()
+      fireEvent.click(toggles[3])
+      expect(within(cards[3]).getByText('제약 위반 1개')).toBeTruthy()
+      expect(within(within(cards[3]).getByRole('list', { name: 'ALT-3 제약 위반' })).getByText('중앙 섬 공실 없음')).toBeTruthy()
+      expect(screen.getByText('자리를 찾지 못한 입점 브랜드 1개')).toBeTruthy()
+
+      const preview = within(alt1).getByRole('button', { name: 'ALT-1 도면에서 보기' })
+      fireEvent.click(preview)
+      expect(latest.ui).toMatchObject({ rev: 'FW2026-A1', compareRev: 'R2', floor: '3F', heatmap: null, journey: null, route: null })
+      expect(latest.ui.highlights.map((h) => h.unit_code)).toEqual(['3F-E01', '3F-E02', '3F-C06'])
+      expect(latest.ui.edges).toEqual([expect.objectContaining({ from: '3F-C06', to: '3F-E01' })])
+      expect(preview.getAttribute('aria-pressed')).toBe('true')
+
+      // Decide ALT-2: open its details first.
+      fireEvent.click(toggles[2])
+      fireEvent.click(within(cards[2]).getByRole('button', { name: 'ALT-2 이 대안으로 결정' }))
+      const decider = within(cards[2]).getByRole('textbox', { name: '결정자' }) as HTMLInputElement
+      expect(decider.value).toBe('MD팀')
+      fireEvent.change(decider, { target: { value: 'MD팀 김OO' } })
+      fireEvent.click(within(cards[2]).getByRole('button', { name: '결정 기록' }))
+      expect(await screen.findByText(/결정한 대안: ALT-2 \(FW2026-A2\)/)).toBeTruthy()
+      expect(screen.getByText(/결정자 MD팀 김OO/)).toBeTruthy()
+      await waitFor(() => expect(within(screen.getAllByRole('article')[2]).getByText('결정됨')).toBeTruthy())
+      // The decided card is the one open now.
+      await waitFor(() =>
+        expect(screen.getAllByRole('button', { name: /^ALT-\d 자세히$/ }).map((t) => t.getAttribute('aria-expanded'))).toEqual(['false', 'false', 'true', 'false']),
+      )
+
+      const checkRev = screen.getByRole('combobox', { name: '대조할 실제 개정' }) as HTMLSelectElement
+      expect(checkRev.value).toBe('R3')
+      expect(within(checkRev).getByRole('option', { name: 'R3 · 2026-10-01 · 부모 R2 · 업로드 · 실적 없음' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: '도면 대조' }))
+      expect(await screen.findByText('50%')).toBeTruthy()
+      const items = screen.getByRole('table', { name: '계획한 입점·퇴점·이전과 도면의 대조' })
+      expect(within(items).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['결과', '브랜드', '계획 → 도면'])
+      const rows = within(items).getAllByRole('row').slice(1)
+      expect(rows.map((r) => r.className)).toEqual(['', '', 'mismatch', 'mismatch'])
+      expect(rows.map((r) => within(r).getAllByRole('cell')[0].textContent)).toEqual(['일치', '일치', '다른 매장', '다른 매장'])
+      expect(rows[0].textContent).toBe('일치Quorelle퇴점 · 3F-E01퇴점 → 도면에 없음')
+      expect(rows[2].textContent).toBe('다른 매장Studio Velune이전 · 3F-C01에서3F-E02 → 3F-C01')
+      expect(rows[3].textContent).toBe('다른 매장Norvane Outdoor입점3F-C01 → 3F-C06')
+      // Unplanned changes show brand names, not IDs.
+      const unexpected = within(screen.getByRole('list', { name: '계획에 없던 브랜드 변경' })).getAllByRole('listitem')
+      expect(unexpected.map((li) => li.textContent).sort()).toEqual(['3F-C06 Lumivane → Norvane Outdoor', '3F-N02 Dovrelle → Talvessa'])
+      expect(within(screen.getByRole('table', { name: '기준 개정 대비 매장 면적 변경' })).getByText('−4.2%')).toBeTruthy()
+
+      const report = screen.getByRole('link', { name: '제안서 열기' })
+      expect(report.getAttribute('href')).toBe('blob:mock-report')
+      expect(report.getAttribute('target')).toBe('_blank')
+      expect(report.getAttribute('rel')).toContain('noopener')
+      await waitFor(() => expect(within(picker).getByRole('option', { name: /FW2026\) · 도면 대조 완료$/ })).toBeTruthy())
+    })
+
+    it('shows the first 8 candidates with a toggle for the rest', () => {
+      const diagnosis = normalizeDiagnosis({
+        season: { code: 'FW', label: 'F/W' },
+        candidates: Array.from({ length: 11 }, (_, i) => ({
+          unit_code: `4F-C${String(i + 1).padStart(2, '0')}`,
+          brand_name: `브랜드 ${i + 1}`,
+          category_name: '여성 캐주얼',
+          lease_end: '2026-09-30',
+          percentile: i * 3,
+          reasons: ['계약 만료'],
+        })),
+        candidate_total: 11,
+      })!
+      render(<DiagnosisView diagnosis={diagnosis} />)
+      const table = screen.getByRole('table', { name: '계약 만료 또는 저효율 후보 매장' })
+      expect(within(table).getAllByRole('row')).toHaveLength(9)
+      expect(within(table).getByText('하위 1%')).toBeTruthy()
+      const more = screen.getByRole('button', { name: '모두 보기 (11)' })
+      expect(more.getAttribute('aria-expanded')).toBe('false')
+      fireEvent.click(more)
+      expect(within(table).getAllByRole('row')).toHaveLength(12)
+      expect(screen.getByRole('button', { name: '처음 8곳만 보기' }).getAttribute('aria-expanded')).toBe('true')
+    })
+  })
+  describe('업로드 (review tab)', () => {
+    it('validates, uploads a drawing, follows the job, saves a layer mapping and opens the new revision', async () => {
+      await renderWith(<UploadArea request={null} pollMs={10} />)
+      const submit = screen.getByRole('button', { name: '올리기' })
+      fireEvent.click(submit)
+      expect(await screen.findByText('도면 파일을 하나 이상 고르세요.')).toBeTruthy()
+      expect(screen.getByText('새 개정 ID를 입력하세요.')).toBeTruthy()
+      expect(screen.getByText('적용일을 입력하세요.')).toBeTruthy()
+      expect(screen.getByRole('alert').textContent).toBe('입력 내용을 확인해 주세요 (3건).')
+      const files = screen.getByLabelText('도면 파일') as HTMLInputElement
+      expect(files.getAttribute('aria-invalid')).toBe('true')
+      expect(document.activeElement).toBe(files)
+      expect(files.accept).toBe('.dxf,.zip')
+
+      fireEvent.change(files, { target: { files: [new File(['0'], 'R3_3F.dxf'), new File(['1'], '3F.dxf')] } })
+      const revId = screen.getByRole('textbox', { name: '새 개정 ID' }) as HTMLInputElement
+      fireEvent.change(revId, { target: { value: 'r2' } })
+      expect(revId.value).toBe('R2')
+      fireEvent.change(screen.getByLabelText('적용일'), { target: { value: '2026-10-01' } })
+      fireEvent.click(submit)
+      expect(await screen.findByText(/같은 층\(3F\) 파일이 둘 이상입니다/)).toBeTruthy()
+      expect(screen.getByText(/R2는 이미 있는 개정입니다/)).toBeTruthy()
+
+      fireEvent.change(files, { target: { files: [new File(['0'], 'R3_3F.dxf')] } })
+      fireEvent.change(revId, { target: { value: 'R3' } })
+      expect((screen.getByRole('combobox', { name: '부모 개정' }) as HTMLSelectElement).value).toBe('R2')
+      expect(await screen.findByRole('option', { name: '고객사 도면 스타일 (customer_style)' })).toBeTruthy()
+      expect((screen.getByRole('checkbox', { name: '산출물 재생성' }) as HTMLInputElement).checked).toBe(true)
+      fireEvent.click(submit)
+
+      // The job is polled until it settles; the live line follows it.
+      await waitFor(() => expect(screen.getByRole('status').textContent).toBe('R3 처리를 마쳤습니다. 레이어 의미를 확인해 주세요.'), { timeout: 5000 })
+      const steps = within(screen.getByRole('list', { name: '처리 단계' })).getAllByRole('listitem')
+      expect(steps).toHaveLength(8)
+      expect(steps[0].textContent).toContain('파일 저장')
+      expect(steps[7].textContent).toContain('건너뜀')
+      // Lease QA: errors and warnings listed with one chip per row; infos (참고) behind a toggle.
+      const qa = screen.getByRole('table', { name: '계약 정보와 다른 점' })
+      expect(within(qa).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['유형', '매장', '내용'])
+      expect(within(qa).getAllByRole('row')).toHaveLength(3)
+      expect(within(qa).getByText('경고 · 면적 불일치').className).toContain('warn')
+      expect(screen.getByText('계약 정보 대조 · 오류 0 · 경고 2 · 참고 2')).toBeTruthy()
+      const infos = screen.getByRole('button', { name: '참고 2건 보기' })
+      expect(infos.getAttribute('aria-expanded')).toBe('false')
+      expect(screen.queryByRole('table', { name: '참고 사항' })).toBeNull()
+      fireEvent.click(infos)
+      const infoTable = screen.getByRole('table', { name: '참고 사항' })
+      expect(within(infoTable).getAllByText('참고 · 계약 없는 매장')).toHaveLength(2)
+      expect(infos.getAttribute('aria-expanded')).toBe('true')
+      // /api/meta was reloaded: the new revision is listed (uploaded, no sales yet).
+      await waitFor(() => expect(screen.getByRole('option', { name: 'R3 · 실제 · 2026-10-01 · 업로드 · 실적 없음' })).toBeTruthy())
+      await waitFor(() => expect(within(screen.getByRole('list', { name: '최근 작업' })).getByText('검토 필요')).toBeTruthy())
+
+      const semantic = screen.getByRole('combobox', { name: 'A-AREA-17 (3F) 레이어 의미' }) as HTMLSelectElement
+      expect(semantic.value).toBe('unit')
+      expect(within(semantic).getAllByRole('option')).toHaveLength(17)
+      fireEvent.change(semantic, { target: { value: 'walkway' } })
+      fireEvent.click(screen.getByRole('button', { name: '매핑 저장 후 다시 처리' }))
+      await waitFor(() => expect(screen.getByRole('status').textContent).toBe('R3 처리를 마쳤습니다.'), { timeout: 5000 })
+      expect(screen.queryByRole('button', { name: '매핑 저장 후 다시 처리' })).toBeNull()
+
+      fireEvent.click(screen.getByRole('button', { name: '이 개정 보기' }))
+      expect(latest.ui.rev).toBe('R3')
+      expect(screen.getByRole('button', { name: 'R3 보는 중' }).hasAttribute('disabled')).toBe(true)
+    })
+
+    it('uploads metadata and shows the result and the status table', async () => {
+      await renderWith(<UploadArea request={null} />)
+      fireEvent.click(screen.getByRole('tab', { name: '메타데이터' }))
+      const kind = (await screen.findByRole('combobox', { name: '종류' })) as HTMLSelectElement
+      const file = screen.getByLabelText('파일') as HTMLInputElement
+      expect(file.accept).toBe('.csv,.xlsx')
+      fireEvent.change(kind, { target: { value: 'relayout_brief' } })
+      expect(file.accept).toBe('.yaml,.yml,.json')
+      fireEvent.change(kind, { target: { value: 'brands' } })
+
+      fireEvent.click(screen.getByRole('button', { name: '올리기' }))
+      expect(await screen.findByText('올릴 파일을 고르세요.')).toBeTruthy()
+
+      fireEvent.change(file, { target: { files: [new File(['x'], 'bad_brands.csv')] } })
+      fireEvent.click(screen.getByRole('button', { name: '올리기' }))
+      const rejected = await screen.findByRole('region', { name: '브랜드 업로드 결과' })
+      expect(within(rejected).getByText('거부됨')).toBeTruthy()
+      expect(within(rejected).getByText(/필수 열이 없습니다: brand_name/)).toBeTruthy()
+      expect(within(rejected).getByText(/기존 데이터는 바뀌지 않았습니다/)).toBeTruthy()
+
+      const table = await screen.findByRole('table', { name: '종류별 메타데이터 현재 상태' })
+      expect(within(table).getAllByRole('row')).toHaveLength(7)
+
+      fireEvent.change(kind, { target: { value: 'relayout_brief' } })
+      const yaml = 'brief_id: SS2027\ntitle: 2027 S/S 개편\nseason: SS\nyear: 2027\neffective_date: 2027-03-01\nbase_rev: R2\nfloors: [3F]\n'
+      fireEvent.change(file, { target: { files: [new File([yaml], 'ss2027.yaml')] } })
+      fireEvent.click(screen.getByRole('button', { name: '올리기' }))
+      const accepted = await screen.findByRole('region', { name: '개편 브리프 업로드 결과' })
+      expect(within(accepted).getByText('반영됨')).toBeTruthy()
+      expect(within(accepted).getByText('SS2027')).toBeTruthy()
+      await waitFor(() => expect(within(screen.getByRole('table', { name: '종류별 메타데이터 현재 상태' })).getByText('FW2026, SS2027')).toBeTruthy())
+      fireEvent.click(within(accepted).getByRole('button', { name: '시즌 개편에서 열기' }))
+      expect(latest.ui.panel).toEqual({ type: 'layout', payload: { brief_id: 'SS2027' } })
+    })
+  })
+
+  describe('agent panel requests', () => {
+    it('open the upload area, the season brief and the what-if view in the side panel', async () => {
+      await renderWith(<SidePanel />)
+      act(() => {
+        dispatch({
+          type: 'chat/event',
+          event: { type: 'STATE_DELTA', delta: [replaceOp('/panel', { type: 'uploads', payload: { job_id: 'J-unknown' } })] },
+        })
+      })
+      await waitFor(() => expect(screen.getByRole('tab', { name: '개정 검토' }).getAttribute('aria-selected')).toBe('true'))
+      expect(screen.getByRole('button', { name: '도면·메타데이터 올리기' }).getAttribute('aria-expanded')).toBe('true')
+      expect(screen.getByRole('tab', { name: '도면 올리기' }).getAttribute('aria-selected')).toBe('true')
+      expect(await screen.findByText(/업로드 작업을 찾을 수 없습니다: J-unknown/)).toBeTruthy()
+
+      act(() => {
+        dispatch({ type: 'chat/event', event: { type: 'STATE_DELTA', delta: [replaceOp('/panel', { type: 'layout', payload: { brief_id: 'FW2026' } })] } })
+      })
+      await waitFor(() => expect(screen.getByRole('tab', { name: '레이아웃 대안' }).getAttribute('aria-selected')).toBe('true'))
+      expect(screen.getByRole('tab', { name: '시즌 개편' }).getAttribute('aria-selected')).toBe('true')
+      expect(await screen.findByRole('heading', { name: '2026 F/W MD 개편' })).toBeTruthy()
+
+      const alternatives = [{ id: 'ALT-3F-A', moves: [{ brand_id: 'BR3011', brand_name: 'Quorelle', from_unit: '3F-E01', to_unit: '3F-C06' }] }]
+      act(() => {
+        dispatch({
+          type: 'chat/event',
+          event: { type: 'STATE_DELTA', delta: [replaceOp('/panel', { type: 'layout', payload: { rev: 'R2', floors: ['3F'], alternatives } })] },
+        })
+      })
+      await waitFor(() => expect(screen.getByRole('tab', { name: '배치 대안' }).getAttribute('aria-selected')).toBe('true'))
+      expect(screen.getByRole('heading', { name: 'ALT-3F-A' })).toBeTruthy()
+
+      // Unknown panel types change nothing.
+      act(() => {
+        dispatch({ type: 'chat/event', event: { type: 'STATE_DELTA', delta: [replaceOp('/panel', { type: 'wizard', payload: {} })] } })
+      })
+      expect(latest.ui.panel?.type).toBe('none')
+      expect(screen.getByRole('tab', { name: '레이아웃 대안' }).getAttribute('aria-selected')).toBe('true')
+    })
   })
 })

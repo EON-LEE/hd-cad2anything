@@ -109,6 +109,9 @@ const PREFIX_LABELS: readonly [string, string][] = [
   ['render_', '표 만들기'],
   ['analytics_', '데이터 분석'],
   ['layout_', '배치 계산'],
+  ['relayout_', '시즌 개편 확인'],
+  ['uploads_', '업로드 확인'],
+  ['upload_', '업로드 확인'],
   ['whatif_', '효과 추정'],
   ['ui_', '화면 바꾸기'],
 ]
@@ -154,6 +157,7 @@ const PANEL_LABELS: Readonly<Record<string, string>> = {
   layout: '재배치 대안 열기',
   table: '표 열기',
   journey: '동선 목록 열기',
+  uploads: '도면 업로드 열기',
   none: '패널 닫기',
 }
 
@@ -192,8 +196,10 @@ function describeKey(key: string, values: Map<string, unknown>): string | null {
     case 'panel': {
       if (!isRecord(value)) return null
       const type = String(value.type ?? '')
-      const title = isRecord(value.payload) && typeof value.payload.title === 'string' ? value.payload.title : ''
+      const payload = isRecord(value.payload) ? value.payload : {}
+      const title = typeof payload.title === 'string' ? payload.title : ''
       if (type === 'table' && title) return `표 열기 · ${title}`
+      if (type === 'layout' && typeof payload.brief_id === 'string' && payload.brief_id) return `시즌 개편 열기 · ${payload.brief_id}`
       return PANEL_LABELS[type] ?? null
     }
     case 'journey':
