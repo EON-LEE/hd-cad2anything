@@ -60,6 +60,7 @@ def foundry_runtime_factory(toolkit: Toolkit) -> AgentRuntime:
         route_provider=lambda rev=None, **params: toolkit.route_object(
             rev or latest_actual_rev(toolkit), **params, with_geometry=True
         ),
+        flow_provider=lambda rev=None, **params: toolkit.flow_object(rev=rev, **params),
     )
     return AgentRuntime.from_project(endpoint, credential, ui_handler=handler)
 

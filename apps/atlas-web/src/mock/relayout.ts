@@ -10,6 +10,8 @@ import type {
   RelayoutChange,
   RelayoutCheck,
   RelayoutDiagnosis,
+  RelayoutPhasing,
+  RelayoutPhasingRequest,
   RelayoutPlan,
   RelayoutPlanOptions,
   RelayoutProject,
@@ -18,6 +20,7 @@ import type {
 } from '../types/api'
 import { mockProductivityDetails } from './analytics'
 import { MOCK_DATA_THROUGH, categoryName } from './catalog'
+import { planConstruction } from './phasing'
 import { buildSeasonRevision, rectArea, type MockFloor, type MockWorld, type SeasonChange } from './world'
 
 const STAND_IN_FLOOR = '3F'
@@ -202,6 +205,7 @@ interface MockProject {
   decided_by: string | null
   decided_at: string | null
   check: RelayoutCheck | null
+  phasing: RelayoutPhasing | null
   updated_at: string
   version: number
   report: { version: number; url: string | null } | null
@@ -238,6 +242,12 @@ function reportHtml(p: MockProject): string {
     rows ? `<table><thead><tr><th>대안</th><th>요약</th><th>순효과</th><th>지금 대비 매출</th></tr></thead><tbody>${rows}</tbody></table>` : '<p>아직 대안이 없습니다.</p>',
     '<h2>선택안</h2>',
     p.selected_alt_id ? `<p>${escapeHtml(p.selected_alt_id)} · ${escapeHtml(p.decided_by ?? '')} · ${escapeHtml(p.decided_at ?? '')}</p>` : '<p>아직 결정하지 않았습니다.</p>',
+    '<h2>공사 순서</h2>',
+    p.phasing
+      ? `<p>${escapeHtml(p.phasing.summary)}</p><ol>${p.phasing.steps
+          .map((s) => `<li>${s.start_week}~${s.end_week}주 · ${escapeHtml(s.unit_code ?? '–')} · ${escapeHtml(s.action_label ?? s.action)} · ${escapeHtml(s.brand_name)}</li>`)
+          .join('')}</ol>`
+      : '<p>아직 공사 순서를 계산하지 않았습니다.</p>',
     '<h2>도면 대조</h2>',
     p.check ? `<p>${escapeHtml(p.check.rev)}: 일치율 ${p.check.conformance_pct}% · ${escapeHtml(p.check.summary)}</p>` : '<p>아직 대조하지 않았습니다.</p>',
     '<h2>가정과 한계</h2>',
@@ -277,6 +287,7 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
     decided_by: null,
     decided_at: null,
     check: null,
+    phasing: null,
     updated_at: updatedAt,
     version: 0,
     report: null,
@@ -326,6 +337,7 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       decided_by: p.decided_by,
       decided_at: p.decided_at,
       check: p.check,
+      phasing: p.phasing,
       report_url: reportUrl(p),
       updated_at: p.updated_at,
     })
@@ -511,6 +523,52 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
     }
   }
 
+  function phaseProject(p: MockProject, body: RelayoutPhasingRequest): RelayoutPhasing {
+    const plan = p.plan
+    if (!plan) throw new ApiError(400, '먼저 대안을 만들어 주세요.')
+    let alternative: RelayoutAlternative | undefined
+    if (body.alt_id) {
+      let wanted = body.alt_id.trim().toUpperCase()
+      if (/^\d+$/.test(wanted)) wanted = `ALT-${wanted}`
+      alternative = plan.alternatives.find((a) => a.alt_id === wanted)
+      if (!alternative) throw new ApiError(400, `대안을 찾을 수 없습니다: ${body.alt_id}`)
+    } else if (p.selected_alt_id) {
+      alternative = plan.alternatives.find((a) => a.alt_id === p.selected_alt_id)
+    }
+    if (!alternative) {
+      const options = plan.alternatives.filter((a) => a.alt_id !== 'ALT-0')
+      alternative = (options.length ? options : plan.alternatives).reduce((best, a) => ((a.kpi.net_krw ?? -Infinity) > (best.kpi.net_krw ?? -Infinity) ? a : best))
+    }
+    const crews = body.crews ?? 2
+    const weeks = body.fitout_weeks ?? Math.min(Math.max(p.brief.downtime_weeks ?? 2, 1), 12)
+    const ratio = body.temporary_sales_ratio ?? 0.6
+    if (!Number.isInteger(crews) || crews < 1 || crews > 6 || !(weeks >= 1 && weeks <= 12) || !(ratio >= 0 && ratio <= 1)) {
+      throw new ApiError(400, 'crews는 1~6, fitout_weeks는 1~12, temporary_sales_ratio는 0~1이어야 합니다.')
+    }
+    const floor = baseFloors(p)[STAND_IN_FLOOR]
+    const { rows } = salesByBrand(p)
+    const result = planConstruction({
+      altId: alternative.alt_id,
+      changes: alternative.changes,
+      occupancy: new Map((floor?.units ?? []).filter((u) => u.brandId).map((u) => [u.code, u.brandId!])),
+      areas: new Map((floor?.units ?? []).map((u) => [u.code, rectArea(u.rect)])),
+      annualSales: new Map(rows.map((r) => [r.unit_code, r.sales_krw ?? 0])),
+      baseRev: p.brief.base_rev,
+      crews,
+      weeks,
+      ratio,
+      useTemporary: body.use_temporary ?? true,
+    })
+    return {
+      brief_id: p.brief.brief_id,
+      alt_id: alternative.alt_id,
+      rev_id: alternative.rev_id,
+      ...result,
+      caveats: [...result.caveats, STAND_IN_NOTE],
+      created_at: kstNow(),
+    }
+  }
+
   function checkProject(p: MockProject, rev: string): RelayoutCheck {
     if (!p.selected_alt_id || !p.plan) throw new ApiError(400, '선택한 대안이 없습니다. 먼저 대안을 결정해 주세요.')
     const actual = world.revisions.get(rev)
@@ -603,11 +661,12 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
     plan(briefId: string, options: RelayoutPlanOptions): RelayoutPlan {
       const p = projectOf(briefId)
       p.plan = planProject(p, options)
-      // New alternatives replace the earlier decision and drawing check.
+      // New alternatives replace the earlier decision, construction order and drawing check.
       p.selected_alt_id = null
       p.decided_by = null
       p.decided_at = null
       p.check = null
+      p.phasing = null
       p.status = 'planned'
       touch(p)
       return structuredClone(p.plan)
@@ -623,6 +682,8 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       p.decided_by = decidedBy
       p.decided_at = kstNow()
       p.check = null
+      // A construction order made for another alternative no longer applies.
+      if (p.phasing?.alt_id !== alt.alt_id) p.phasing = null
       p.status = 'selected'
       touch(p)
       return view(p)
@@ -633,6 +694,13 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       p.status = 'checked'
       touch(p)
       return structuredClone(p.check)
+    },
+    /** Construction order of an alternative (default: the decided one, else the best net effect); stored in the project. */
+    phasing(briefId: string, body: RelayoutPhasingRequest): RelayoutPhasing {
+      const p = projectOf(briefId)
+      p.phasing = phaseProject(p, body)
+      touch(p)
+      return structuredClone(p.phasing)
     },
     reportUrl: (briefId: string) => {
       const p = projects.get(briefId)

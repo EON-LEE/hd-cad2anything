@@ -120,6 +120,48 @@ describe('mock seasonal relayout', () => {
     await expect(source.checkRelayout('FW2026', 'FW2026-A1')).rejects.toMatchObject({ status: 400 })
     await expect(source.checkRelayout('FW2026', 'R9')).rejects.toMatchObject({ status: 404 })
   })
+
+  it('orders the construction of the decided alternative and keeps it in the project', async () => {
+    const source = createMockSource()
+    await expect(source.phaseRelayout('FW2026', {})).rejects.toMatchObject({ status: 400 })
+    await source.planRelayout('FW2026', { objective: 'commission', max_moves: 6, downtime_weeks: 2, movable: 'expiring' })
+
+    // Before a decision: the alternative with the best net effect (ALT-1), the brief's downtime weeks.
+    const best = await source.phaseRelayout('FW2026', {})
+    expect(best).toMatchObject({ brief_id: 'FW2026', alt_id: 'ALT-1', rev_id: 'FW2026-A1', params: { crews: 2, fitout_weeks: 2, temporary_sales_ratio: 0.6, use_temporary: true } })
+    expect(best.steps.map((s) => `${s.step}:${s.start_week}-${s.end_week}:${s.action}:${s.unit_code}:${s.brand_name}:${s.waits_for.join(',')}`)).toEqual([
+      '1:0-0:exit:3F-E01:Quorelle:',
+      '2:0-0:exit:3F-E02:Ilvora Leather:',
+      '3:0-2:move:3F-E01:Lumivane:',
+      // The new brand waits for Lumivane to leave 3F-C06.
+      '4:2-4:entry:3F-C06:Norvane Outdoor:3',
+    ])
+    expect(best.steps[2]).toMatchObject({ action_label: '이전 공사', from_unit: '3F-C06', closed_weeks: 0, lost_krw: 0 })
+    expect(best.steps[2].note).toBe('기존 매장 3F-C06에서 영업하다가 공사가 끝나면 옮겨요.')
+    // Moving brands keep trading until their new unit is ready: nothing is lost, unlike the plan's assumption.
+    expect(best).toMatchObject({ total_weeks: 4, lost_krw: 0, entry_delay_krw: 0, cycles: [] })
+    expect(best.naive_lost_krw!).toBeGreaterThan(0)
+    expect(best.saved_krw).toBe(best.naive_lost_krw)
+    expect(best.entries).toEqual([{ brand_id: 'BR3301', brand_name: 'Norvane Outdoor', unit_code: '3F-C06', open_week: 4, earliest_week: 4 }])
+    expect(best.summary).toContain('ALT-1의 공사 2건을 공사팀 2개로 나눠 4주 만에 끝내요.')
+    expect(best.caveats.at(-1)).toContain('3층')
+    expect((await source.getRelayoutProject('FW2026')).phasing).toMatchObject({ alt_id: 'ALT-1', total_weeks: 4 })
+
+    // One crew and longer fit-outs stretch ALT-3's two moves.
+    const slow = await source.phaseRelayout('FW2026', { alt_id: '3', crews: 1, fitout_weeks: 3 })
+    expect(slow).toMatchObject({ alt_id: 'ALT-3', total_weeks: 9, params: { crews: 1, fitout_weeks: 3 } })
+    await expect(source.phaseRelayout('FW2026', { crews: 7 })).rejects.toMatchObject({ status: 400 })
+    await expect(source.phaseRelayout('FW2026', { alt_id: 'ALT-9' })).rejects.toMatchObject({ status: 400 })
+
+    // Deciding another alternative drops the stored order; deciding the same one keeps it.
+    await source.phaseRelayout('FW2026', { alt_id: 'ALT-2' })
+    expect((await source.selectRelayoutAlternative('FW2026', { alt_id: 'ALT-2', decided_by: 'MD팀' })).phasing).toMatchObject({ alt_id: 'ALT-2' })
+    expect((await source.selectRelayoutAlternative('FW2026', { alt_id: 'ALT-1', decided_by: 'MD팀' })).phasing).toBeNull()
+    expect((await source.phaseRelayout('FW2026', {})).alt_id).toBe('ALT-1')
+    // New alternatives drop it too.
+    await source.planRelayout('FW2026', { max_moves: 1 })
+    expect((await source.getRelayoutProject('FW2026')).phasing).toBeNull()
+  })
 })
 
 describe('mock uploads', () => {
@@ -275,10 +317,17 @@ describe('mock uploads', () => {
     expect((await source.listDrawingProfiles()).map((p) => p.profile_id)).toEqual(['default', 'customer_style', 'vendor_b'])
 
     const status = await source.getMetadataStatus()
-    expect(status.map((s) => s.kind)).toEqual(['brands', 'tenancies', 'leases', 'pos_terminals', 'relayout_brief', 'drawing_profile'])
+    expect(status.map((s) => s.kind)).toEqual(['brands', 'tenancies', 'leases', 'pos_terminals', 'relayout_brief', 'drawing_profile', 'stores', 'store_kpis'])
     expect(status[0]).toMatchObject({ present: true, rows: 2, items: [], required_columns: ['brand_id', 'brand_name', 'category'] })
     expect(status[4].items).toEqual(['FW2026', 'SS2027'])
     expect(status[5].items).toEqual(['default', 'customer_style', 'vendor_b'])
+    expect(status[6]).toMatchObject({ kind: 'stores', present: true, rows: 5, items: [] })
+    expect(status[7]).toMatchObject({ kind: 'store_kpis', present: true, required_columns: ['store_id', 'period', 'floor', 'category', 'area_m2', 'sales_krw'] })
+    // The store tables are replaced like the other tables (XLSX contents are not read by the mock).
+    const kpis = await source.uploadMetadata('store_kpis', new File(['x'], 'store_kpis.xlsx'))
+    expect(kpis).toMatchObject({ status: 'accepted', rows: status[7].rows, backup: expect.stringMatching(/^metadata\/backup\/store_kpis_\d{8}T\d{6}\.xlsx$/) })
+    const stores = await source.uploadMetadata('stores', new File(['store_id,store_name,region,format,gross_area_m2\nST-X,가상 신규점,서울,도심형,52000\n'], 'stores.csv'))
+    expect(stores).toMatchObject({ status: 'accepted', rows: 1, columns: ['store_id', 'store_name', 'region', 'format', 'gross_area_m2'] })
     await expect(source.uploadMetadata('nope' as MetadataKind, new File(['x'], 'x.csv'))).rejects.toMatchObject({ status: 400 })
     expect(parseDocument('floors:\n- 4F\n  - "5F"\n# 주석\nyear: 2026 # 끝', '.yaml')).toEqual({ floors: ['4F', '5F'], year: '2026' })
   })

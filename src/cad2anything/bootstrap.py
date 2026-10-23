@@ -104,6 +104,11 @@ def bootstrap(source: Path, root: Path, mode: str = "auto", variant: str = "clea
         summary["relayout"] = {
             k: relayout.get(k) for k in ("written", "skipped", "leases", "entries", "exits")
         }
+    if workspace.has_table("transactions"):
+        from cad2anything.mockgen.stores import ensure_store_benchmarks
+
+        stores = ensure_store_benchmarks(workspace)
+        summary["stores"] = {k: stores.get(k) for k in ("written", "skipped", "stores", "kpi_rows")}
     return summary
 
 

@@ -589,6 +589,8 @@ def test_document_metadata_uploads(meta_toolkit, monkeypatch) -> None:
         "pos_terminals",
         "relayout_brief",
         "drawing_profile",
+        "stores",
+        "store_kpis",
     ]
     assert status["brands"]["present"] and status["brands"]["rows"] > 0 and status["brands"]["items"] == []
     assert status["relayout_brief"]["items"] == ["FW2026"] and status["relayout_brief"]["updated_at"]
@@ -695,4 +697,5 @@ def test_rest_routes(toolkit, plain_dxf) -> None:
     )
     assert bogus.status_code == 400
     status = client.get("/api/uploads/metadata").json()
-    assert [row["kind"] for row in status][-1] == "drawing_profile" and len(status) == 6
+    kinds = [row["kind"] for row in status]
+    assert kinds[5:] == ["drawing_profile", "stores", "store_kpis"] and len(status) == 8

@@ -2,7 +2,7 @@
 import { closeRun, createRun, finishRun, foldRunEvent, isRunActive, type ChatRun } from '../lib/chatRun'
 import { applyPatch, touchedKeys, type PatchOperation } from '../lib/jsonPatch'
 import type { AgUiEvent, UiState } from '../types/api'
-import { normalizeUiState } from './uiState'
+import { applyOverlayRules, normalizeUiState } from './uiState'
 
 export { touchedKeys }
 
@@ -55,7 +55,8 @@ function applyUiPatch(state: AppState, ops: PatchOperation[]): PatchResult {
   const keys = touchedKeys(ops)
   let ui: UiState
   try {
-    ui = normalizeUiState(applyPatch(state.ui, ops), state.ui)
+    // Showing a journey, a route or a flow clears the other overlays (contract §3, see applyOverlayRules).
+    ui = applyOverlayRules(normalizeUiState(applyPatch(state.ui, ops), state.ui), ops)
   } catch (error) {
     return { state, keys, error: error instanceof Error ? error.message : String(error) }
   }

@@ -19,6 +19,10 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints:{keep_anchors, area_tolerance, max_moves, n_alternatives, movable_categories, allow_cross_floor, save}}` → `{rev, period, label, caveats, alternatives:[{id, rev_id, summary, moves:[{brand_id, brand_name, from_unit, to_unit, delta, delta_low, delta_high, explanation}], objective_before, objective_after(억원), kpi_delta:{sales_krw, low, high}, constraints:[{name, ok, detail}], kpi_by_floor, explanations}]}`. 대안마다 가상 개정 `rev_id`가 저장된다. |
 | GET | `/api/analytics/journey?customer_id=&date=&segment=&rank=1&rev=` | 고객 한 명의 하루 쇼핑 동선. 응답은 3절의 `journey` 객체와 같다. `customer_id`·`date`를 생략하면 조건(`segment`)에 맞는 고객 하루 중 `rank`번째를 고른다. `rev`를 주면 그 개정이 실제 매장 배치였던 기간에서만 고른다(가상 개정은 기준 실제 개정의 기간). 해당하는 동선이 없으면 404 |
 | GET | `/api/spatial/route?rev=&origin=&destination=&destination_category=&destination_floor=&via=escalator` | 두 지점 사이의 통로망 최단 경로. 응답은 3절의 `route` 객체와 같다. `origin`·`destination`은 매장 코드(`3F-C05`), 출입구 ID(`ENT-1`), 층을 붙인 수직동선·편의시설(`1F:ESC-A`, `8F:RESTROOM`)이다. `destination` 대신 `destination_category`와 `destination_floor`를 주면 그 층에서 걸어서 가장 가까운 해당 카테고리 매장으로 간다. `via`는 `escalator`(기본) 또는 `elevator`. 찾을 수 없는 지점이면 404 |
+| GET | `/api/spatial/flow?mode=traffic&rev=&floor=&segment=&day_type=&hours=&category=&min_width_m=&max_travel_m=` | 통로 위에 그리는 집계 결과. 응답은 3절의 `flow` 객체와 같다. `mode`는 `traffic`(추정 유동), `popup`(팝업 후보), `egress`(통로 폭·피난 거리 점검) 중 하나다. `segment`는 채팅 API와 같은 고객군 문자열(`age_band:40s;tier:VIP`), `day_type`은 `all`·`weekday`·`weekend`, `hours`는 `10-14`처럼 시작·끝 시각이다. 잘못된 인자는 400 |
+| GET | `/api/analytics/stores?level=floor&metric=sales_per_m2&floor=&category=` | 다점포 비교. `{level, metric, metric_label, period, stores:[{store_id, store_name, region, format, flagship}], rows:[{key, label, flagship, peer_median, rank, n_stores, gap_pct, values:{store_id: value}}], notes, caveat}`. `level`은 `store`, `floor`, `category` 중 하나다. 대상 점포 실적은 거래에서 계산하고, 다른 점포는 `store_kpis` 메타데이터에서 읽는다. |
+| GET | `/api/analytics/relayout-review?rev=R2&window_days=90` | 지난 개편의 성과 추적. `{rev, parent_rev, effective_date, window:{before:{start,end}, after:{start,end}, days}, items:[{change_type, unit_code, floor, brand_name, before_daily_krw, after_daily_krw, change_pct, control_pct, vs_control_pct}], by_type:[...], by_floor:[...], summary, caveat}`. 개정 적용일 앞뒤 같은 기간의 일평균 매출을 비교하고, 같은 층에서 바뀌지 않은 매장을 비교군으로 쓴다. 인과 효과가 아니다. |
+| GET | `/api/reports/relayout-review/{rev}?window_days=90` | 위 결과의 보고서(`text/html`) |
 
 ### 1.1 시즌 개편(relayout)
 
@@ -32,7 +36,8 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | POST | `/api/relayout/{brief_id}/plan` | 본문 `{objective?: "sales"\|"commission", n_alternatives?: 1~5, max_moves?, downtime_weeks?, movable?: "expiring"\|"all", extra_exits?: [브랜드 ID나 이름], extra_entries?: [브랜드 ID나 이름]}`(생략하면 브리프 값) → `plan`. 진단이 없으면 먼저 진단한다. 수십 초 걸릴 수 있다. |
 | POST | `/api/relayout/{brief_id}/select` | 본문 `{alt_id, decided_by}` → 프로젝트. 사람이 고른 대안을 기록한다. |
 | POST | `/api/relayout/{brief_id}/check` | 본문 `{rev}`(CAD팀이 그려 올린 실제 개정) → `check`. 선택한 대안이 없으면 400 |
-| GET | `/api/relayout/{brief_id}/report` | 개편 제안서(`text/html`). 진단, 대안 비교, 선택안, 도면 대조, 가정과 한계를 담는다. |
+| POST | `/api/relayout/{brief_id}/phasing` | 본문 `{alt_id?, crews?: 1~6, fitout_weeks?: 1~12, temporary_sales_ratio?: 0~1, use_temporary?: true}` → `phasing`. `alt_id`를 생략하면 선택한 대안, 선택 전이면 순효과가 가장 큰 대안을 쓴다. 프로젝트에 저장한다. |
+| GET | `/api/relayout/{brief_id}/report` | 개편 제안서(`text/html`). 진단, 대안 비교, 선택안, 공사 순서, 도면 대조, 가정과 한계를 담는다. |
 
 **프로젝트(`GET /api/relayout/{brief_id}`)**
 
@@ -53,7 +58,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 }
 ```
 
-- `diagnosis`, `plan`, `check`는 아직 만들지 않았으면 `null`이다. `report_url`은 항상 있다. 제안서는 요청할 때 그 시점의 프로젝트로 만든다.
+- `diagnosis`, `plan`, `check`, `phasing`은 아직 만들지 않았으면 `null`이다. `report_url`은 항상 있다. 제안서는 요청할 때 그 시점의 프로젝트로 만든다.
 
 **`diagnosis`**
 
@@ -123,6 +128,26 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 - `items.status`는 `match`, `different_unit`, `missing`, `not_exited` 중 하나다.
 
+**`phasing`(공사 순서)**
+
+```json
+{"brief_id": "FW2026", "alt_id": "ALT-2", "params": {"crews": 2, "fitout_weeks": 2, "temporary_sales_ratio": 0.6, "use_temporary": true},
+ "steps": [{"step": 1, "start_week": 0, "end_week": 2, "action": "move", "action_label": "이전 공사", "unit_code": "6F-E04", "floor": "6F",
+            "brand_id": "BR0441", "brand_name": "...", "from_unit": "6F-S02B", "waits_for": [], "closed_weeks": 0, "temporary_unit": null,
+            "lost_krw": 0, "note": "기존 매장에서 영업하다가 공사가 끝나면 옮겨요."}],
+ "total_weeks": 6, "lost_krw": 0, "naive_lost_krw": 0, "saved_krw": 0, "entry_delay_krw": 0,
+ "entries": [{"brand_id": "BR0441", "brand_name": "...", "unit_code": "6F-S02B", "open_week": 4, "earliest_week": 4}],
+ "cycles": [{"brands": ["...", "..."], "units": ["4F-C06", "4F-C20"], "breaker": "...", "resolved_by": "temporary", "unit_code": "4F-E02", "weeks": 4}],
+ "summary": "...", "caveats": ["..."]}
+```
+
+- `action`은 `exit`(퇴점·철거), `move`(이전 공사), `entry`(신규 입점 공사), `temporary`(임시 매장으로 옮김), `close`(임시 휴점) 중 하나다. `waits_for`는 먼저 끝나야 하는 단계 번호다.
+- 공사는 비어 있는 매장에서만 시작한다. 옮기는 브랜드는 새 매장 공사가 끝날 때까지 기존 매장에서 영업한다고 본다. 서로의 자리로 옮기는 순환이 있으면 주 매출이 가장 적은 브랜드(`breaker`)가 먼저 자리를 비운다. 이 브랜드는 임시 매장으로 옮기거나 새 매장이 열릴 때까지 휴점한다. 임시 매장은 대상 층의 공실과 퇴점 매장 중 그 기간에 공사하지 않는 곳이다.
+- `lost_krw`는 휴점·임시 매장 영업으로 잃는 기대 매출 추정이다. `naive_lost_krw`는 대안 계산의 가정(옮기는 브랜드마다 공사 기간만큼 휴점)으로 계산한 값이다. 주 매출은 기준 개정의 연 매출(실적이 없으면 추정치)을 52로 나눈 값이다.
+- `entry_delay_krw`는 공사팀이 모자라 신규 입점이 `earliest_week`(앞 공사를 기다린 뒤 가장 빨리 열 수 있는 주차)보다 늦게 열리는 기간의 기대 매출이다.
+- 동시에 진행하는 공사는 `crews`개까지다. 주 단위이며 0주차가 공사 시작이다. 순서는 세 가지 우선순위(긴 대기 사슬 먼저, 입점 매출 먼저, 남은 공사당 입점 매출 먼저)로 짜 보고 `lost_krw + entry_delay_krw`가 가장 작은 안을 고른다. 같으면 총 기간이 짧은 안을 고른다.
+- 대안을 다시 만들면 `phasing`은 `null`이 된다. 다른 대안을 선택하면 그 대안의 공사 순서가 아닐 때 `null`이 된다.
+
 ### 1.2 도면·메타데이터 업로드
 
 사람이 만든 도면(DXF)과 메타데이터를 올리면 백엔드가 검증하고 처리한다. 처리 결과는 작업공간과 미러에 저장한다.
@@ -134,7 +159,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | GET | `/api/uploads/jobs/{job_id}` | 작업 상태와 결과(아래). 없으면 404 |
 | POST | `/api/uploads/jobs/{job_id}/layer-mapping` | 본문 `{mappings: [{layer, semantic, floor?}]}` → 매핑을 저장하고 다시 처리한다. 응답은 작업 상태다. |
 | GET | `/api/uploads/profiles` | 도면 규약 프로필 목록 `[{profile_id, title, description, units}]`. `default`가 항상 있다. |
-| POST | `/api/uploads/metadata` | multipart: `kind`(`brands`, `tenancies`, `leases`, `pos_terminals`, `relayout_brief`, `drawing_profile`), `file`(CSV, XLSX, YAML, JSON) → `{kind, status: "accepted"\|"rejected", rows, columns, errors, warnings, backup, id?}`. `id`는 브리프·프로필의 ID다. 거부해도 200으로 응답하고 기존 데이터는 바꾸지 않는다. |
+| POST | `/api/uploads/metadata` | multipart: `kind`(`brands`, `tenancies`, `leases`, `pos_terminals`, `relayout_brief`, `drawing_profile`, `stores`, `store_kpis`), `file`(CSV, XLSX, YAML, JSON) → `{kind, status: "accepted"\|"rejected", rows, columns, errors, warnings, backup, id?}`. `id`는 브리프·프로필의 ID다. 거부해도 200으로 응답하고 기존 데이터는 바꾸지 않는다. |
 | GET | `/api/uploads/metadata` | 종류별 현재 상태 `[{kind, present, rows, updated_at, required_columns, items}]`. `items`는 브리프·프로필의 ID 목록(표 종류는 빈 배열)이다. |
 
 **도면 파일 규칙**
@@ -154,6 +179,8 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | `pos_terminals` | CSV·XLSX | `pos_id`, `brand_id`, `unit_code`, `valid_from`, `valid_to` | 표 전체 교체 |
 | `relayout_brief` | YAML·JSON | `brief_id`, `title`, `season`(`SS`·`FW`), `year`, `effective_date`, `base_rev`, `floors` | 브리프 하나 추가·교체 |
 | `drawing_profile` | YAML·JSON | `profile_id`, `title` | 프로필 하나 추가·교체 |
+| `stores` | CSV·XLSX | `store_id`, `store_name`, `region`, `format`, `gross_area_m2` | 표 전체 교체(비교 대상 점포 목록) |
+| `store_kpis` | CSV·XLSX | `store_id`, `period`(YYYY-MM), `floor`, `category`, `area_m2`, `sales_krw` | 표 전체 교체(점포별 월·층·카테고리 실적) |
 
 - 표를 교체하기 전에 이전 파일을 `backup`에 적힌 경로로 보관한다.
 - 오류(`errors`)가 하나라도 있으면 거부한다. 경고(`warnings`)만 있으면 받아들인다.
@@ -213,7 +240,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 ## 3. UI 상태 모델
 
-에이전트의 UI 함수 도구 호출은 백엔드가 `STATE_DELTA`로 바꿔 보낸다. UI 함수 도구는 `ui_set_floor`, `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_focus`, `ui_compare`, `ui_show_panel`, `ui_show_journey`, `ui_show_route`, `ui_clear`이다.
+에이전트의 UI 함수 도구 호출은 백엔드가 `STATE_DELTA`로 바꿔 보낸다. UI 함수 도구는 `ui_set_floor`, `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_focus`, `ui_compare`, `ui_show_panel`, `ui_show_journey`, `ui_show_route`, `ui_show_flow`, `ui_clear`이다.
 
 ```json
 {
@@ -227,7 +254,8 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
   "focus": {"unit_codes": ["3F-N05"]},
   "panel": {"type": "changes", "payload": {}},
   "journey": null,
-  "route": null
+  "route": null,
+  "flow": null
 }
 ```
 
@@ -281,6 +309,35 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 - `walk_m`은 출발 층과 도착 층에서 걷는 거리의 합이다(5m 단위 반올림). 수직 이동은 `transitions`의 `floors`(지나는 층 수)와 `height_m`(층 높이 합)으로 따로 보여 준다.
 - 화면은 현재 층의 segment와, 현재 층에 있는 출발·도착 지점을 그린다. 경로가 지나는 다른 층은 층 탭에 표시한다.
 - 경로도 동선처럼 단독으로 표시한다. `ui_show_route`는 `heatmap`, `highlights`, `edges`, `compareRev`, `journey`를 비우고, `ui_show_journey`는 `route`를 비운다. 이후 답변의 `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_compare`는 `journey`와 `route`를 `null`로 바꾼다. 같은 답변 안에서 그린 경로는 유지한다.
+
+**`flow`(통로 위 집계: 추정 유동, 팝업 후보, 통로 폭·피난 점검)**
+
+```json
+{
+  "mode": "traffic",
+  "title": "40대 여성 VIP 고객의 추정 유동(주말 10~14시)",
+  "rev": "R2",
+  "query": {"segment": {"age_band": "40s", "gender": "F", "tier": "VIP"}, "day_type": "weekend", "hours": [10, 14], "floor": null},
+  "floors": {
+    "3F": {"segments": [{"points": [[12.0, 15.0], [40.0, 15.0]], "weight": 0.82, "value": 1234, "color": null, "label": "3F-C05·3F-C06 앞 통로"}],
+           "max_value": 1500, "total": 23456}
+  },
+  "markers": [{"floor": "3F", "x": 60.0, "y": 31.5, "rank": 1, "kind": "spot", "label": "1", "title": "후보 1 · 3F 에스컬레이터 A 앞 통로", "unit_code": null}],
+  "legend": {"low": "적음", "high": "많음", "unit": "명(추정)", "note": "결제 순서를 통로망 최단 경로로 이어 모은 값"},
+  "summary": {"customer_days": 1234, "trips": 4567, "floors": ["3F", "4F"]},
+  "caveat": "결제 순서를 통로망 최단 경로로 이은 추정이에요. 실제로 걸은 길이 아니에요."
+}
+```
+
+- `mode`는 `traffic`, `popup`, `egress` 중 하나다.
+  - `traffic`: `segments`는 통로 중심선 구간이고 `value`는 기간 동안 그 구간을 지난 추정 이동 수, `weight`는 층 최댓값으로 나눈 0~1 값이다. 층의 `total`은 그 층을 걸은 추정 이동 수다(층을 오가는 이동은 두 층에 센다).
+  - `popup`: `traffic`과 같은 유동을 바탕에 그리고, `markers`에 팝업 후보 위치를 순위대로 둔다(`kind: spot`은 통로 위 공간, `kind: unit`은 공실·팝업 매장).
+  - `egress`: `segments`는 기준보다 좁은 통로 구간이다. `value`는 폭(m), `color`는 경고 색, `weight`는 `0.5 + 0.5 × (1 - 폭/기준 폭)`이다. 층의 `max_value`는 기준 폭, `total`은 좁은 구간 수다. `markers`는 계단·출입구까지 걷는 거리가 기준을 넘는 매장이다(`kind: warning`).
+- `summary`에는 `customer_days`, `trips`, `floors`, `period`, `notes`가 있다. `traffic`·`popup`은 많이 지난 통로 `top_corridors`(층, 이름, 기간 합계, 하루 평균, 층 이동 중 비율)를, `traffic`은 앞을 많이 지나는 매장 `top_units`를 함께 준다. `egress`는 `customer_days`·`trips`가 `null`이고 `narrow_stretches`, `units_over_limit`, `unreachable_units`, `text`가 있다.
+- 유동은 거래가 쌓인 실제 개정에서만 계산한다. 화면의 개정이 가상 개정이나 아직 실적이 없는 개정이면 그 기준 실제 개정으로 계산하고 `rev`에 그 개정을 넣는다. 이때 `ui_show_flow`는 `/rev`도 함께 바꾼다.
+- `segments.color`가 `null`이면 화면이 `weight`로 색과 굵기를 정한다. 값이 있으면 그 색을 쓴다.
+- 화면은 현재 층의 `segments`와 `markers`만 그린다. 다른 층에 데이터가 있으면 층 탭에 표시한다. 범례와 `caveat`를 함께 보여 준다.
+- 집계 표시도 단독으로 표시한다. `ui_show_flow`는 `heatmap`, `highlights`, `edges`, `compareRev`, `journey`, `route`를 비운다. `ui_show_journey`, `ui_show_route`는 `flow`를 비운다. 이후 답변의 `ui_show_heatmap`, `ui_highlight_units`, `ui_draw_edges`, `ui_compare`는 `flow`도 `null`로 바꾼다. 같은 답변 안에서 그린 집계는 유지한다.
 
 | 필드 | 규칙 |
 |---|---|

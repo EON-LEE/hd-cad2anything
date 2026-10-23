@@ -151,7 +151,57 @@ def test_specialist_tool_calls_are_streamed_under_the_consult_call():
 def test_ui_clear_all_resets_overlays():
     result = UiActionHandler().handle("ui_clear", {"what": "all"}, {})
     paths = [patch["path"] for patch in result.patches]
-    assert paths == ["/heatmap", "/highlights", "/edges", "/journey", "/route", "/focus"]
+    assert paths == ["/heatmap", "/highlights", "/edges", "/journey", "/route", "/flow", "/focus"]
+    flow = UiActionHandler().handle("ui_clear", {"what": "flow"}, {})
+    assert flow.patches == [{"op": "replace", "path": "/flow", "value": None}]
+
+
+def test_ui_show_flow_draws_a_standalone_overlay():
+    flow = {
+        "mode": "popup",
+        "title": "팝업 후보",
+        "rev": "R2",
+        "query": {"floor": None},
+        "floors": {"3F": {"segments": [], "max_value": 10, "total": 50}, "4F": {"segments": [], "total": 90}},
+        "markers": [{"floor": "3F", "x": 1.0, "y": 2.0, "rank": 1, "kind": "spot", "title": "후보 1"}],
+        "legend": {"low": "적음", "high": "많음"},
+        "summary": {"candidates": 1},
+        "caveat": "추정",
+    }
+    calls = []
+    handler = UiActionHandler(flow_provider=lambda **params: calls.append(params) or flow)
+    ui_state = {"rev": "R2", "floor": "1F"}
+    result = handler.handle("ui_show_flow", {"mode": "popup", "category": "화장품", "hours": ""}, ui_state)
+    assert calls == [{"rev": "R2", "mode": "popup", "category": "화장품"}]
+    paths = [p["path"] for p in result.patches]
+    assert paths == [
+        "/heatmap",
+        "/highlights",
+        "/edges",
+        "/compareRev",
+        "/journey",
+        "/route",
+        "/flow",
+        "/floor",
+    ]
+    assert result.patches[-1]["value"] == "3F" and ui_state["floor"] == "3F"
+    output = json.loads(result.output)
+    assert output["ok"] and output["markers"][0]["title"] == "후보 1" and "floors" not in output
+    assert "팝업 후보" in output["shown"]
+    same_answer = handler.handle("ui_highlight_units", {"unit_codes": ["3F-C05"]}, ui_state)
+    assert [p["path"] for p in same_answer.patches] == ["/highlights"]
+    traffic = UiActionHandler(flow_provider=lambda **params: {**flow, "mode": "traffic", "markers": []})
+    state = {"rev": "R2", "floor": "1F"}
+    handler_result = traffic.handle("ui_show_flow", {"mode": "traffic"}, state)
+    assert state["floor"] == "4F" and json.loads(handler_result.output)["mode"] == "traffic"
+    on_alternative = {"rev": "FW2026-A2", "floor": "4F"}
+    switched = traffic.handle("ui_show_flow", {"mode": "traffic"}, on_alternative)
+    assert {"op": "replace", "path": "/rev", "value": "R2"} in switched.patches
+    assert on_alternative["rev"] == "R2" and "R2 개정" in json.loads(switched.output)["shown"]
+    failing = UiActionHandler(flow_provider=lambda **params: (_ for _ in ()).throw(ValueError("없음")))
+    failed = failing.handle("ui_show_flow", {"mode": "egress"}, {})
+    assert json.loads(failed.output)["ok"] is False and not failed.patches
+    assert json.loads(UiActionHandler().handle("ui_show_flow", {"mode": "traffic"}, {}).output)["ok"] is False
 
 
 class FakeStreamResponses:
@@ -280,7 +330,14 @@ def test_ui_show_journey_draws_the_path_and_reports_stops_to_the_model():
 
     assert calls == [{"segment": {"age_band": "40s"}, "rank": 2}]
     cleared = ["/heatmap", "/highlights", "/edges", "/compareRev"]
-    assert [p["path"] for p in result.patches] == [*cleared, "/route", "/journey", "/floor", "/panel"]
+    assert [p["path"] for p in result.patches] == [
+        *cleared,
+        "/route",
+        "/flow",
+        "/journey",
+        "/floor",
+        "/panel",
+    ]
     assert [p["value"] for p in result.patches[:4]] == [None, [], [], None]
     floor_patch = next(p for p in result.patches if p["path"] == "/floor")
     assert floor_patch["value"] == "B1" and ui_state["floor"] == "B1"
@@ -318,10 +375,10 @@ def test_other_overlays_replace_a_journey_from_an_earlier_answer_only():
         journey_provider=lambda **params: {"rev": "R2", "stops": [{"order": 1, "floor": "1F"}]}
     )
     earlier = handler.handle("ui_highlight_units", {"unit_codes": ["3F-C05"]}, {"rev": "R2"})
-    assert [p["path"] for p in earlier.patches] == ["/highlights", "/journey", "/route"]
-    assert earlier.patches[1]["value"] is None and earlier.patches[2]["value"] is None
+    assert [p["path"] for p in earlier.patches] == ["/highlights", "/journey", "/route", "/flow"]
+    assert all(p["value"] is None for p in earlier.patches[1:])
     compare = handler.handle("ui_compare", {"rev_from": "R0", "rev_to": "R1"}, {})
-    assert [p["path"] for p in compare.patches] == ["/rev", "/compareRev", "/journey", "/route"]
+    assert [p["path"] for p in compare.patches] == ["/rev", "/compareRev", "/journey", "/route", "/flow"]
 
     ui_state = {"rev": "R2", "floor": "3F"}
     handler.handle("ui_show_journey", {}, ui_state)

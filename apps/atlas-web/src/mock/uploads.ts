@@ -20,6 +20,7 @@ import type {
 import { planImpact } from './analytics'
 import { MOCK_FLOORS } from './catalog'
 import { kstNow, mockLeaseEnd, type MockRelayout } from './relayout'
+import { MOCK_STORES, mockStoreKpiRows } from './benchmark'
 import { buildUploadedRevision, changesBetween, rectArea, type MockWorld } from './world'
 
 /** Parent revision for which mock uploads apply the prepared F/W relayout drawing. */
@@ -122,6 +123,8 @@ export function createMockUploads(
     tenancies: { rows: 126, updated_at: '2026-09-30T18:00:00+09:00' },
     leases: { rows: 38, updated_at: '2026-09-30T18:00:00+09:00' },
     pos_terminals: { rows: 77, updated_at: '2026-09-30T18:00:00+09:00' },
+    stores: { rows: MOCK_STORES.length, updated_at: '2026-10-01T09:00:00+09:00' },
+    store_kpis: { rows: mockStoreKpiRows(), updated_at: '2026-10-01T09:00:00+09:00' },
   }
   const documentsUpdated: Record<string, string> = {
     relayout_brief: '2026-10-20T09:00:00+09:00',

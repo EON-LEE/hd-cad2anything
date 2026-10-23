@@ -4,6 +4,7 @@ import type {
   GraphEdge,
   Highlight,
   Meta,
+  PhasingStep,
   RelayoutAlternative,
   RelayoutBrief,
   RelayoutBriefSummary,
@@ -12,12 +13,14 @@ import type {
   RelayoutDiagnosis,
   RelayoutEntry,
   RelayoutExit,
+  RelayoutPhasing,
   RelayoutPlan,
   RelayoutProject,
   RevisionInfo,
 } from '../types/api'
 import { bool, count, isRecord, list, num, optText, records, text, texts, type Rec } from './coerce'
 import { CHANGE_COLORS } from './colors'
+import { formatKrw, formatNumber } from './format'
 import { floorOfUnitCode } from './geometry'
 
 export const RELAYOUT_STATUS_LABELS: Record<string, string> = {
@@ -313,8 +316,166 @@ export function normalizeProject(raw: unknown): RelayoutProject {
     decided_by: optText(raw.decided_by),
     decided_at: optText(raw.decided_at),
     check: normalizeCheck(raw.check),
+    phasing: normalizePhasing(raw.phasing),
     report_url: optText(raw.report_url),
     updated_at: optText(raw.updated_at),
+  }
+}
+
+// --- construction order (공사 순서) ------------------------------------------------------------------
+
+function normalizePhasingStep(r: Rec, index: number): PhasingStep {
+  const unitCode = optText(r.unit_code)
+  const start = num(r.start_week) ?? 0
+  return {
+    step: num(r.step) ?? index + 1,
+    start_week: start,
+    end_week: Math.max(start, num(r.end_week) ?? start),
+    action: text(r.action, 'move'),
+    action_label: optText(r.action_label),
+    unit_code: unitCode,
+    floor: optText(r.floor) ?? floorOfUnitCode(unitCode),
+    brand_id: optText(r.brand_id),
+    brand_name: text(r.brand_name, text(r.brand_id, '–')),
+    from_unit: optText(r.from_unit),
+    waits_for: list(r.waits_for)
+      .map(num)
+      .filter((n): n is number => n !== null),
+    closed_weeks: num(r.closed_weeks) ?? 0,
+    temporary_unit: optText(r.temporary_unit),
+    lost_krw: num(r.lost_krw),
+    note: optText(r.note),
+  }
+}
+
+/** POST /api/relayout/{brief_id}/phasing and `project.phasing`; null when the value is not an object. */
+export function normalizePhasing(raw: unknown): RelayoutPhasing | null {
+  if (!isRecord(raw)) return null
+  const params = isRecord(raw.params) ? raw.params : {}
+  const steps = records(raw.steps).map(normalizePhasingStep)
+  const lost = num(raw.lost_krw)
+  const naive = num(raw.naive_lost_krw)
+  return {
+    brief_id: text(raw.brief_id),
+    alt_id: optText(raw.alt_id),
+    rev_id: optText(raw.rev_id),
+    params: {
+      crews: num(params.crews),
+      fitout_weeks: num(params.fitout_weeks),
+      temporary_sales_ratio: num(params.temporary_sales_ratio),
+      use_temporary: bool(params.use_temporary),
+    },
+    steps,
+    total_weeks: num(raw.total_weeks) ?? (steps.length ? Math.max(...steps.map((s) => s.end_week)) : null),
+    lost_krw: lost,
+    naive_lost_krw: naive,
+    saved_krw: num(raw.saved_krw) ?? (lost !== null && naive !== null ? naive - lost : null),
+    entry_delay_krw: num(raw.entry_delay_krw),
+    entries: records(raw.entries).map((e) => ({
+      brand_id: optText(e.brand_id),
+      brand_name: text(e.brand_name, text(e.brand_id, '–')),
+      unit_code: optText(e.unit_code),
+      open_week: num(e.open_week),
+      earliest_week: num(e.earliest_week),
+    })),
+    cycles: records(raw.cycles).map((c) => ({
+      brands: texts(c.brands),
+      units: texts(c.units),
+      breaker: optText(c.breaker),
+      resolved_by: text(c.resolved_by, 'close'),
+      unit_code: optText(c.unit_code),
+      weeks: num(c.weeks),
+    })),
+    summary: text(raw.summary),
+    caveats: texts(raw.caveats),
+    created_at: optText(raw.created_at),
+  }
+}
+
+/** Short chip text of a construction step (the backend's long `action_label` goes into the chip title). */
+export const PHASING_ACTION_LABELS: Record<string, string> = {
+  exit: '퇴점',
+  move: '이전',
+  entry: '입점',
+  temporary: '임시 영업',
+  close: '휴점',
+}
+
+/** Long names used when a step has no `action_label`. */
+export const PHASING_ACTION_FULL_LABELS: Record<string, string> = {
+  exit: '퇴점·철거',
+  move: '이전 공사',
+  entry: '신규 입점 공사',
+  temporary: '임시 매장 영업',
+  close: '임시 휴점',
+}
+
+/** Chip classes (styles.css): entry green, exit and closure red, move orange, temporary blue. */
+export const PHASING_ACTION_TONE: Record<string, string> = {
+  exit: 'change-exit',
+  move: 'change-move',
+  entry: 'change-entry',
+  temporary: 'temp',
+  close: 'down',
+}
+
+const weeks = (value: number) => formatNumber(value, 1).replace(/\.0$/, '')
+
+/** "0~2주" for a work, "0주" for an exit that takes no time. */
+export function phasingWeekText(step: Pick<PhasingStep, 'start_week' | 'end_week'>): string {
+  return step.end_week > step.start_week ? `${weeks(step.start_week)}~${weeks(step.end_week)}주` : `${weeks(step.start_week)}주`
+}
+
+/** Week count with its unit: "6주". */
+export function weeksText(value: number | null | undefined): string {
+  return value === null || value === undefined || !Number.isFinite(value) ? '–' : `${weeks(value)}주`
+}
+
+/** Short remarks of a step: where it comes from, closure weeks, the opening week, what it waits for, lost sales. */
+export function phasingStepRemark(step: PhasingStep): string {
+  const parts: string[] = []
+  if (step.action === 'move' && step.from_unit) parts.push(`${step.from_unit}에서`)
+  if (step.action === 'temporary' && step.from_unit) parts.push(`${step.from_unit}에서 임시 이전`)
+  if (step.action === 'close') parts.push(`${step.from_unit ?? step.unit_code ?? ''} 휴점 ${weeksText(step.closed_weeks)}`.trim())
+  if (step.action === 'entry') parts.push(`${weeks(step.end_week)}주차 개점`)
+  if (step.waits_for.length) parts.push(`${step.waits_for.join('·')}번 작업 뒤`)
+  if (step.lost_krw !== null && step.lost_krw > 0) parts.push(`손실 ${formatKrw(step.lost_krw)}`)
+  return parts.join(' · ')
+}
+
+/** "A ↔ B" for a swap, "A → B → C → A" for a longer cycle. */
+export function phasingCycleLoop(brands: readonly string[]): string {
+  if (brands.length === 2) return brands.join(' ↔ ')
+  return brands.length ? [...brands, brands[0]].join(' → ') : ''
+}
+
+/** "서로 자리를 바꾸는 순환(A ↔ B)은 A 매장을 2주 동안 임시 매장(4F-E02)으로 옮겨 풉니다." */
+export function phasingCycleText(cycle: RelayoutPhasing['cycles'][number]): string {
+  const loop = phasingCycleLoop(cycle.brands)
+  const who = cycle.breaker ?? cycle.brands[0] ?? '한 브랜드'
+  const span = cycle.weeks !== null ? ` ${weeksText(cycle.weeks)} 동안` : ''
+  return cycle.resolved_by === 'temporary'
+    ? `서로 자리를 바꾸는 순환(${loop})은 ${who} 매장을${span} 임시 매장${cycle.unit_code ? `(${cycle.unit_code})` : ''}으로 옮겨 풉니다.`
+    : `서로 자리를 바꾸는 순환(${loop})은 ${who} 매장이${span} 휴점해서 풉니다.`
+}
+
+export interface PhasingForm {
+  /** 1..6 */
+  crews: number
+  /** 1..12 */
+  fitoutWeeks: number
+  useTemporary: boolean
+}
+
+const clampInt = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)))
+
+/** Form defaults: the last phasing's parameters, else 2 crews, the brief's downtime weeks and temporary units on. */
+export function phasingDefaults(project: Pick<RelayoutProject, 'brief' | 'phasing'>): PhasingForm {
+  const params = project.phasing?.params
+  return {
+    crews: clampInt(params?.crews ?? 2, 1, 6),
+    fitoutWeeks: clampInt(params?.fitout_weeks ?? project.brief.downtime_weeks ?? 2, 1, 12),
+    useTemporary: params?.use_temporary ?? true,
   }
 }
 

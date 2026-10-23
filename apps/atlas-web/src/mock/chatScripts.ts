@@ -14,12 +14,14 @@ import {
   withEuro,
 } from '../lib/format'
 import { segmentParam, transitionDirection, transitionText, viaLabel } from '../lib/journey'
+import { flowDataFloors, flowFloorStats, flowModeLabel, sortedFlowMarkers } from '../lib/flow'
 import type { PatchOperation } from '../lib/jsonPatch'
 import { QUICK_PROMPTS } from '../lib/prompts'
 import { routeFloors } from '../lib/route'
-import type { AgUiEvent, ChatRequest, GraphEdge, Highlight, RoutePlace } from '../types/api'
+import type { AgUiEvent, ChatRequest, Flow, FlowMode, FlowParams, GraphEdge, Highlight, RoutePlace } from '../types/api'
 import { mockLayoutAlternatives, mockProductivityDetails, planImpact } from './analytics'
 import { categoryName } from './catalog'
+import { mockFlow } from './flow'
 import { mockJourney, pathLength } from './journey'
 import { mockRoute, placePhrase, roundWalk } from './route'
 import { changesBetween, type MockWorld } from './world'
@@ -156,8 +158,8 @@ class ScriptBuilder {
 
 const replace = (path: string, value: unknown): PatchOperation => ({ op: 'replace', path, value })
 
-/** Later heatmap, highlight, edge and compare displays replace a drawn journey or route (contract §3). */
-const CLEAR_PATHS: readonly PatchOperation[] = [replace('/journey', null), replace('/route', null)]
+/** Later heatmap, highlight, edge and compare displays replace a drawn journey, route or flow (contract §3). */
+const CLEAR_PATHS: readonly PatchOperation[] = [replace('/journey', null), replace('/route', null), replace('/flow', null)]
 
 function detectFloor(message: string, fallback: string): string {
   const basement = /지하\s*(\d+)\s*층/.exec(message)
@@ -542,6 +544,7 @@ function journeyScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Sc
     replace('/edges', []),
     replace('/journey', null),
     replace('/route', null),
+    replace('/flow', null),
     replace('/focus', null),
     replace('/compareRev', null),
   ])
@@ -654,6 +657,7 @@ function routeScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scri
       replace('/edges', []),
       replace('/compareRev', null),
       replace('/journey', null),
+      replace('/flow', null),
       replace('/route', route),
       replace('/floor', start.floor),
     ],
@@ -684,6 +688,149 @@ function routeScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scri
     '도면에 경로를 파란 선으로 그렸어요. 초록 원이 출발, 파란 원이 도착 지점이에요. 왼쪽 위 길 찾기 상자에서 층을 누르면 그 층의 경로를 볼 수 있어요.',
     '',
     '참고: 통로망 최단 경로로 계산한 거리라서 실제로 걷는 거리와 조금 다를 수 있어요.',
+  )
+  return b.answer(lines.join('\n'))
+}
+
+/** Walkway aggregates: "주말 팝업 어디가 좋아?", "유동 많은 통로", "통로 폭·피난 거리 점검". */
+const FLOW_PATTERN = /팝업|유동|붐비|혼잡|많이\s*(?:다니|지나)|통로\s*폭|좁은\s*통로|피난|비상구|대피/
+const EGRESS_PATTERN = /통로\s*폭|좁은\s*통로|피난|비상구|대피/
+
+export function flowModeFromMessage(message: string): FlowMode {
+  if (EGRESS_PATTERN.test(message)) return 'egress'
+  return /팝업/.test(message) ? 'popup' : 'traffic'
+}
+
+/** "주말" -> weekend, "평일" -> weekday; null when the question names neither. */
+export function dayTypeFromMessage(message: string): 'weekend' | 'weekday' | null {
+  if (/주말|토요일|일요일/.test(message)) return 'weekend'
+  return /평일|주중/.test(message) ? 'weekday' : null
+}
+
+/** "10~14시" -> [10, 14]; "오전", "점심", "오후", "저녁" -> fixed hours; null when none. */
+export function hoursFromMessage(message: string): [number, number] | null {
+  const range = /(\d{1,2})\s*시?\s*[~\-–]\s*(\d{1,2})\s*시/.exec(message)
+  if (range && Number(range[1]) < Number(range[2]) && Number(range[2]) <= 24) return [Number(range[1]), Number(range[2])]
+  if (/오전/.test(message)) return [10, 12]
+  if (/점심/.test(message)) return [11, 14]
+  if (/오후/.test(message)) return [14, 18]
+  if (/저녁/.test(message)) return [18, 21]
+  return null
+}
+
+const FLOW_TOOL_LABELS: Record<FlowMode, string> = { traffic: '통로 유동 추정', popup: '팝업 후보 위치 계산', egress: '통로 폭과 피난 거리 점검' }
+const FLOW_UI_LABELS: Record<FlowMode, string> = { traffic: '도면에 추정 유동 표시', popup: '도면에 팝업 후보 표시', egress: '도면에 점검 결과 표시' }
+
+/** Floor to show first: the top marker's (popup, egress), else the current floor when it has data, else the busiest one. */
+function flowStartFloor(flow: Flow, current: string): string {
+  const top = sortedFlowMarkers(flow)[0]
+  if (top && flow.mode !== 'traffic') return top.floor
+  const stats = flowFloorStats(flow)
+  if (stats.has(current)) return current
+  const busiest = [...stats.keys()].sort((a, b) => (flow.floors[b]?.max_value ?? 0) - (flow.floors[a]?.max_value ?? 0))[0]
+  return busiest ?? flowDataFloors(flow)[0] ?? current
+}
+
+const people = (value: number | null | undefined) => `${formatNumber(value ?? 0)}명`
+const stripRank = (title: string | null) => (title ?? '').replace(/^후보 \d+ · /, '')
+
+function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
+  const message = req.message
+  const mode = flowModeFromMessage(message)
+  const rev = req.ui_state.rev
+  const mentioned = lastFloorMention(message)
+  const resolved = mentioned ? resolveFloor(world, rev, mentioned) : null
+  const segment = segmentFromMessage(message)
+  const params: FlowParams = {
+    mode,
+    rev,
+    ...(resolved ? { floor: resolved.floor } : {}),
+    ...(Object.keys(segment).length ? { segment } : {}),
+    ...(dayTypeFromMessage(message) ? { day_type: dayTypeFromMessage(message) } : {}),
+    ...(hoursFromMessage(message) ? { hours: hoursFromMessage(message) } : {}),
+  }
+  let flow: Flow
+  try {
+    flow = mockFlow(world, params)
+  } catch (error) {
+    return b.answer(`통로 집계를 계산하지 못했어요. ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const floor = flowStartFloor(flow, req.ui_state.floor)
+  const args = { ...params, segment: segmentParam(params.segment ?? null) || undefined }
+  const markers = sortedFlowMarkers(flow)
+  const floors = flowDataFloors(flow)
+
+  b.tool(
+    'spatial_flow',
+    FLOW_TOOL_LABELS[mode],
+    args,
+    json({ ok: true, mode, floors, segments: Object.values(flow.floors).reduce((sum, f) => sum + f.segments.length, 0), markers: markers.length }),
+    1100,
+  )
+  b.ui(
+    'ui_show_flow',
+    FLOW_UI_LABELS[mode],
+    { mode },
+    [
+      replace('/heatmap', null),
+      replace('/highlights', []),
+      replace('/edges', []),
+      replace('/compareRev', null),
+      replace('/journey', null),
+      replace('/route', null),
+      replace('/flow', flow),
+      replace('/floor', floor),
+    ],
+    json({ ok: true, shown: `${floor} 도면에 ${flowModeLabel(mode)}을(를) 표시했습니다.` }),
+  )
+
+  const lines = resolved?.note ? [resolved.note, ''] : []
+  if (mode === 'egress') {
+    const narrow = floors.flatMap((code) => (flow.floors[code]?.segments ?? []).map((s) => `${code} ${s.label ?? '통로'}`))
+    const width = Number(flow.query?.min_width_m ?? 0)
+    const travel = Number(flow.query?.max_travel_m ?? 0)
+    lines.push(`통로 폭 ${formatNumber(width, 1).replace(/\.0$/, '')}m, 계단·출입구까지 ${formatNumber(travel)}m를 기준으로 도면을 점검했어요.`, '')
+    lines.push(`### 기준보다 좁은 통로 ${narrow.length}곳`, ...(narrow.length ? narrow.map((n) => `- ${n}`) : ['- 없어요.']), '')
+    lines.push(`### 계단·출입구까지 먼 지점 ${markers.length}곳`, ...(markers.length ? markers.map((m) => `${m.rank}. ${m.title ?? m.unit_code ?? ''}`) : ['- 없어요.']), '')
+    lines.push(
+      '도면에 좁은 통로를 빨간 선으로, 먼 지점을 번호로 표시했어요. 왼쪽 위 상자에서 지점을 누르면 그 층으로 이동해요.',
+      '',
+      '참고: 도면의 통로 폭과 통로망 거리로 계산한 점검이라 법정 피난 거리 판정이 아니에요. 집기와 임시 구조물은 넣지 않았어요.',
+    )
+    return b.answer(lines.join('\n'))
+  }
+
+  const who = flow.title.replace(/(?:의 추정 유동| 기준 팝업 후보).*$/, '')
+  const day = params.day_type === 'weekend' ? '주말 ' : params.day_type === 'weekday' ? '평일 ' : ''
+  const hours = Array.isArray(params.hours) ? `${params.hours[0]}~${params.hours[1]}시 ` : ''
+  if (mode === 'popup') {
+    lines.push(`${who}의 ${day}${hours}유동을 기준으로 팝업 후보 ${markers.length}곳을 골랐어요. 지나가는 고객이 많은 곳부터예요.`, '')
+    for (const marker of markers) {
+      const spot = marker.kind === 'unit' ? '팝업 매장 자리' : '통로 위 공간'
+      lines.push(`${marker.rank}. **${stripRank(marker.title)}** (${spot})`)
+    }
+    lines.push(
+      '',
+      '도면에 통로 유동(선이 굵고 진할수록 많음)과 후보 위치(번호)를 표시했어요. 왼쪽 위 상자에서 후보를 누르면 그 층으로 이동해요.',
+      '',
+      '참고: 결제 순서로 추정한 유동이라 실제 보행량과 다를 수 있어요. 설치 가능 여부(소방·통로 폭)는 현장에서 확인해야 해요.',
+    )
+    return b.answer(lines.join('\n'))
+  }
+
+  const busiest = floors
+    .flatMap((code) => (flow.floors[code]?.segments ?? []).map((s) => ({ floor: code, label: s.label ?? '통로', value: s.value ?? 0 })))
+    .sort((x, y) => y.value - x.value)
+    .slice(0, 3)
+  lines.push(
+    `${flow.title}을 통로에 표시했어요. 고객-일 ${formatNumber(flow.summary.customer_days ?? 0)}, 이동 ${formatNumber(flow.summary.trips ?? 0)}건을 통로망 최단 경로로 이어 모은 추정이에요.`,
+    '',
+    '### 가장 붐비는 통로',
+    ...busiest.map((s) => `- ${s.floor} **${s.label}** — 약 ${people(s.value)}`),
+    '',
+    `도면에서 선이 굵고 진할수록 많이 지나간 통로예요. 데이터가 있는 층 탭에는 보라색 점이 붙어 있어요.`,
+    '',
+    '참고: 결제 순서를 통로망 최단 경로로 이은 추정이라 실제로 걸은 길과 달라요.',
   )
   return b.answer(lines.join('\n'))
 }
@@ -754,6 +901,7 @@ export function buildMockScript(world: MockWorld, req: ChatRequest, threadId: st
   if (/재배치|대안|레이아웃/.test(message)) return layoutScript(world, req, b)
   if (/표로|표 |테이블|table/i.test(message)) return tableScript(world, req, b)
   if (ROUTE_PATTERN.test(message)) return routeScript(world, req, b)
+  if (FLOW_PATTERN.test(message)) return flowScript(world, req, b)
   if (/동선|경로|여정|journey/i.test(message)) return journeyScript(world, req, b)
   if (/저효율|효율|원인|zone|존/i.test(message)) return productivityScript(world, req, b)
   if (/교차|VIP|연관|같이 사|함께 사/i.test(message)) return crossShoppingScript(world, req, b)

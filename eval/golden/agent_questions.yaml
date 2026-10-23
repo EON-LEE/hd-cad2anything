@@ -222,3 +222,53 @@ cases:
     expect:
       tools_any: [revision_check_metadata]
       answer_any: ["6F-C14", "7F-N05", "2F-N06", "3F-C13"]
+
+  - id: relayout-unit-options
+    scenario: 시즌 개편
+    question: 4층 Ravandre Nuit(4F-E05)가 이번에 나가는데, 그 자리에 어떤 브랜드를 넣으면 좋을까?
+    expect:
+      tools_any: [relayout_unit_options]
+      answer_any: ["4F-E05"]
+
+  - id: relayout-phasing
+    scenario: 시즌 개편
+    question: F/W 개편 선택안대로 공사하면 순서를 어떻게 잡아야 해? 공사팀은 2개야. 공사 중에 문 닫는 매장도 알려줘.
+    expect:
+      tools_any: [relayout_phasing]
+      answer_any: ["주차", "주 동안", "주 만에", "휴점", "임시 매장"]
+
+  - id: flow-weekend-traffic
+    scenario: 유동·팝업·안전
+    question: 주말 오후에 3층에서 사람들이 가장 많이 지나는 통로는 어디야? 도면에 보여줘.
+    expect:
+      tools_any: [ui_show_flow, analytics_flow_map]
+      ui_any: [ui_show_flow]
+      answer_any: ["추정", "결제"]
+
+  - id: flow-popup-candidates
+    scenario: 유동·팝업·안전
+    question: 주말에 화장품 팝업 스토어를 열려고 해. 사람이 많이 지나는 위치로 후보를 추천해줘.
+    expect:
+      tools_any: [ui_show_flow, spatial_popup_candidates]
+      answer_any: ["후보", "1F", "1층"]
+
+  - id: egress-check
+    scenario: 유동·팝업·안전
+    question: 3층 통로 중에 폭이 좁거나 비상계단·출입구까지 너무 먼 곳이 있어?
+    expect:
+      tools_any: [spatial_egress_check, ui_show_flow]
+      answer_any: ["법규", "도면", "기준"]
+
+  - id: store-benchmark
+    scenario: 다점포 비교
+    question: 다른 점포들이랑 비교하면 우리 점포 층별 ㎡당 매출은 몇 위야?
+    expect:
+      tools_any: [analytics_store_compare]
+      answer_any: ["위", "중앙값", "점포"]
+
+  - id: relayout-review
+    scenario: 개편 성과
+    question: 지난 F/W 개편(R2) 이후 바뀐 매장들 매출이 어떻게 됐어? 같은 층 다른 매장과 비교해서 알려줘.
+    expect:
+      tools_any: [analytics_relayout_review, analytics_before_after]
+      answer_any: ["비교군", "인과", "같은 층"]

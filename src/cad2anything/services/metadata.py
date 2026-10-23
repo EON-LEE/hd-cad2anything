@@ -1,9 +1,14 @@
 """Metadata uploads (docs/specs/atlas-api.md §1.2) and the drawing-versus-lease check.
 
-Tables (``brands``, ``tenancies``, ``leases``, ``pos_terminals``) arrive as CSV (UTF-8 or CP949) or XLSX (first
-sheet) and replace ``business/{name}.csv`` after validation; the previous file is kept under
-``business/_backup/``. Relayout briefs and drawing profiles arrive as YAML or JSON and are stored one file per
-ID. Any error rejects the upload and leaves the workspace unchanged; warnings alone are accepted.
+Tables (``brands``, ``tenancies``, ``leases``, ``pos_terminals`` and, for the multi-store comparison, ``stores``
+and ``store_kpis``) arrive as CSV (UTF-8 or CP949) or XLSX (first sheet) and replace ``business/{name}.csv``
+after validation; the previous file is kept under ``business/_backup/``. Relayout briefs and drawing profiles
+arrive as YAML or JSON and are stored one file per ID. Any error rejects the upload and leaves the workspace
+unchanged; warnings alone are accepted.
+
+Store tables are normalized before they are stored: ``period`` becomes ``YYYY-MM``, ``floor`` a floor code
+(``B1``, ``3F``), ``category`` a catalog code when the code or Korean name is known, and thousands separators
+are removed from numbers. ``store_kpis`` rows must name a store of the ``stores`` table when that table exists.
 
 ``check_leases`` compares a model's units with the leases valid on a date (codes ``unit_missing_in_drawing``,
 ``brand_mismatch``, ``area_mismatch``, ``unit_without_lease``).
@@ -35,7 +40,7 @@ from cad2anything.cadcore.profile import (
     profile_to_dict,
     validate_profile,
 )
-from cad2anything.catalog import CATEGORIES
+from cad2anything.catalog import CATEGORIES, FACILITY_CODE
 from cad2anything.model import RevisionKind, SpatialModel
 from cad2anything.services.errors import ToolError
 from cad2anything.services.uploads import KST, remove_file
@@ -86,26 +91,52 @@ TABLES: dict[str, TableSpec] = {
         keys=(("pos_id", "valid_from"),),
         dates=(("valid_from", "valid_to"),),
     ),
+    "stores": TableSpec(
+        required=("store_id", "store_name", "region", "format", "gross_area_m2"),
+        keys=(("store_id",),),
+        numbers=(("gross_area_m2", lambda v: v > 0, "0보다 큰 면적(㎡)이어야 합니다"),),
+        optional=("opened",),
+    ),
+    "store_kpis": TableSpec(
+        required=("store_id", "period", "floor", "category", "area_m2", "sales_krw"),
+        keys=(("store_id", "period", "floor", "category"),),
+        numbers=(
+            ("area_m2", lambda v: v > 0, "0보다 큰 면적(㎡)이어야 합니다"),
+            ("sales_krw", lambda v: v >= 0, "0 이상의 금액(원)이어야 합니다"),
+        ),
+    ),
 }
 DOCUMENTS: dict[str, tuple[str, ...]] = {
     "relayout_brief": ("brief_id", "title", "season", "year", "effective_date", "base_rev", "floors"),
     "drawing_profile": ("profile_id", "title"),
 }
-KINDS: tuple[str, ...] = (*TABLES, *DOCUMENTS)
+STORE_TABLES: tuple[str, ...] = ("stores", "store_kpis")
+# Order of the API contract: the store tables were added after the documents.
+KINDS: tuple[str, ...] = (*(k for k in TABLES if k not in STORE_TABLES), *DOCUMENTS, *STORE_TABLES)
 REQUIRED_COLUMNS: dict[str, list[str]] = {
-    **{kind: list(spec.required) for kind, spec in TABLES.items()},
-    **{kind: list(keys) for kind, keys in DOCUMENTS.items()},
+    kind: list(TABLES[kind].required if kind in TABLES else DOCUMENTS[kind]) for kind in KINDS
 }
+_PERIOD_PATTERNS = (
+    re.compile(r"^(\d{4})(\d{2})$"),
+    re.compile(r"^(\d{4})\s*[-./]\s*(\d{1,2})(?:\s*[-./]\s*(\d{1,2}))?$"),
+    re.compile(r"^(\d{4})\s*년\s*(\d{1,2})\s*월$"),
+)
+_NAME_KEY_RE = re.compile(r"[\s·・ㆍ/]+")
 
 
 @dataclass
 class TableContext:
-    """Reference data for warnings: known brand IDs, revisions and unit codes."""
+    """Reference data for warnings: known brand IDs, revisions and unit codes, and store IDs.
+
+    ``store_ids`` holds the stores table's IDs (None when there is no stores table); ``kpi_store_ids`` holds
+    the IDs used by the current store_kpis table (None when there is none)."""
 
     brand_ids: set[str] | None = None
     rev_ids: set[str] = field(default_factory=set)
     unit_codes: set[str] = field(default_factory=set)
     unit_codes_by_rev: dict[str, set[str]] = field(default_factory=dict)
+    store_ids: set[str] | None = None
+    kpi_store_ids: set[str] | None = None
 
 
 def result(kind: str, rows: int = 0, columns: Sequence[str] = ()) -> dict[str, Any]:
@@ -282,6 +313,112 @@ def _reference_warnings(kind: str, frame: pd.DataFrame, context: TableContext, w
             warnings.append(f"없는 개정을 가리키는 rev_id가 {len(unknown)}행 있습니다: {_examples(unknown)}")
 
 
+def normalize_period(value: Any) -> str | None:
+    """``YYYY-MM`` from ``2025-03``, ``2025-3``, ``2025/03``, ``202503``, ``2025년 3월`` or a date; None otherwise."""
+    text = str(value or "").strip()
+    for pattern in _PERIOD_PATTERNS:
+        match = pattern.match(text)
+        if not match:
+            continue
+        year, month = int(match.group(1)), int(match.group(2))
+        day = match.group(3) if match.lastindex and match.lastindex >= 3 else None
+        if not (1900 <= year <= 2100 and 1 <= month <= 12):
+            return None
+        if day is not None:
+            try:
+                date(year, month, int(day))
+            except ValueError:
+                return None
+        return f"{year:04d}-{month:02d}"
+    return None
+
+
+def normalize_category(value: Any) -> str:
+    """Catalog code from a code (any case) or a Korean name (spaces and ``·`` ignored); else the trimmed text."""
+    text = str(value or "").strip()
+    if text.upper() in CATEGORIES:
+        return text.upper()
+    key = _NAME_KEY_RE.sub("", text)
+    for code, category in CATEGORIES.items():
+        if key and _NAME_KEY_RE.sub("", category.name_ko) == key:
+            return code
+    return text
+
+
+def _plain_numbers(frame: pd.DataFrame, columns: Iterable[str]) -> None:
+    """Drop thousands separators (``1,234``) that spreadsheet exports add to numbers."""
+    for column in columns:
+        frame[column] = frame[column].str.replace(",", "", regex=False).str.strip()
+
+
+def _normalize_store_table(kind: str, frame: pd.DataFrame, errors: list[str], warnings: list[str]) -> None:
+    """Normalize periods, floors and categories in place (before duplicate keys are checked)."""
+    flagship = frame.index[frame["store_id"] == FACILITY_CODE]
+    if kind == "stores":
+        _plain_numbers(frame, ["gross_area_m2"])
+        if "opened" in frame:
+            opened = frame["opened"]
+            parsed = pd.to_datetime(opened.where(opened != ""), format="%Y-%m-%d", errors="coerce")
+            bad = frame.index[(opened != "") & parsed.isna()]
+            if len(bad):
+                warnings.append(f"opened는 YYYY-MM-DD 형식의 날짜가 아닙니다(정보로만 씁니다): {_rows(bad)}")
+        names = frame.loc[frame["store_name"] != ""].groupby("store_name")["store_id"].nunique()
+        if (names > 1).any():
+            warnings.append(f"점포명이 같은 store_id가 여러 개 있습니다: {_examples(names[names > 1].index)}")
+        if len(flagship):
+            warnings.append(
+                f"store_id {FACILITY_CODE}는 대상 점포입니다. 이 행은 점포 정보(지역·형태)로만 쓰고, "
+                "실적은 거래 데이터로 계산합니다."
+            )
+        return
+    _plain_numbers(frame, ["area_m2", "sales_krw"])
+    periods = frame["period"].map(normalize_period)
+    bad = frame.index[(frame["period"] != "") & periods.isna()]
+    if len(bad):
+        errors.append(f"period는 YYYY-MM 형식의 월이어야 합니다(예: 2026-03): {_rows(bad)}")
+    frame.loc[periods.notna(), "period"] = periods[periods.notna()]
+    floors = frame["floor"].map(lambda v: normalize_floor(v, allow_bare=True) if v else None)
+    bad = frame.index[(frame["floor"] != "") & floors.isna()]
+    if len(bad):
+        errors.append(f"floor는 층 코드여야 합니다(예: B1, 1F, 지하1층, 3층): {_rows(bad)}")
+    frame.loc[floors.notna(), "floor"] = floors[floors.notna()]
+    frame["category"] = frame["category"].map(normalize_category)
+    unknown = frame.loc[~frame["category"].isin(CATEGORIES) & (frame["category"] != ""), "category"]
+    if len(unknown):
+        warnings.append(
+            f"카탈로그에 없는 카테고리가 있습니다: {_examples(unknown)}. 비교에서 이름 없이 표시됩니다."
+        )
+    if len(flagship):
+        warnings.append(
+            f"store_id {FACILITY_CODE} 행 {len(flagship)}개는 비교에 쓰지 않습니다. 대상 점포 실적은 거래 데이터로 계산합니다."
+        )
+
+
+def _store_references(
+    kind: str, frame: pd.DataFrame, context: TableContext, errors: list[str], warnings: list[str]
+) -> None:
+    ids = frame["store_id"]
+    if kind == "store_kpis":
+        if context.store_ids is None:
+            warnings.append(
+                "stores 표가 없어 store_id를 확인하지 못했습니다. 점포 이름·지역·형태를 보이려면 stores도 올리세요."
+            )
+            return
+        unknown = ids[~ids.isin(context.store_ids | {FACILITY_CODE}) & (ids != "")]
+        if len(unknown):
+            errors.append(
+                f"stores 표에 없는 store_id가 {len(unknown)}행 있습니다: {_examples(unknown)}. "
+                "stores를 먼저 올리거나 store_id를 고치세요."
+            )
+    elif kind == "stores" and context.kpi_store_ids:
+        orphaned = context.kpi_store_ids - set(ids) - {FACILITY_CODE}
+        if orphaned:
+            warnings.append(
+                f"store_kpis에 실적이 있는 점포가 새 stores 표에 없습니다: {_examples(orphaned)}. "
+                "비교 결과에 이름 없이 표시됩니다."
+            )
+
+
 def validate_table(
     kind: str, frame: pd.DataFrame, context: TableContext | None = None
 ) -> tuple[pd.DataFrame, list[str], list[str]]:
@@ -301,6 +438,8 @@ def validate_table(
         blank = frame.index[frame[column] == ""]
         if len(blank):
             errors.append(f"{column} 값이 비어 있습니다: {_rows(blank)}")
+    if kind in STORE_TABLES:
+        _normalize_store_table(kind, frame, errors, warnings)
     for key in spec.keys:
         filled = frame[(frame[list(key)] != "").all(axis=1)]
         duplicated = filled[filled.duplicated(list(key), keep=False)]
@@ -340,15 +479,37 @@ def validate_table(
         overlaps = _overlaps(frame, "unit_code", "lease_start", "lease_end")
         if len(overlaps):
             warnings.append(f"같은 매장에 기간이 겹치는 계약이 있습니다: {_examples(overlaps['unit_code'])}")
+    if kind in STORE_TABLES:
+        _store_references(kind, frame, context, errors, warnings)
     _reference_warnings(kind, frame, context, warnings)
     return frame, errors, warnings
 
 
+def _id_set(ws: Any, name: str, column: str) -> set[str] | None:
+    """IDs of a business table read as text (``007`` stays ``007``); None without a readable column."""
+    path = ws.table_path(name)
+    if path is None:
+        return None
+    try:
+        values = pd.read_csv(path, dtype=str, keep_default_na=False, usecols=[column])[column]
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    return {value.strip() for value in values if value.strip()}
+
+
 def table_context(host: Any, kind: str) -> TableContext:
-    """Brand IDs (brands table), revisions and the unit codes of every actual revision (cached models)."""
+    """Brand IDs (brands table), revisions and the unit codes of every actual revision (cached models).
+
+    Store tables only need the other store table's IDs, so no model is loaded for them."""
     ws = host.ws
     context = TableContext()
     if kind == "brands":
+        return context
+    if kind in STORE_TABLES:
+        if kind == "store_kpis":
+            context.store_ids = _id_set(ws, "stores", "store_id")
+        else:
+            context.kpi_store_ids = _id_set(ws, "store_kpis", "store_id")
         return context
     if ws.has_table("brands"):
         context.brand_ids = set(ws.table("brands")["brand_id"].astype(str))
@@ -480,47 +641,41 @@ def upload_metadata(host: Any, kind: str, filename: str, data: bytes) -> dict[st
 
 
 def metadata_status(ws: Any) -> list[dict[str, Any]]:
-    """Per kind: ``{kind, present, rows, updated_at, required_columns, items}``."""
-    status: list[dict[str, Any]] = []
+    """Per kind (in ``KINDS`` order): ``{kind, present, rows, updated_at, required_columns, items}``."""
+    status: dict[str, dict[str, Any]] = {}
     business = ws.root / "business"
     for kind, spec in TABLES.items():
         path = next(
             (business / f"{kind}{s}" for s in (".csv", ".csv.gz") if (business / f"{kind}{s}").is_file()),
             None,
         )
-        status.append(
-            {
-                "kind": kind,
-                "present": path is not None,
-                "rows": len(ws.table(kind)) if path is not None else 0,
-                "updated_at": _mtime_iso([path]) if path is not None else None,
-                "required_columns": list(spec.required),
-                "items": [],
-            }
-        )
+        status[kind] = {
+            "kind": kind,
+            "present": path is not None,
+            "rows": len(ws.table(kind)) if path is not None else 0,
+            "updated_at": _mtime_iso([path]) if path is not None else None,
+            "required_columns": list(spec.required),
+            "items": [],
+        }
     briefs = sorted((ws.root / BRIEF_DIR).glob("*.yaml"))
-    status.append(
-        {
-            "kind": "relayout_brief",
-            "present": bool(briefs),
-            "rows": len(briefs),
-            "updated_at": _mtime_iso(briefs),
-            "required_columns": list(DOCUMENTS["relayout_brief"]),
-            "items": [path.stem for path in briefs],
-        }
-    )
+    status["relayout_brief"] = {
+        "kind": "relayout_brief",
+        "present": bool(briefs),
+        "rows": len(briefs),
+        "updated_at": _mtime_iso(briefs),
+        "required_columns": list(DOCUMENTS["relayout_brief"]),
+        "items": [path.stem for path in briefs],
+    }
     profiles = [p for p in sorted((ws.root / PROFILE_DIR).glob("*.yaml")) if p.stem != DEFAULT_PROFILE_ID]
-    status.append(
-        {
-            "kind": "drawing_profile",
-            "present": True,
-            "rows": 1 + len(profiles),
-            "updated_at": _mtime_iso(profiles),
-            "required_columns": list(DOCUMENTS["drawing_profile"]),
-            "items": [DEFAULT_PROFILE_ID, *(path.stem for path in profiles)],
-        }
-    )
-    return status
+    status["drawing_profile"] = {
+        "kind": "drawing_profile",
+        "present": True,
+        "rows": 1 + len(profiles),
+        "updated_at": _mtime_iso(profiles),
+        "required_columns": list(DOCUMENTS["drawing_profile"]),
+        "items": [DEFAULT_PROFILE_ID, *(path.stem for path in profiles)],
+    }
+    return [status[kind] for kind in KINDS]
 
 
 # --- drawing versus leases --------------------------------------------------------------------------------

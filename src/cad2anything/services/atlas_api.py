@@ -90,6 +90,14 @@ class RelayoutCheckRequest(BaseModel):
     rev: str = Field(min_length=1, max_length=32)
 
 
+class RelayoutPhasingRequest(BaseModel):
+    alt_id: str | None = Field(default=None, min_length=1, max_length=16)
+    crews: int = Field(default=2, ge=1, le=6)
+    fitout_weeks: float | None = Field(default=None, ge=1, le=12)
+    temporary_sales_ratio: float = Field(default=0.6, ge=0, le=1)
+    use_temporary: bool = True
+
+
 LAYOUT_OPTIONS = {
     "keep_anchors",
     "area_tolerance",
@@ -498,6 +506,14 @@ def create_api(
         except ToolError as exc:
             raise _relayout_error(exc) from exc
 
+    @app.post("/api/relayout/{brief_id}/phasing")
+    def relayout_phasing(brief_id: str, request: RelayoutPhasingRequest | None = None) -> dict[str, Any]:
+        body = request or RelayoutPhasingRequest()
+        try:
+            return toolkit.relayout_phasing(brief_id, **body.model_dump())
+        except ToolError as exc:
+            raise _relayout_error(exc) from exc
+
     @app.get("/api/relayout/{brief_id}/report", response_class=HTMLResponse)
     def relayout_report(brief_id: str) -> HTMLResponse:
         try:
@@ -509,6 +525,14 @@ def create_api(
         from cad2anything.services.upload_api import build_upload_router
 
         app.include_router(build_upload_router(toolkit))
+    if hasattr(toolkit, "analytics_store_compare"):
+        from cad2anything.services.benchmark_api import build_benchmark_router
+
+        app.include_router(build_benchmark_router(toolkit))
+    if hasattr(toolkit, "flow_object"):
+        from cad2anything.services.flow_api import build_flow_router
+
+        app.include_router(build_flow_router(toolkit))
 
     web_dir = web_dir or (Path(os.environ["ATLAS_WEB_DIR"]) if os.environ.get("ATLAS_WEB_DIR") else None)
     if web_dir and web_dir.exists():

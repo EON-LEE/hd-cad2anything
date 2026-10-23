@@ -206,6 +206,23 @@ describe('chat run fold: labels', () => {
     )
     expect(describeUiChange(null, [{ op: 'remove', path: '/route' }])).toBe('경로 지우기')
   })
+
+  it('names the flow tools and describes flow patches by mode', () => {
+    expect(toolLabel('spatial_flow')).toBe('통로 집계 계산')
+    expect(toolLabel('ui_show_flow')).toBe('도면에 통로 집계 그리기')
+    expect(toolLabel('relayout_phasing')).toBe('공사 순서 계산')
+    const run = fold([
+      { type: 'TOOL_CALL_START', tool_call_id: 'u1', tool_name: 'ui_show_flow' },
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: null }, { op: 'replace', path: '/flow', value: { mode: 'popup', floors: {} } }] },
+      { type: 'TOOL_CALL_END', tool_call_id: 'u1' },
+    ])
+    expect(run.steps.map((s) => [s.label, s.labelSource])).toEqual([['팝업 후보 표시', 'ui']])
+    expect(describeUiChange('ui_show_flow', [{ op: 'replace', path: '/flow', value: { mode: 'egress' } }])).toBe('통로 폭·피난 점검 표시')
+    expect(describeUiChange('ui_show_flow', [{ op: 'replace', path: '/flow', value: null }])).toBe('통로 집계 지우기')
+    expect(describeUiChange(null, [{ op: 'replace', path: '/flow', value: { mode: 'traffic' } }, { op: 'replace', path: '/floor', value: '3F' }])).toBe(
+      '3층으로 이동 · 추정 유동 표시',
+    )
+  })
 })
 
 describe('chat run fold: nested specialist calls', () => {

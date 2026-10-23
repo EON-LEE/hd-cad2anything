@@ -219,7 +219,7 @@ function EmptyState({ onPick, disabled }: { onPick: (prompt: string) => void; di
   return (
     <div className="chat-empty">
       <h2>무엇을 도와드릴까요?</h2>
-      <p>도면 변경, 매장 효율, 교차구매, 고객 동선, 길 찾기를 물어보세요. 답변에 맞춰 도면도 함께 바뀌어요.</p>
+      <p>도면 변경, 매장 효율, 교차구매, 고객 동선, 길 찾기, 통로 유동·팝업 후보를 물어보세요. 답변에 맞춰 도면도 함께 바뀌어요.</p>
       <div className="suggestions" role="group" aria-label="추천 질문">
         {QUICK_PROMPTS.map((prompt) => (
           <button key={prompt} type="button" className="suggestion" disabled={disabled} onClick={() => onPick(prompt)}>

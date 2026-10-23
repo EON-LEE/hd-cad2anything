@@ -5,12 +5,13 @@ import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
 import { useCachedResource } from '../hooks/useCachedResource'
 import { useElapsedSeconds } from '../hooks/useElapsedSeconds'
-import { formatPercent } from '../lib/format'
-import { RELAYOUT_STATUS_LABELS, pastDiagnosis } from '../lib/relayout'
-import type { RelayoutObjective, RelayoutMovable, RelayoutPlanOptions, RelayoutProject } from '../types/api'
+import { formatKrw, formatPercent } from '../lib/format'
+import { RELAYOUT_STATUS_LABELS, pastDiagnosis, weeksText } from '../lib/relayout'
+import type { RelayoutObjective, RelayoutMovable, RelayoutPhasingRequest, RelayoutPlanOptions, RelayoutProject } from '../types/api'
 import { RelayoutAlternatives, type RelayoutBusy } from './RelayoutAlternatives'
 import { BriefSummary, DiagnosisDisclosure } from './RelayoutBrief'
 import { RelayoutCheckPanel } from './RelayoutCheck'
+import { RelayoutPhasingPanel } from './RelayoutPhasing'
 
 /** A request to open one brief (agent `panel = {type: "layout", payload: {brief_id}}` or an upload job). */
 export interface RelayoutRequest {
@@ -163,6 +164,8 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
         plan: result,
         status: 'planned',
         selected_alt_id: result.alternatives.some((a) => a.alt_id === p.selected_alt_id) ? p.selected_alt_id : null,
+        // New alternatives drop the earlier construction order (the backend resets it too).
+        phasing: null,
       }),
       (result) => `대안 ${result.alternatives.length}개를 만들었습니다.`,
     ).then((ok) => {
@@ -186,6 +189,17 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
       (p, result) => ({ ...p, check: result, status: 'checked' }),
       (result) => `도면 대조를 마쳤습니다. 일치율 ${formatPercent(result.conformance_pct)}`,
     )
+
+  const phase = (body: RelayoutPhasingRequest) => {
+    setAnnouncement('공사 순서를 계산하는 중입니다.')
+    return act(
+      'phasing',
+      (id) => source.phaseRelayout(id, body),
+      (p, result) => ({ ...p, phasing: result }),
+      (result) =>
+        `공사 순서를 계산했습니다. ${result.alt_id ?? ''} 총 ${weeksText(result.total_weeks)}, 영업 손실 추정 ${formatKrw(result.lost_krw)}.`.replace(/\s+/g, ' '),
+    )
+  }
 
   const update = (patch: Partial<PlanForm>) => {
     if (briefId && values) setForm({ briefId, values: { ...values, ...patch } })
@@ -330,11 +344,12 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
           </section>
 
           <RelayoutAlternatives key={`alts-${project.brief.brief_id}`} project={project} busy={busy} error={errorFor('select')} onSelect={select} />
+          <RelayoutPhasingPanel key={`phasing-${project.brief.brief_id}`} project={project} busy={busy} error={errorFor('phasing')} onPhase={phase} />
           <RelayoutCheckPanel key={`check-${project.brief.brief_id}`} project={project} busy={busy} error={errorFor('check')} onCheck={check} />
 
           <section className="relayout-block" aria-labelledby="relayout-report-title">
             <h3 id="relayout-report-title">제안서</h3>
-            <p className="muted">진단, 대안 비교, 선택안, 도면 대조, 가정과 한계를 한 문서로 봅니다.</p>
+            <p className="muted">진단, 대안 비교, 선택안, 공사 순서, 도면 대조, 가정과 한계를 한 문서로 봅니다.</p>
             {reportUrl ? (
               <a className="button-link" href={reportUrl} target="_blank" rel="noopener noreferrer">
                 제안서 열기

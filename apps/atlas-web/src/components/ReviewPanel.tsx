@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
 import { invalidateCache, useCachedResource } from '../hooks/useCachedResource'
+import { DEFAULT_REVIEW_WINDOW, REVIEW_WINDOW_OPTIONS, canReviewRelayout } from '../lib/benchmark'
 import { CHANGE_LABELS, CHANGE_ORDER, changeColor } from '../lib/colors'
 import { APPROVAL_MODE_LABELS, ARTIFACT_STATUS_LABELS, RISK_LABELS, summarizeValue } from '../lib/format'
 import { floorOfUnitCode } from '../lib/geometry'
@@ -170,6 +171,10 @@ export function ReviewPanel() {
   const [uploadsMounted, setUploadsMounted] = useState(false)
   const [uploadRequest, setUploadRequest] = useState<UploadRequest | null>(null)
   const uploadsRef = useRef<HTMLElement>(null)
+  const [reviewDays, setReviewDays] = useState(DEFAULT_REVIEW_WINDOW)
+  // Sales before and after an actual revision took effect (not for the first one or one without sales).
+  const reviewable = canReviewRelayout(meta, revTo)
+  const reviewUrl = reviewable ? source.relayoutReviewReportUrl(revTo, reviewDays) : null
 
   useEffect(() => {
     if (ui.panel?.type !== 'uploads') return
@@ -220,6 +225,27 @@ export function ReviewPanel() {
       <header className="panel-header">
         <h2>개정 검토</h2>
         <p className="muted">{revFrom ? `${revFrom} → ${revTo}` : `${revTo} (이전 개정 없음)`}</p>
+        {reviewable && (
+          <div className="review-report">
+            <label className="field">
+              <span>비교 기간</span>
+              <select name="review-window-days" value={reviewDays} onChange={(e) => setReviewDays(Number(e.target.value))}>
+                {REVIEW_WINDOW_OPTIONS.map((days) => (
+                  <option key={days} value={days}>
+                    {days}일
+                  </option>
+                ))}
+              </select>
+            </label>
+            {reviewUrl ? (
+              <a href={reviewUrl} target="_blank" rel="noopener noreferrer" title={`${revTo} 적용일 앞뒤 ${reviewDays}일의 일평균 매출 비교`}>
+                개편 성과 보고서({reviewDays}일) 열기
+              </a>
+            ) : (
+              <span className="muted small">이 환경에서는 개편 성과 보고서를 열 수 없습니다.</span>
+            )}
+          </div>
+        )}
       </header>
 
       <section ref={uploadsRef} className="upload-section" aria-labelledby="uploads-title">

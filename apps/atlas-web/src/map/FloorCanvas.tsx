@@ -3,6 +3,7 @@ import DeckGL from '@deck.gl/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
+import { FlowCard } from '../components/FlowCard'
 import { JourneyCard } from '../components/JourneyCard'
 import { Legend } from '../components/Legend'
 import { LayerToolbar } from '../components/LayerToolbar'
@@ -12,19 +13,21 @@ import { UnitDetailsCard } from '../components/UnitDetailsCard'
 import { useCachedResource } from '../hooks/useCachedResource'
 import { useElementSize } from '../hooks/useElementSize'
 import { CHANGE_LABELS } from '../lib/colors'
+import { FLOW_MARKER_KIND_LABELS, flowMarkerName, flowModeLabel, flowValueText } from '../lib/flow'
 import { floorLabel, formatArea, formatManwon } from '../lib/format'
 import { buildFloorModel, fitViewStateBeside, unionBBox, MAX_ZOOM, MIN_ZOOM, type OrthoViewState, type UnitInfo } from '../lib/geometry'
 import { placeKindLabel } from '../lib/route'
 import { useAppDispatch, useAppState } from '../state/store'
 import { heatmapActive, sortedFloors } from '../state/uiState'
 import { replaceOp } from '../state/reducer'
-import type { Journey, Route } from '../types/api'
+import type { Flow, Journey, Route } from '../types/api'
 import { buildLayers, type UnitPart } from './layers'
 import {
   categoryColorMap,
   changeMarksForFloor,
   crossFloorTargets,
   layoutFloorBadges,
+  prepareFlow,
   prepareJourney,
   prepareRoute,
   removedUnits,
@@ -32,6 +35,8 @@ import {
   resolveHighlights,
   unitDisplayName,
   type EdgeRender,
+  type FlowMarkerRender,
+  type FlowPathRender,
   type JourneyStopRender,
   type RoutePlaceRender,
   type UnitStyleContext,
@@ -39,7 +44,7 @@ import {
 
 type ViewState = OrthoViewState & { transitionDuration?: number; transitionInterpolator?: LinearInterpolator }
 /** Cards over the left of the canvas that the current fit was made beside. */
-type FittedCards = { journey: Journey | null; route: Route | null }
+type FittedCards = { journey: Journey | null; route: Route | null; flow: Flow | null }
 
 const VIEW = new OrthographicView({ id: 'floor', flipY: false })
 const INTERPOLATOR = new LinearInterpolator({ transitionProps: ['target', 'zoom'] })
@@ -48,7 +53,9 @@ const CONTROLLER = { doubleClickZoom: true, keyboard: true, inertia: true, scrol
 const JOURNEY_CARD_INSET = 354
 /** Width of the route box (.route-card) plus its margins, in pixels. */
 const ROUTE_CARD_INSET = 304
-const NO_CARDS: FittedCards = { journey: null, route: null }
+/** Width of the flow box (.flow-card) plus its margins, in pixels. */
+const FLOW_CARD_INSET = 324
+const NO_CARDS: FittedCards = { journey: null, route: null, flow: null }
 
 export function FloorCanvas() {
   const { source, meta } = useData()
@@ -88,10 +95,12 @@ export function FloorCanvas() {
   /** Cards last fitted beside (NO_CARDS while none is open). */
   const fittedCards = useRef<FittedCards>(NO_CARDS)
   const ready = size.width > 0 && size.height > 0 && !!base.data && !!model.bbox
-  // The journey card and the route box float over the left of the canvas: fit floors and focus to the area beside them.
+  // The journey card and the route and flow boxes float over the left of the canvas: fit floors and focus to the area beside them.
   const cardJourney = ui.journey && ui.panel?.type === 'journey' ? ui.journey : null
   const cardRoute = ui.route
-  const leftInset = size.width >= 720 ? Math.max(cardJourney ? JOURNEY_CARD_INSET : 0, cardRoute ? ROUTE_CARD_INSET : 0) : 0
+  const cardFlow = ui.flow
+  const leftInset =
+    size.width >= 720 ? Math.max(cardJourney ? JOURNEY_CARD_INSET : 0, cardRoute ? ROUTE_CARD_INSET : 0, cardFlow ? FLOW_CARD_INSET : 0) : 0
   const previousInset = useRef(leftInset)
 
   useEffect(() => {
@@ -99,7 +108,7 @@ export function FloorCanvas() {
     const closedInset = previousInset.current
     previousInset.current = leftInset
     if (!ready || !model.bbox) return
-    const shownCards: FittedCards = leftInset ? { journey: cardJourney, route: cardRoute } : NO_CARDS
+    const shownCards: FittedCards = leftInset ? { journey: cardJourney, route: cardRoute, flow: cardFlow } : NO_CARDS
     const codes = (ui.focus?.unit_codes ?? []).filter((c) => model.units.has(c))
     if (focusSeq !== appliedFocus.current && codes.length) {
       appliedFocus.current = focusSeq
@@ -113,7 +122,9 @@ export function FloorCanvas() {
       })
       return
     }
-    const cardsToFit = leftInset > 0 && (fittedCards.current.journey !== cardJourney || fittedCards.current.route !== cardRoute)
+    const cardsToFit =
+      leftInset > 0 &&
+      (fittedCards.current.journey !== cardJourney || fittedCards.current.route !== cardRoute || fittedCards.current.flow !== cardFlow)
     if (fittedFloor.current !== ui.floor || cardsToFit) {
       const sameFloor = fittedFloor.current === ui.floor
       fittedFloor.current = ui.floor
@@ -136,7 +147,7 @@ export function FloorCanvas() {
           : prev,
       )
     }
-  }, [ready, model, focusSeq, ui.focus, ui.floor, cardJourney, cardRoute, leftInset, size.width, size.height])
+  }, [ready, model, focusSeq, ui.focus, ui.floor, cardJourney, cardRoute, cardFlow, leftInset, size.width, size.height])
 
   const fitAll = useCallback(() => {
     if (model.bbox && size.width) {
@@ -173,6 +184,7 @@ export function FloorCanvas() {
   const edges: EdgeRender[] = useMemo(() => resolveEdges(ui.edges, ui.floor, model.units, badges), [ui.edges, ui.floor, model.units, badges])
   const journey = useMemo(() => prepareJourney(ui.journey, ui.floor, floors), [ui.journey, ui.floor, floors])
   const route = useMemo(() => prepareRoute(ui.route, ui.floor, floors), [ui.route, ui.floor, floors])
+  const flow = useMemo(() => prepareFlow(ui.flow, ui.floor), [ui.flow, ui.floor])
 
   const layers = useMemo(
     () =>
@@ -189,9 +201,10 @@ export function FloorCanvas() {
         edges,
         journey,
         route,
+        flow,
         zoom: labelZoom,
       }),
-    [model, compareModel, removed, changeMarks, style, styleKey, ui.layers, highlights, selectedUnits, edges, journey, route, labelZoom],
+    [model, compareModel, removed, changeMarks, style, styleKey, ui.layers, highlights, selectedUnits, edges, journey, route, flow, labelZoom],
   )
 
   const onClick = useCallback(
@@ -203,6 +216,9 @@ export function FloorCanvas() {
         if (model.units.has(code)) dispatch({ type: 'selection/set', unitCodes: [code] })
       } else if (info.layer?.id === 'route-places' && info.object) {
         const code = (info.object as RoutePlaceRender).place.unit_code
+        if (code && model.units.has(code)) dispatch({ type: 'selection/set', unitCodes: [code] })
+      } else if (info.layer?.id === 'flow-markers' && info.object) {
+        const code = (info.object as FlowMarkerRender).marker.unit_code
         if (code && model.units.has(code)) dispatch({ type: 'selection/set', unitCodes: [code] })
       } else if (!info.object) {
         dispatch({ type: 'selection/set', unitCodes: [] })
@@ -245,9 +261,20 @@ export function FloorCanvas() {
         const kind = placeKindLabel(place.kind)
         return { text: `${text} · ${place.label}\n${[kind, floorLabel(place.floor)].filter(Boolean).join(' · ')}`, style }
       }
+      if (info.layer?.id === 'flow-paths' && ui.flow) {
+        const { segment } = object as unknown as FlowPathRender
+        const value = flowValueText(ui.flow, segment.value)
+        return { text: [segment.label ?? flowModeLabel(ui.flow.mode), value].filter(Boolean).join('\n'), style }
+      }
+      if (info.layer?.id === 'flow-markers') {
+        const { marker } = object as unknown as FlowMarkerRender
+        const kind = FLOW_MARKER_KIND_LABELS[marker.kind] ?? ''
+        const detail = [kind, marker.unit_code, floorLabel(marker.floor)].filter(Boolean).join(' · ')
+        return { text: `${flowMarkerName(marker)}${detail ? `\n${detail}` : ''}`, style }
+      }
       return null
     },
-    [categoryNames, changeMarks, compareRev, heatValues, ui.heatmap?.label, ui.highlights],
+    [categoryNames, changeMarks, compareRev, heatValues, ui.heatmap?.label, ui.highlights, ui.flow],
   )
 
   const floorName = floors.find((f) => f.code === ui.floor)?.name ?? ''
@@ -287,7 +314,7 @@ export function FloorCanvas() {
           </div>
         )}
         <p className="visually-hidden" aria-live="polite">
-          {`${ui.floor} 도면: 매장 ${model.units.size}개, 강조 ${highlights.length}개, 연결선 ${edges.length}개${heatValues ? ', heatmap 표시 중' : ''}${compareRev ? `, ${compareRev} 대비 비교 중` : ''}${ui.journey ? `, 고객 동선 표시 중(이 층 결제 ${journey.stops.length}곳)` : ''}${ui.route ? `, 길 찾기 경로 표시 중${route.places.length ? `(이 층: ${route.places.map((p) => `${p.text} ${p.label}`).join(', ')})` : ''}` : ''}`}
+          {`${ui.floor} 도면: 매장 ${model.units.size}개, 강조 ${highlights.length}개, 연결선 ${edges.length}개${heatValues ? ', heatmap 표시 중' : ''}${compareRev ? `, ${compareRev} 대비 비교 중` : ''}${ui.journey ? `, 고객 동선 표시 중(이 층 결제 ${journey.stops.length}곳)` : ''}${ui.route ? `, 길 찾기 경로 표시 중${route.places.length ? `(이 층: ${route.places.map((p) => `${p.text} ${p.label}`).join(', ')})` : ''}` : ''}${ui.flow ? `, ${flowModeLabel(ui.flow.mode)} 표시 중(이 층: 통로 ${flow.paths.length}구간, 표시 지점 ${flow.markers.length}곳)` : ''}`}
         </p>
         {badges.map((badge) => (
           <button
@@ -305,9 +332,10 @@ export function FloorCanvas() {
         ))}
         {selectedUnit && <UnitDetailsCard unit={selectedUnit} changeType={changeMarks?.get(selectedUnit.code) ?? null} />}
         {ui.panel?.type === 'table' && <TablePanel payload={ui.panel.payload} />}
-        {(cardRoute || cardJourney) && (
-          // One column at the top left, so the route box and the journey card never overlap.
+        {(cardRoute || cardJourney || cardFlow) && (
+          // One column at the top left, so the boxes and the journey card never overlap (normally only one is shown).
           <div className="canvas-cards">
+            {cardFlow && <FlowCard flow={cardFlow} />}
             {cardRoute && <RouteCard route={cardRoute} />}
             {cardJourney && <JourneyCard journey={cardJourney} />}
           </div>
@@ -334,6 +362,8 @@ export function FloorCanvas() {
         journeyStopsOnFloor={journey.stops.length}
         journeyCardOpen={ui.panel?.type === 'journey'}
         route={ui.route}
+        flow={ui.flow}
+        flowOnFloor={flow}
       />
     </section>
   )

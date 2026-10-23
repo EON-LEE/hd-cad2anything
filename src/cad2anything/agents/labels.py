@@ -39,6 +39,13 @@ TOOL_LABELS = {
     "relayout_check_drawing": "개편안과 도면 대조",
     "relayout_report": "개편 제안서 만들기",
     "relayout_entry_options": "입점 위치 추천",
+    "relayout_unit_options": "빈 자리 채울 브랜드 추천",
+    "relayout_phasing": "공사 순서 계산",
+    "analytics_flow_map": "통로 유동 추정",
+    "spatial_popup_candidates": "팝업 위치 추천",
+    "spatial_egress_check": "통로 폭·피난 거리 점검",
+    "analytics_store_compare": "다점포 비교",
+    "analytics_relayout_review": "지난 개편 성과 추적",
     "upload_list_jobs": "업로드 작업 확인",
     "revision_check_metadata": "도면과 계약 정보 대조",
     "ui_set_floor": "층 이동",
@@ -50,6 +57,7 @@ TOOL_LABELS = {
     "ui_show_panel": "패널 열기",
     "ui_show_journey": "도면에 고객 동선 그리기",
     "ui_show_route": "도면에 경로 그리기",
+    "ui_show_flow": "도면에 유동 표시",
     "ui_clear": "화면 정리",
     "consult_specialist": "전문 에이전트에게 확인",
     "web_search": "웹 검색",
@@ -139,10 +147,20 @@ def tool_label(name: str | None, args: dict[str, Any] | None = None) -> str:
         return f"{', '.join(floor_ko(f) for f in floors)} {base}" if floors else base
     if name == "relayout_entry_options" and (args.get("brand") or args.get("category")):
         return f"{args.get('brand') or args.get('category')} {base}"
+    if name == "relayout_unit_options" and args.get("unit_code"):
+        return f"{args['unit_code']} 자리에 넣을 브랜드 추천"
     if name == "relayout_check_drawing" and args.get("rev"):
         return f"{args['rev']} 도면과 개편안 대조"
     if name.startswith("relayout_") and args.get("brief_id"):
         return f"{args['brief_id']} {base}"
+    if name in ("analytics_flow_map", "spatial_popup_candidates", "spatial_egress_check"):
+        return _with_floor(base, args)
+    if name == "ui_show_flow":
+        mode = {"traffic": "유동", "popup": "팝업 후보", "egress": "통로 폭 점검"}.get(str(args.get("mode")))
+        label = f"도면에 {mode} 표시" if mode else base
+        return f"{floor_ko(args['floor'])} {label}" if args.get("floor") else label
+    if name == "analytics_relayout_review" and args.get("rev"):
+        return f"{args['rev']} {base}"
     if name == "revision_check_metadata" and args.get("rev"):
         return f"{args['rev']} {base}"
     if name == "revision_diff" and args.get("rev_from") and args.get("rev_to"):

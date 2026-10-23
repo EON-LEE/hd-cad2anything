@@ -100,8 +100,33 @@ tools:
     parameters:
       type: object
       properties:
-        what: { type: string, enum: [heatmap, highlights, edges, journey, route, all] }
+        what: { type: string, enum: [heatmap, highlights, edges, journey, route, flow, all] }
       required: [what]
+      additionalProperties: false
+  - name: ui_show_flow
+    description: >-
+      통로 위 집계를 도면에 그린다. mode=traffic은 결제 순서를 통로망 최단 경로로 이어 모은 추정 유동(굵고 진할수록 많이 지남),
+      mode=popup은 같은 유동 위에 팝업 후보 위치를 순위 번호로, mode=egress는 기준보다 좁은 통로와 계단·출입구까지 먼 지점을
+      경고 색으로 표시한다. 유동, 붐비는 통로, 팝업 위치, 통로 폭, 피난 거리를 물으면 이 함수로 그리고 결과의 summary,
+      markers, caveat으로 설명한다. 추정 유동은 실제로 걸은 길이 아니라고 함께 말한다.
+    parameters:
+      type: object
+      properties:
+        mode: { type: string, enum: [traffic, popup, egress] }
+        floor: { type: string, description: "층. 생략하면 모든 층을 계산하고 값이 가장 많은 층을 보여 준다. 예: 3F" }
+        segment:
+          type: object
+          description: "고객 조건(traffic, popup). 예: {age_band: 40s, gender: F, tier: [VIP, VVIP]}"
+          properties:
+            age_band: { type: string, enum: [20s, 30s, 40s, 50s, 60s+] }
+            gender: { type: string, enum: [F, M] }
+            tier: { type: array, items: { type: string, enum: [VVIP, VIP, GOLD, MEMBER] } }
+        day_type: { type: string, enum: [all, weekday, weekend], description: "요일 구분. 기본 all(popup은 weekend)" }
+        hours: { type: string, description: "시간대 'HH-HH'. 예: 10-14" }
+        category: { type: string, description: "popup: 팝업 상품 카테고리(가까운 같은 카테고리 매장을 고려). 예: 화장품" }
+        min_width_m: { type: number, description: "egress: 통로 최소 폭 기준(m). 기본 2.4" }
+        max_travel_m: { type: number, description: "egress: 계단·출입구까지 최대 보행 거리 기준(m). 기본 50" }
+      required: [mode]
       additionalProperties: false
   - name: ui_show_route
     description: >-

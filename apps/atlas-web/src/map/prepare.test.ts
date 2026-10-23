@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { CHANGE_COLORS, NO_DATA_COLOR, VACANT_COLOR, hexToRgba, heatmapColor, tint } from '../lib/colors'
+import { FLOW_MARKER_COLORS, flowColor, normalizeFlow } from '../lib/flow'
 import { buildFloorModel, type UnitInfo } from '../lib/geometry'
 import { normalizeJourney } from '../lib/journey'
 import { normalizeRoute } from '../lib/route'
 import type { FeatureCollection } from '../types/api'
 import {
+  EMPTY_FLOW_RENDER,
   EMPTY_JOURNEY_RENDER,
   EMPTY_ROUTE_RENDER,
   changeMarksForFloor,
   crossFloorTargets,
   fitUnitLabel,
   layoutFloorBadges,
+  prepareFlow,
   prepareJourney,
   prepareRoute,
   removedUnits,
@@ -295,5 +298,56 @@ describe('route render data', () => {
     ])
     expect(f3.places).toEqual([])
     expect(f3.paths.map((p) => p.key)).toEqual(['seg-1'])
+  })
+})
+
+describe('flow render data', () => {
+  const flow = normalizeFlow({
+    mode: 'popup',
+    floors: {
+      '3F': {
+        max_value: 1500,
+        segments: [
+          { points: [[12, 15], [40, 15]], weight: 0.82, value: 1234, label: '3F-C05·3F-C06 앞 통로' },
+          { points: [[40, 15], [40, 40]], value: 300 },
+          { points: [[0, 0], [5, 0]], weight: 0.6, color: '#c62828', label: '아트리움 남측 · 폭 3m' },
+          { points: [[1, 1]], weight: 1 },
+        ],
+      },
+      '1F': { segments: [{ points: [[0, 0], [9, 0]], weight: 1 }] },
+    },
+    markers: [
+      { floor: '3F', x: 60, y: 31.5, rank: 2, kind: 'unit', unit_code: '3F-P01' },
+      { floor: '3F', x: 20, y: 15, rank: 1, kind: 'spot', label: '1', title: '후보 1' },
+      { floor: '1F', x: 5, y: 5, rank: 3, kind: 'spot' },
+      { floor: '3F', x: 9, y: 9, kind: 'warning' },
+    ],
+  })!
+
+  it('keeps the current floor only: its segments by weight and its markers', () => {
+    const f3 = prepareFlow(flow, '3F')
+    // Lighter lines first so heavy ones stay on top; the one-point segment is not drawn.
+    expect(f3.paths.map((p) => [p.key, p.width])).toEqual([
+      ['seg-1', 2 + 8 * 0.2],
+      ['seg-2', 2 + 8 * 0.6],
+      ['seg-0', 2 + 8 * 0.82],
+    ])
+    expect(f3.paths.find((p) => p.key === 'seg-0')!.path).toEqual([[12, 15], [40, 15]])
+    // Color by weight unless the backend chose one.
+    expect(f3.paths.find((p) => p.key === 'seg-0')!.color).toEqual(flowColor(0.82))
+    expect(f3.paths.find((p) => p.key === 'seg-2')!.color).toEqual(hexToRgba('#c62828', 240))
+    // Markers on this floor, the top rank drawn last; the text is the label, the rank or "!".
+    expect(f3.markers.map((m) => [m.text, m.marker.kind])).toEqual([
+      ['!', 'warning'],
+      ['2', 'unit'],
+      ['1', 'spot'],
+    ])
+    expect(f3.markers.map((m) => m.color)).toEqual([hexToRgba(FLOW_MARKER_COLORS.warning), hexToRgba(FLOW_MARKER_COLORS.unit), hexToRgba(FLOW_MARKER_COLORS.spot)])
+    expect(f3.markers.at(-1)!.position).toEqual([20, 15])
+    const f1 = prepareFlow(flow, '1F')
+    expect(f1.paths.map((p) => p.width)).toEqual([10])
+    expect(f1.markers.map((m) => m.text)).toEqual(['3'])
+    expect(prepareFlow(flow, '5F')).toEqual({ paths: [], markers: [] })
+    expect(prepareFlow(null, '3F')).toBe(EMPTY_FLOW_RENDER)
   })
 })
