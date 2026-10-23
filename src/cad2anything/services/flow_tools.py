@@ -1116,6 +1116,8 @@ class FlowTools:
                         else c["near"]
                     ),
                     "unit_code": c["unit_code"],
+                    "per_day": c["passers_per_day"],
+                    "reasons": c["reasons"],
                 }
                 for c in popup["candidates"]
             ]

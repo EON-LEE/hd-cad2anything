@@ -331,7 +331,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 - `mode`는 `traffic`, `popup`, `egress` 중 하나다.
   - `traffic`: `segments`는 통로 중심선 구간이고 `value`는 기간 동안 그 구간을 지난 추정 이동 수, `weight`는 층 최댓값으로 나눈 0~1 값이다. 층의 `total`은 그 층을 걸은 추정 이동 수다(층을 오가는 이동은 두 층에 센다).
-  - `popup`: `traffic`과 같은 유동을 바탕에 그리고, `markers`에 팝업 후보 위치를 순위대로 둔다(`kind: spot`은 통로 위 공간, `kind: unit`은 공실·팝업 매장).
+  - `popup`: `traffic`과 같은 유동을 바탕에 그리고, `markers`에 팝업 후보 위치를 순위대로 둔다(`kind: spot`은 통로 위 공간, `kind: unit`은 공실·팝업 매장). 후보마다 하루 추정 통행 `per_day`와 추천 이유 `reasons`(문장 목록)가 있다.
   - `egress`: `segments`는 기준보다 좁은 통로 구간이다. `value`는 폭(m), `color`는 경고 색, `weight`는 `0.5 + 0.5 × (1 - 폭/기준 폭)`이다. 층의 `max_value`는 기준 폭, `total`은 좁은 구간 수다. `markers`는 계단·출입구까지 걷는 거리가 기준을 넘는 매장이다(`kind: warning`).
 - `summary`에는 `customer_days`, `trips`, `floors`, `period`, `notes`가 있다. `traffic`·`popup`은 많이 지난 통로 `top_corridors`(층, 이름, 기간 합계, 하루 평균, 층 이동 중 비율)를, `traffic`은 앞을 많이 지나는 매장 `top_units`를 함께 준다. `egress`는 `customer_days`·`trips`가 `null`이고 `narrow_stretches`, `units_over_limit`, `unreachable_units`, `text`가 있다.
 - 유동은 거래가 쌓인 실제 개정에서만 계산한다. 화면의 개정이 가상 개정이나 아직 실적이 없는 개정이면 그 기준 실제 개정으로 계산하고 `rev`에 그 개정을 넣는다. 이때 `ui_show_flow`는 `/rev`도 함께 바꾼다.

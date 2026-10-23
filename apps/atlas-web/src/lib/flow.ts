@@ -247,7 +247,8 @@ export function flowFloorText(mode: string, stat: FlowFloorStat): string {
     return `${flowModeLabel(mode)}: ${parts.filter(Boolean).join(' · ')}`
   }
   if (mode === 'popup' && stat.markers) return `팝업 후보 ${stat.markers}곳`
-  if (stat.segments) return `${flowModeLabel(mode)} ${stat.segments}구간`
+  // Popup lines are the same estimated traffic: name them so, not "팝업 후보 N구간".
+  if (stat.segments) return `${flowModeLabel(mode === 'popup' ? 'traffic' : mode)} ${stat.segments}구간`
   return `${flowModeLabel(mode)} 표시 ${stat.markers}곳`
 }
 

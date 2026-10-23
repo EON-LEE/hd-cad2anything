@@ -2256,7 +2256,7 @@ class RelayoutTools:
                 )
             else:
                 parts.append(
-                    f"서로 자리를 바꾸는 순환({loop})은 쓸 수 있는 빈 매장이 없어 {row['breaker']} 매장이 "
+                    f"서로 자리를 바꾸는 순환({loop})은 그 기간에 임시로 쓸 빈 매장이 없어 {row['breaker']} 매장이 "
                     f"{_num(row['weeks'])}주 동안 휴점해야 해요."
                 )
         if entries:

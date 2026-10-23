@@ -311,7 +311,11 @@ class UiActionHandler:
             "title": flow.get("title"),
             "summary": flow.get("summary"),
             "markers": [
-                {k: m.get(k) for k in ("rank", "floor", "kind", "title", "unit_code") if m.get(k) is not None}
+                {
+                    k: m.get(k)
+                    for k in ("rank", "floor", "kind", "title", "unit_code", "per_day", "reasons")
+                    if m.get(k) is not None
+                }
                 for m in markers[:10]
             ],
             "legend": flow.get("legend"),

@@ -144,6 +144,7 @@ describe('flow helpers', () => {
     expect(flowDataFloors(flow)).toEqual(['3F', '4F', '5F'])
     expect(flowFloorStats(null).size).toBe(0)
     expect(flowFloorText('popup', { segments: 2, markers: 2 })).toBe('팝업 후보 2곳')
+    expect(flowFloorText('popup', { segments: 63, markers: 0 })).toBe('추정 유동 63구간')
     expect(flowFloorText('traffic', { segments: 12, markers: 0 })).toBe('추정 유동 12구간')
     expect(flowFloorText('egress', { segments: 3, markers: 2 })).toBe('통로 폭·피난 점검: 좁은 통로 3곳 · 피난 거리 초과 2곳')
     expect(flowFloorText('egress', { segments: 0, markers: 1 })).toBe('통로 폭·피난 점검: 피난 거리 초과 1곳')
