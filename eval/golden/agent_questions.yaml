@@ -41,7 +41,7 @@ cases:
     scenario: 공간 생산성
     question: R2 기준 층별 ㎡당 매출을 높은 순서로 보여줘.
     expect:
-      tools_any: [analytics_productivity]
+      tools_any: [analytics_productivity, spatial_query]
       answer_any: ["1F", "B1", "1층"]
 
   - id: cross-vip-cosmetics

@@ -476,6 +476,54 @@ def test_consult_rejects_empty_requests_and_reuses_repeated_ones():
     assert "재사용" in summaries["b"] and "상담하지 않음" in summaries["c"]
 
 
+class FlakyResponses(FakeResponses):
+    """Fails the first specialist call (a stream that breaks mid-way) or every one."""
+
+    def __init__(self, scripted, failures):
+        super().__init__(scripted)
+        self.failures = failures
+
+    def create(self, **kwargs):
+        name = kwargs["extra_body"]["agent_reference"]["name"]
+        if name != "atlas-orchestrator" and self.failures > 0:
+            self.calls.append(kwargs)
+            self.failures -= 1
+            raise ConnectionError("stream broke")
+        return super().create(**kwargs)
+
+
+def test_failed_specialist_is_retried_then_answered_without_it():
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    for failures, expected_ok in ((1, True), (2, False)):
+        scripted = {
+            "atlas-orchestrator": [{"output": [consult]}, {"output": [_message("답")]}],
+            "market-researcher": [{"output_text": "조사 결과"}],
+        }
+        client = FakeClient(scripted)
+        client.responses = FlakyResponses(scripted, failures)
+        events = list(AgentRuntime(client, id_factory=lambda: "id").run("벤치마크와 비교", {}))
+
+        assert events[-1]["type"] == "RUN_FINISHED"
+        researcher_calls = [
+            c
+            for c in client.responses.calls
+            if c["extra_body"]["agent_reference"]["name"] == "market-researcher"
+        ]
+        assert len(researcher_calls) == 2
+        output = client.responses.calls[-1]["input"][0]["output"]
+        end = next(e for e in events if e["type"] == "TOOL_CALL_END" and e["tool_call_id"] == "c1")
+        if expected_ok:
+            assert output == "조사 결과" and end["ok"] is True
+        else:
+            assert json.loads(output)["ok"] is False and "ConnectionError" in json.loads(output)["error"]
+            assert end["ok"] is False and "실패" in end["summary"]
+
+
 def _documented_mcp_tools() -> set[str]:
     text = (REPO / "docs" / "specs" / "mcp-tools.md").read_text(encoding="utf-8")
     section = text.split("## 2.")[1].split("## 3.")[0]
