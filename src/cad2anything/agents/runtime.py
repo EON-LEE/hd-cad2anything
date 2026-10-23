@@ -9,6 +9,7 @@ generated, so the chat shows progress and types out the answer like a chat assis
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from typing import Any
@@ -17,12 +18,21 @@ from cad2anything.agents import ORCHESTRATOR, SPECIALISTS
 from cad2anything.agents.labels import tool_label
 from cad2anything.agents.ui_actions import UiActionHandler
 
+logger = logging.getLogger(__name__)
+
 MAX_ROUNDS = 10
 SPECIALIST_OUTPUT_LIMIT = 6000
 TEXT_CHUNK = 80
 # Token-rate limits (429) are retried with the SDK's backoff, which honors retry-after headers.
 CLIENT_MAX_RETRIES = 6
 CLIENT_TIMEOUT_S = 180
+# A stream that breaks mid-way is not retried by the SDK: retry a specialist once, then let the
+# orchestrator answer without it instead of failing the whole answer.
+CONSULT_ATTEMPTS = 2
+CONSULT_FAILED = (
+    "전문 에이전트 응답이 중간에 끊겨 결과를 받지 못했습니다({error}). 같은 요청을 다시 보내지 마세요. "
+    "이미 조회한 도구 결과로 답하고, 이번에는 이 전문 작업(예: 웹 조사)을 하지 못했다고 한 문장으로 밝히세요."
+)
 # Specialist requests shorter than this (for example "아니오") carry no task and are rejected unsent.
 MIN_CONSULT_REQUEST = 10
 CONSULT_REQUEST_ERROR = (
@@ -212,28 +222,42 @@ class AgentRuntime:
     def _consult(
         self, agent_key: str, request: str, parent_id: str
     ) -> Generator[dict[str, Any], None, tuple[str, int]]:
-        """Run a specialist agent, streaming its tool calls under ``parent_id``; return (answer, calls)."""
+        """Run a specialist agent, streaming its tool calls under ``parent_id``; return (answer, calls).
+
+        A failed run is retried once in a new conversation. If it fails again, the answer is an ``ok: false``
+        result telling the orchestrator to answer without the specialist."""
         name = self.specialists.get(agent_key)
         if name is None:
             return json.dumps(
                 {"ok": False, "error": f"unknown specialist {agent_key}"}, ensure_ascii=False
             ), 0
-        conversation = self.client.conversations.create()
-        texts: list[str] = []
-        response = None
-        started: set[str] = set()
         calls = 0
-        for kind, payload in self._respond(_get(conversation, "id"), request, name):
-            if kind == "text":
-                texts.append(payload)
-            elif kind == "done":
-                response = payload
-            else:
-                events = self._hosted_events(kind, payload, started, parent_id=parent_id, agent=name)
-                calls += sum(1 for event in events if event["type"] == "TOOL_CALL_END")
-                yield from events
-        text = "".join(texts).strip() or (_get(response, "output_text", "") or "")
-        return text[:SPECIALIST_OUTPUT_LIMIT], calls
+        error: Exception | None = None
+        for attempt in range(1, CONSULT_ATTEMPTS + 1):
+            texts: list[str] = []
+            response = None
+            started: set[str] = set()
+            try:
+                conversation = self.client.conversations.create()
+                for kind, payload in self._respond(_get(conversation, "id"), request, name):
+                    if kind == "text":
+                        texts.append(payload)
+                    elif kind == "done":
+                        response = payload
+                    else:
+                        events = self._hosted_events(kind, payload, started, parent_id=parent_id, agent=name)
+                        calls += sum(1 for event in events if event["type"] == "TOOL_CALL_END")
+                        yield from events
+            except Exception as exc:  # the orchestrator can still answer from its own tool results
+                error = exc
+                logger.warning(
+                    "specialist %s failed (attempt %d/%d): %r", name, attempt, CONSULT_ATTEMPTS, exc
+                )
+                continue
+            text = "".join(texts).strip() or (_get(response, "output_text", "") or "")
+            return text[:SPECIALIST_OUTPUT_LIMIT], calls
+        message = CONSULT_FAILED.format(error=type(error).__name__)
+        return json.dumps({"ok": False, "error": message}, ensure_ascii=False), calls
 
     # Conversation ------------------------------------------------------------------------------------
     def run(
@@ -323,7 +347,12 @@ class AgentRuntime:
             else:
                 output, calls = yield from self._consult(agent_key, request, call_id)
                 consults[key] = output
-                summary = f"{agent_key} 응답 {len(output)}자, 도구 호출 {calls}회"
+                ok = _output_ok(output)
+                summary = (
+                    f"{agent_key} 응답 {len(output)}자, 도구 호출 {calls}회"
+                    if ok
+                    else f"{agent_key} 응답 실패(다시 시도 후), 도구 호출 {calls}회"
+                )
         else:
             result = self.ui_handler.handle(name, args, ui_state)
             output = result.output
