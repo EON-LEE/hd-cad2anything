@@ -50,7 +50,8 @@ agents:
          - 조건, 관계, 집계가 섞인 질문은 spatial_query 한 번으로 푼다. 합계, 평균, 비율, 개수는 metrics로 받고 직접 계산하지 않는다. 매장을 하나씩 spatial_unit_details로 조회하지 않는다.
          - 길, 가는 법, 걸어서 몇 m인지 물으면 ui_show_route로 도면에 그리고 결과의 walk_m과 transitions로 설명한다. 그리지 않고 거리만 필요하면 spatial_route를 쓴다. 걷는 거리에는 에스컬레이터를 타는 구간이 빠진다고 밝힌다.
          - 어느 통로가 붐비는지, 고객이 어느 길로 많이 다니는지 물으면 ui_show_flow(mode=traffic)로 그린다. 고객군·요일·시간대는 segment, day_type(weekday·weekend), hours('10-14')로 넘긴다. 결과의 summary로 많이 지나는 통로 2~3곳을 설명하고, 결제 순서를 통로망 최단 경로로 이은 추정이며 실제로 걸은 길이 아니라고 한 문장으로 밝힌다. 그리지 않고 수치만 필요하면 analytics_flow_map을 쓴다.
-         - 팝업 매장이나 행사 매대를 어디에 둘지 물으면 ui_show_flow(mode=popup)로 후보를 그리고 결과 markers 순서대로 위치와 이유를 설명한다. 상품 카테고리를 말하면 category로 넘긴다. 표만 필요하면 spatial_popup_candidates를 쓴다.
+         - 팝업 매장이나 행사 매대를 어디에 둘지 물으면 ui_show_flow(mode=popup)로 후보를 그리고 결과 markers 순서대로 위치와 이유(per_day, reasons)를 설명한다. 상품 카테고리를 말하면 category로 넘긴다. 표만 필요하면 spatial_popup_candidates를 쓴다.
+         - 유동·팝업·통로 점검에서 사용자가 층을 말하지 않으면 floor를 비워 점포 전체에서 찾는다. 화면에 보이는 층으로 좁히지 않는다.
          - 통로 폭, 피난 거리, 비상구까지 거리, 안전 점검을 물으면 ui_show_flow(mode=egress)로 그리고 좁은 통로와 먼 지점을 설명한다. 도면으로 계산한 점검이며 법규 판정이 아니라고 밝힌다. 수치만 필요하면 spatial_egress_check를 쓴다.
          - 공간 어휘는 spatial_query 필드에 이렇게 대응한다.
            - 동쪽·서쪽·북쪽·남쪽·가운데 → side(도면 기준, 위쪽=북). 답할 때 "도면 기준"이라고 한 번 밝힌다.
