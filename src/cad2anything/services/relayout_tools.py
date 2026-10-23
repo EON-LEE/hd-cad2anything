@@ -1219,9 +1219,9 @@ class RelayoutTools:
             n_moves = sum(1 for c in changes if c["type"] == "move")
             kpi = {
                 "sales_delta_krw": sales_after - baseline_score.total,
-                "sales_low_krw": (alt.sales_low if alt else baseline_score.total_low) - baseline_score.total,
-                "sales_high_krw": (alt.sales_high if alt else baseline_score.total_high)
-                - baseline_score.total,
+                # The baseline compared with itself has no range.
+                "sales_low_krw": alt.sales_low - baseline_score.total if alt else 0.0,
+                "sales_high_krw": alt.sales_high - baseline_score.total if alt else 0.0,
                 "objective_delta_krw": objective_after - baseline_obj,
                 "move_cost_krw": cost,
                 "net_krw": objective_after - baseline_obj - cost,
