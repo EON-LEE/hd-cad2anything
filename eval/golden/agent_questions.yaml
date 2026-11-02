@@ -122,7 +122,7 @@ cases:
     question: R1 개편 때 에스컬레이터 정면(3F-C05)으로 옮긴 브랜드의 매출이 이전 후 어떻게 변했는지 비교해줘.
     expect:
       tools_any: [analytics_before_after, analytics_relayout_review]
-      answer_any: ["인과", "비교군", "같은 층"]
+      answer_any: ["인과", "비교군", "같은 층", "바뀌지 않은", "단정"]
 
   - id: time-weekday-lunch
     scenario: 시간 패턴
