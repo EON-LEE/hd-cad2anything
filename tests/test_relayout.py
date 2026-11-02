@@ -158,6 +158,15 @@ def test_plan_alternatives(toolkit, plan):
         if alternative["alt_id"] != "ALT-0":
             assert alternative["kpi"]["net_krw"] > 0
     assert len(plan["alternatives"]) >= 1
+    engine_alts = plan["alternatives"][1:]
+    if engine_alts:
+        first = engine_alts[0]
+        assert plan["search"]["status"] == first["search_status"] == "optimal"
+        assert "최적해" in first["summary"] and "CP-SAT" in plan["search"]["note"]
+        assert plan["search"]["net_upper_bound_krw"] >= first["kpi"]["net_krw"] - 1.0
+        for other in engine_alts[1:]:
+            assert other["kpi"]["net_krw"] <= first["kpi"]["net_krw"] + 1.0
+            assert "ALT-1보다" in other["summary"]
 
 
 def test_select_check_and_report(toolkit, plan, monkeypatch):

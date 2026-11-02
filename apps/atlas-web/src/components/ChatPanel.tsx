@@ -17,8 +17,10 @@ import {
   isRunActive,
   runStatusText,
   stepDisplayLabel,
+  stepResultText,
   stepTree,
   stepsSummaryText,
+  timelineSteps,
   type ChatRun,
   type RunStep,
   type StepNode,
@@ -54,28 +56,29 @@ function techText(value: unknown): string {
 
 /**
  * Between two tool calls the status briefly has nothing running; keep the last step label for a moment
- * instead of flashing "생각하는 중…".
+ * instead of flashing the idle text ("생각하는 중…" or the agent's latest note).
  */
-function useSettledStatus(text: string | null, delayMs = 700): string | null {
+function useSettledStatus(text: string | null, idle: boolean, delayMs = 700): string | null {
   const [shown, setShown] = useState(text)
-  const shownRef = useRef(text)
+  const shownRef = useRef({ text, idle })
   useEffect(() => {
     const apply = () => {
-      shownRef.current = text
+      shownRef.current = { text, idle }
       setShown(text)
     }
-    if (text === THINKING_LABEL && shownRef.current !== null && shownRef.current !== THINKING_LABEL) {
+    if (idle && shownRef.current.text !== null && !shownRef.current.idle) {
       const timer = setTimeout(apply, delayMs)
       return () => clearTimeout(timer)
     }
     apply()
     return undefined
-  }, [text, delayMs])
+  }, [text, idle, delayMs])
   return shown
 }
 
 function RunStatusLine({ run }: { run: ChatRun }) {
-  const text = useSettledStatus(runStatusText(run))
+  const idle = !run.steps.some((s) => s.status === 'running')
+  const text = useSettledStatus(runStatusText(run), idle)
   return (
     <div className="run-status" role="status" aria-live="polite">
       <span className="run-status-dots" aria-hidden="true">
@@ -115,33 +118,72 @@ function StepTech({ step }: { step: RunStep }) {
   )
 }
 
+function StepResult({ text, after = false }: { text: string; after?: boolean }) {
+  return (
+    <p className={`step-result${after ? ' after' : ''}`}>
+      <span className="step-result-arrow" aria-hidden="true">
+        →
+      </span>
+      <span className="visually-hidden">결과: </span>
+      {text}
+    </p>
+  )
+}
+
+/** One item of the analysis timeline: the agent's note, or a step with its method and (once done) result. */
 function StepItem({ node, tech }: { node: StepNode; tech: boolean }) {
   const { step } = node
+  if (step.kind === 'note') {
+    return (
+      <li className="step step-note">
+        <span className="step-note-mark" aria-hidden="true" />
+        <span className="step-note-text">{stepDisplayLabel(step)}</span>
+      </li>
+    )
+  }
+  const result = stepResultText(step)
+  const nested = node.children.length > 0
   return (
     <li className={`step step-${step.status}`}>
       <div className="step-row">
         <span className={`step-icon ${step.status}`} role="img" aria-label={STEP_STATUS_LABELS[step.status]}>
           {step.status === 'done' ? '✓' : step.status === 'error' ? '!' : ''}
         </span>
-        <span className="step-label">{stepDisplayLabel(step)}</span>
+        <div className="step-text">
+          <span className="step-label">{stepDisplayLabel(step)}</span>
+          {step.method && <span className="step-method">{step.method}</span>}
+          {result && !nested && <StepResult text={result} />}
+        </div>
       </div>
       {tech && <StepTech step={step} />}
-      {node.children.length > 0 && (
+      {nested && (
         <ol className="step-list nested">
           {node.children.map((child) => (
             <StepItem key={child.step.id} node={child} tech={tech} />
           ))}
         </ol>
       )}
+      {/* A consult step reports its result after its nested steps, in the order things happened. */}
+      {result && nested && <StepResult text={result} after />}
     </li>
   )
 }
 
-/** Collapsed "작업 과정 보기 · 4단계 · 23초" disclosure with the labelled steps (and developer details). */
+function StepList({ run, tech }: { run: ChatRun; tech: boolean }) {
+  const tree = useMemo(() => stepTree(timelineSteps(run.steps)), [run.steps])
+  return (
+    <ol className="step-list" aria-label="분석 과정">
+      {tree.map((node) => (
+        <StepItem key={node.step.id} node={node} tech={tech} />
+      ))}
+    </ol>
+  )
+}
+
+/** Folded "분석 과정 보기 · 4단계 · 23초" disclosure with the same timeline (and developer details on demand). */
 function RunSteps({ run, debug }: { run: ChatRun; debug: boolean }) {
   const [open, setOpen] = useState(false)
   const [tech, setTech] = useState(debug)
-  const tree = useMemo(() => stepTree(run.steps), [run.steps])
   const bodyId = `run-steps-${run.id}`
   return (
     <div className={`run-steps${open ? ' open' : ''}`}>
@@ -151,11 +193,7 @@ function RunSteps({ run, debug }: { run: ChatRun; debug: boolean }) {
       </button>
       {open && (
         <div id={bodyId} className="run-steps-body">
-          <ol className="step-list">
-            {tree.map((node) => (
-              <StepItem key={node.step.id} node={node} tech={tech} />
-            ))}
-          </ol>
+          <StepList run={run} tech={tech} />
           <button type="button" className="tech-toggle" aria-pressed={tech} onClick={() => setTech((v) => !v)}>
             기술 정보
           </button>
@@ -169,19 +207,28 @@ function RunView({ run, debug, onRetry }: { run: ChatRun; debug: boolean; onRetr
   const active = isRunActive(run)
   const answering = run.status === 'answering'
   const hasText = run.answer.trim().length > 0
-  // Once text exists the disclosure stays put, so the answer does not jump when tools run in between.
-  const showSteps = run.steps.length > 0 && (!active || hasText)
+  const hasSteps = timelineSteps(run.steps).length > 0
+  // The analysis timeline is open while the agent works. Once answer text exists (or the run ended) it folds into
+  // the disclosure above the answer and stays put, so the answer does not jump when tools run in between.
+  const live = active && !hasText
   const failedUi = failedUiSteps(run).length
   return (
     <article className="turn turn-assistant" aria-label="에이전트 답변">
-      {showSteps && <RunSteps run={run} debug={debug} />}
+      {hasSteps &&
+        (live ? (
+          <div className="run-timeline">
+            <StepList run={run} tech={debug} />
+          </div>
+        ) : (
+          <RunSteps run={run} debug={debug} />
+        ))}
       {hasText && (
         <div className={`answer${answering ? ' streaming' : ''}`}>
           <RichText text={run.answer} trailing={answering ? <span className="cursor" aria-hidden="true" /> : null} />
         </div>
       )}
       {active && !answering && <RunStatusLine run={run} />}
-      {failedUi > 0 && <p className="run-note warn">화면 일부를 바꾸지 못했어요. 작업 과정 보기에서 확인할 수 있어요.</p>}
+      {failedUi > 0 && <p className="run-note warn">화면 일부를 바꾸지 못했어요. 분석 과정 보기에서 확인할 수 있어요.</p>}
       {run.status === 'stopped' && <p className="run-note">응답을 중지했어요.</p>}
       {run.status === 'done' && !hasText && <p className="run-note">답변 내용이 비어 있어요.</p>}
       {run.status === 'error' && (

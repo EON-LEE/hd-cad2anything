@@ -61,8 +61,16 @@ PRODUCTIVITY_FIELDS = (
     "percentile",
     "floor_percentile",
     "low_efficiency",
+    "category_index",
 )
 RENAMED = {"sales": "sales_krw", "aov": "aov_krw", "txns": "receipts"}
+PRODUCTIVITY_GUIDE = (
+    "low_efficiency는 같은 층 매장 중 ㎡당 매출 하위 10%입니다. 업종마다 ㎡당 매출 수준이 달라서, ㎡당 매출이 "
+    "원래 낮은 업종이 많은 층에서는 그 업종 매장이 함께 표시됩니다(low_reason=카테고리 특성). category_index는 "
+    "같은 카테고리 매장(점포 전체) 중앙값 대비 ㎡당 매출 비율이며, 0.7 미만은 같은 업종보다 부진한 매장입니다"
+    "(category_weak). 매장 단위 조치는 category_weak 매장에만 권하고, 카테고리 특성 때문인 저효율은 업종 구성과 "
+    "면적 배분의 문제로 설명하세요(category_mix)."
+)
 SALES_NOTE = (
     "합성 표본 거래에 표본 가중치를 곱해 전체 규모로 환산하고, 기간 합계를 연 단위로 환산한 값입니다(원). "
     "면적은 전용면적 기준입니다."
@@ -206,9 +214,39 @@ def _alternative_summary(alternative: Any) -> dict[str, Any]:
     return data
 
 
+def _layout_search_note(alternatives: list[Any]) -> dict[str, Any]:
+    """How the alternatives were searched and whether ALT-1 is proven optimal."""
+    from cad2anything.layout.whatif import format_krw_delta
+
+    if not alternatives:
+        return {"status": None, "net_upper_bound_krw": None, "note": None}
+    first = alternatives[0]
+    notes = {
+        "optimal": "정수계획(CP-SAT)으로 풀어 ALT-1보다 기대 매출 증가가 큰 배치가 없음을 확인했습니다.",
+        "feasible": (
+            "정수계획(CP-SAT)이 제한 시간 안에 최적 증명을 끝내지 못했습니다. 이론상 최대 기대 매출 증가는 "
+            f"{format_krw_delta(first.net_upper_bound_krw)}입니다."
+        ),
+        "heuristic": "탐색 알고리즘이 찾은 가장 좋은 배치이며, 최적인지는 증명하지 않았습니다.",
+    }
+    return {
+        "status": first.search_status,
+        "net_upper_bound_krw": first.net_upper_bound_krw,
+        "note": notes.get(first.search_status),
+    }
+
+
 def _pct(log_points: Any) -> float | None:
     value = float(log_points)
     return (math.exp(value) - 1.0) * 100.0 if math.isfinite(value) else None
+
+
+def _finite(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 DRIVER_COMPONENTS = {
@@ -573,10 +611,37 @@ class AnalyticsTools:
     # Productivity ------------------------------------------------------------------------------------
     @staticmethod
     def _productivity_row(record: dict[str, Any], drivers: dict[str, str]) -> dict[str, Any]:
+        from cad2anything.analytics.kpi import CATEGORY_WEAK_INDEX
+
         row = {RENAMED.get(k, k): record[k] for k in PRODUCTIVITY_FIELDS if k in record}
         if record.get("low_efficiency") and str(record.get("unit_code")) in drivers:
             row["driver"] = drivers[str(record["unit_code"])]
+        index = _finite(record.get("category_index"))
+        if record.get("low_efficiency") and index is not None:
+            row["low_reason"] = "같은 카테고리 대비 부진" if index < CATEGORY_WEAK_INDEX else "카테고리 특성"
         return row
+
+    @staticmethod
+    def _category_mix(frame: pd.DataFrame) -> list[dict[str, Any]]:
+        """Sales per m2 of each category in scope against the scope as a whole (lowest first)."""
+        valid = frame[frame["category"].notna()]
+        area_all = float(frame["area_m2"].sum())
+        scope_rate = float(frame["sales"].sum()) / area_all if area_all else None
+        mix = []
+        for code, part in valid.groupby("category", sort=True):
+            area = float(part["area_m2"].sum())
+            rate = float(part["sales"].sum()) / area if area else None
+            mix.append(
+                {
+                    "category": code,
+                    "category_name": part["category_name"].iloc[0],
+                    "n_units": len(part),
+                    "sales_per_m2": rate,
+                    "vs_scope_pct": (rate / scope_rate - 1.0) * 100.0 if rate and scope_rate else None,
+                    "low_efficiency": int(part["low_efficiency"].astype(bool).sum()),
+                }
+            )
+        return sorted(mix, key=lambda m: math.inf if m["sales_per_m2"] is None else m["sales_per_m2"])
 
     def analytics_productivity(
         self,
@@ -603,19 +668,39 @@ class AnalyticsTools:
         limit = max(1, min(int(top or DEFAULT_LIMIT), 500))
         values = frame["sales_per_m2"].replace([np.inf, -np.inf], np.nan).dropna()
         sales, area = float(frame["sales"].sum()), float(frame["area_m2"].sum())
+        summary: dict[str, Any] = {
+            "rows": len(rows),
+            "sales_krw": sales,
+            "area_m2": area,
+            "sales_per_m2": sales / area if area else None,
+            "low_efficiency": len(low),
+        }
+        extra: dict[str, Any] = {}
+        if level == "unit":
+            from cad2anything.analytics.kpi import CATEGORY_WEAK_INDEX
+
+            def index_of(row: dict[str, Any]) -> float:
+                value = _finite(row.get("category_index"))
+                return math.inf if value is None else value
+
+            weak = sorted((r for r in rows if index_of(r) < CATEGORY_WEAK_INDEX), key=index_of)
+            summary["low_efficiency_by_reason"] = {
+                reason: sum(1 for r in low if r.get("low_reason") == reason)
+                for reason in ("카테고리 특성", "같은 카테고리 대비 부진")
+            }
+            summary["category_weak"] = len(weak)
+            extra = {
+                "category_weak": weak[:DEFAULT_LIMIT],
+                "category_mix": self._category_mix(frame)[:12],
+                "reading_guide": PRODUCTIVITY_GUIDE,
+            }
         return _json(
             {
                 "rev": rev,
                 "level": level,
                 "floor": floor,
                 "period": period,
-                "summary": {
-                    "rows": len(rows),
-                    "sales_krw": sales,
-                    "area_m2": area,
-                    "sales_per_m2": sales / area if area else None,
-                    "low_efficiency": len(low),
-                },
+                "summary": summary,
                 "metric": {
                     "name": "sales_per_m2",
                     "label": "연환산 ㎡당 매출(원)",
@@ -623,6 +708,7 @@ class AnalyticsTools:
                     "max": values.max() if len(values) else None,
                 },
                 "low_efficiency": low[:DEFAULT_LIMIT],
+                **extra,
                 "rows": rows[:limit],
                 "truncated": len(rows) > limit,
                 "note": SALES_NOTE,
@@ -1164,6 +1250,7 @@ class AnalyticsTools:
             "constraints": constraints.to_dict(),
             "label": "추정치",
             "alternatives": results,
+            "search": _layout_search_note(alternatives),
             "caveats": alternatives[0].caveats if alternatives else [],
             "note": LAYOUT_NOTE,
         }

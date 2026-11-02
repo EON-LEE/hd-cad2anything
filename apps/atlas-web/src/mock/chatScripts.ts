@@ -1,6 +1,7 @@
 // Scripted AG-UI event streams for mock mode. Like the backend (docs/specs/atlas-api.md §2-3), each
-// script sends labelled tool calls (nested calls inside a specialist agent), STATE_DELTA patches for
-// UI function tools and exactly one assistant message streamed in small deltas.
+// script sends a progress note with the agent's plan, labelled tool calls with their method and result (nested
+// calls and notes inside a specialist agent), STATE_DELTA patches for UI function tools and exactly one
+// assistant message streamed in small deltas.
 import { CHANGE_COLORS, CHANGE_LABELS, CHANGE_ORDER, DEFAULT_HIGHLIGHT_COLOR } from '../lib/colors'
 import {
   APPROVAL_MODE_LABELS,
@@ -18,11 +19,12 @@ import { flowDataFloors, flowFloorStats, flowModeLabel, sortedFlowMarkers } from
 import type { PatchOperation } from '../lib/jsonPatch'
 import { QUICK_PROMPTS } from '../lib/prompts'
 import { routeFloors } from '../lib/route'
-import type { AgUiEvent, ChatRequest, Flow, FlowMode, FlowParams, GraphEdge, Highlight, RoutePlace } from '../types/api'
-import { mockLayoutAlternatives, mockProductivityDetails, planImpact } from './analytics'
+import type { AgUiEvent, ChatRequest, Flow, FlowMarker, FlowMode, FlowParams, GraphEdge, Highlight, RoutePlace } from '../types/api'
+import { mockLayoutAlternatives, mockProductivityDetails, planImpact, type ProductivityDetail } from './analytics'
 import { categoryName } from './catalog'
 import { mockFlow } from './flow'
-import { mockJourney, pathLength } from './journey'
+import { mockJourney, pathLength, segmentLabelKo } from './journey'
+import { TOOL_METHODS, specialistResult, toolMethod } from './progress'
 import { mockRoute, placePhrase, roundWalk } from './route'
 import { changesBetween, type MockWorld } from './world'
 
@@ -78,21 +80,35 @@ export function chunkText(text: string): string[] {
   return chunks
 }
 
-interface NestedCall {
+/** What a mock step reports besides its label (the backend's `method` and `result`). */
+interface StepOutcome {
+  /** One Korean line of what the step found; null when there is nothing to say. */
+  result?: string | null
+  /** Replaces the method sentence looked up from the tool name (e.g. one tool standing in for several). */
+  method?: string | null
+}
+
+interface NestedCall extends StepOutcome {
   name: string
   label: string
   args: unknown
   summary: string
   duration?: number
+  /** Progress note the specialist writes right before this call. */
+  note?: string
 }
 
 const json = (value: unknown) => JSON.stringify(value)
+
+/** Delay between a progress note and the tool call it announces, in milliseconds. */
+const NOTE_LEAD = 400
 
 class ScriptBuilder {
   readonly steps: ScriptStep[] = []
   private readonly threadId: string
   private readonly runId: string
   private counter = 0
+  private afterNote = false
 
   constructor(threadId: string, runId: string) {
     this.threadId = threadId
@@ -108,40 +124,63 @@ class ScriptBuilder {
     return `${prefix}-${this.runId}-${this.counter++}`
   }
 
-  /** The model "thinks" a little longer before its first action. */
+  /** The model "thinks" a little longer before its first action and acts shortly after a note. */
   private pause(normal: number): number {
+    if (this.afterNote) {
+      this.afterNote = false
+      return NOTE_LEAD
+    }
     return this.steps.length <= 1 ? 600 : normal
   }
 
-  tool(name: string, label: string, args: unknown, summary: string, duration = 700): this {
-    const id = this.nextId('call')
-    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, label, args }, this.pause(250))
-    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, duration)
+  /** TOOL_CALL_START and TOOL_CALL_END with the method sentence (on both, like the backend) and the result. */
+  private toolEvents(id: string, name: string, label: string, args: unknown, nested: { parent_tool_call_id: string; agent: string } | null, outcome: StepOutcome) {
+    const method = outcome.method === undefined ? toolMethod(name, args) : outcome.method
+    const withMethod = method ? { method } : {}
+    const start: AgUiEvent = { type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, label, args, ...withMethod, ...nested }
+    const end = (summary: string): AgUiEvent => ({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ...withMethod, result: outcome.result ?? null, ok: true })
+    return { start, end }
+  }
+
+  /** The agent's progress note (its plan): shown in the analysis timeline right before the calls it announces. */
+  note(text: string, parentId?: string, agent?: string): this {
+    const id = this.nextId('note')
+    const nested = parentId ? { parent_tool_call_id: parentId, ...(agent ? { agent } : {}) } : {}
+    this.push({ type: 'THINKING_TEXT_MESSAGE_START', message_id: id, ...nested }, this.pause(300))
+    this.push({ type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: id, delta: text }, 20)
+    this.push({ type: 'THINKING_TEXT_MESSAGE_END', message_id: id }, 10)
+    this.afterNote = true
     return this
   }
 
-  /** consult_specialist with the specialist's own tool calls nested under it. */
-  consult(agent: string, label: string, args: unknown, calls: NestedCall[], summary: string): this {
+  tool(name: string, label: string, args: unknown, summary: string, duration = 700, outcome: StepOutcome = {}): this {
+    const { start, end } = this.toolEvents(this.nextId('call'), name, label, args, null, outcome)
+    this.push(start, this.pause(250))
+    this.push(end(summary), duration)
+    return this
+  }
+
+  /** consult_specialist with the specialist's own notes and tool calls nested under it. */
+  consult(agent: string, label: string, args: unknown, calls: NestedCall[], summary: string, outcome: StepOutcome = {}): this {
     const id = this.nextId('call')
-    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: 'consult_specialist', label, args }, this.pause(250))
+    const consult = this.toolEvents(id, 'consult_specialist', label, args, null, outcome)
+    this.push(consult.start, this.pause(250))
     for (const call of calls) {
-      const child = this.nextId('call')
-      this.push(
-        { type: 'TOOL_CALL_START', tool_call_id: child, tool_name: call.name, label: call.label, args: call.args, parent_tool_call_id: id, agent },
-        400,
-      )
-      this.push({ type: 'TOOL_CALL_END', tool_call_id: child, summary: call.summary, ok: true }, call.duration ?? 700)
+      if (call.note) this.note(call.note, id, agent)
+      const nested = this.toolEvents(this.nextId('call'), call.name, call.label, call.args, { parent_tool_call_id: id, agent }, call)
+      this.push(nested.start, this.pause(400))
+      this.push(nested.end(call.summary), call.duration ?? 700)
     }
-    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, 500)
+    this.push(consult.end(summary), 500)
     return this
   }
 
   /** A UI function tool call (ui_*) that the backend turns into a STATE_DELTA. */
-  ui(name: string, label: string, args: unknown, delta: PatchOperation[], summary = json({ ok: true })): this {
-    const id = this.nextId('call')
-    this.push({ type: 'TOOL_CALL_START', tool_call_id: id, tool_name: name, label, args }, this.pause(200))
+  ui(name: string, label: string, args: unknown, delta: PatchOperation[], summary = json({ ok: true }), result: string | null = null): this {
+    const { start, end } = this.toolEvents(this.nextId('call'), name, label, args, null, { result })
+    this.push(start, this.pause(200))
     this.push({ type: 'STATE_DELTA', delta }, 180)
-    this.push({ type: 'TOOL_CALL_END', tool_call_id: id, summary, ok: true }, 80)
+    this.push(end(summary), 80)
     return this
   }
 
@@ -191,6 +230,14 @@ function unitExists(world: MockWorld, rev: string, code: string): boolean {
   return !!unitAt(world, rev, code)
 }
 
+/** "매장 19곳 중 저효율 4곳 · 가장 낮은 곳 Quorelle(3F-E01)", like the backend's productivity result. */
+function productivityResult(details: readonly ProductivityDetail[]): string {
+  const low = details.filter((d) => d.low_efficiency)
+  const lowest = [...low].sort((x, y) => (x.sales_per_m2 ?? 0) - (y.sales_per_m2 ?? 0))[0]
+  const head = `매장 ${details.length}곳 중 저효율 ${low.length}곳`
+  return lowest ? `${head} · 가장 낮은 곳 ${lowest.brand_name}(${lowest.unit_code})` : head
+}
+
 // --- scripts -----------------------------------------------------------------------------------
 
 function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
@@ -236,12 +283,14 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
   }
   const codes = highlights.map((h) => h.unit_code)
 
+  b.note(`${to} 도면을 직전 개정(${from})과 매장 단위로 비교하고 다시 만들 산출물을 확인할게요.`)
   b.tool(
     'revision_diff',
     `${notes}(${to}) 도면 변경 내역 확인`,
     { rev_from: from, rev_to: to },
     json({ ok: true, rev_from: from, rev_to: to, changes: items.length, by_type: Object.fromEntries(counts) }),
     900,
+    { result: `변경 ${items.length}건 · ${countText}` },
   )
   b.tool(
     'registry_impact',
@@ -249,6 +298,7 @@ function revisionScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): S
     { rev_from: from, rev_to: to },
     json({ ok: true, generators: impact.map((i) => ({ name: i.generator, risk: i.risk_tier, approval: i.approval_mode })) }),
     600,
+    { result: `다시 만들 산출물 ${impact.length}개 · 게시 전 승인 ${impact.filter((i) => i.approval_mode === 'pre_publish').length}개` },
   )
   b.ui('ui_compare', `${from} → ${to} 비교 표시`, { rev_from: from, rev_to: to }, [
     replace('/rev', to),
@@ -307,9 +357,10 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
   const codes = low.map((d) => d.unit_code)
   const place = floorLabel(floor)
 
+  b.note(`${place} 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요.`)
   b.consult(
     'space-productivity-analyst',
-    '공간 생산성 전문 에이전트에게 확인',
+    '공간 생산성 분석 에이전트에게 확인',
     { agent: 'space_productivity_analyst', request: `${rev} ${floor} 저효율 매장과 원인을 분석해 주세요.` },
     [
       {
@@ -318,6 +369,8 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
         args: { rev, floor, level: 'unit' },
         summary: json({ ok: true, units: details.length, low_efficiency: details.filter((d) => d.low_efficiency).length }),
         duration: 900,
+        note: '먼저 ㎡당 매출로 하위 매장을 찾고 원인 후보를 좁혀 볼게요.',
+        result: productivityResult(details),
       },
       {
         name: 'analytics_drivers',
@@ -325,6 +378,7 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
         args: { rev, floor, unit_codes: codes },
         summary: json({ ok: true, escalator_distance_m: { low_units: Math.round(lowAvg), floor_mean: Math.round(floorAvg) } }),
         duration: 700,
+        result: `하위 ${low.length}곳의 주요 요인: 동선 노출(에스컬레이터까지 평균 ${lowAvg.toFixed(0)}m, 층 평균 ${floorAvg.toFixed(0)}m)`,
       },
       {
         name: 'analytics_cross_shopping',
@@ -332,16 +386,25 @@ function productivityScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder
         args: { level: 'unit', focal: codes.join(','), segment: '' },
         summary: json({ ok: true, pairs: edges.length, lift_range: [0.9, 1.3] }),
         duration: 500,
+        result: `함께 사는 1위: ${best.brand_name}(평소의 1.3배)`,
       },
     ],
     json({ ok: true, agent: 'space_productivity_analyst', chars: 812, tool_calls: 3 }),
+    { result: specialistResult('space_productivity_analyst') },
   )
-  b.ui('ui_show_heatmap', `${place} 도면을 평효율로 색칠`, { metric: 'sales_per_m2', floor }, [
-    replace('/floor', floor),
-    replace('/compareRev', null),
-    replace('/heatmap', { metric: 'sales_per_m2', label: '평효율(원/㎡)', values }),
-    ...CLEAR_PATHS,
-  ])
+  b.ui(
+    'ui_show_heatmap',
+    `${place} 도면을 평효율로 색칠`,
+    { metric: 'sales_per_m2', floor },
+    [
+      replace('/floor', floor),
+      replace('/compareRev', null),
+      replace('/heatmap', { metric: 'sales_per_m2', label: '평효율(원/㎡)', values }),
+      ...CLEAR_PATHS,
+    ],
+    undefined,
+    `매장 ${Object.keys(values).length}곳 색칠`,
+  )
   b.ui('ui_highlight_units', `저효율 매장 ${codes.length}곳 강조`, { unit_codes: codes }, [replace('/highlights', highlights)])
   b.ui('ui_draw_edges', `교차구매 관계선 ${edges.length}개 표시`, { edges: edges.length }, [replace('/edges', edges)])
   b.ui('ui_focus', '저효율 매장으로 확대', { unit_codes: codes }, [replace('/focus', { unit_codes: codes })])
@@ -398,13 +461,20 @@ function crossShoppingScript(world: MockWorld, req: ChatRequest, b: ScriptBuilde
     reason: cosmetics ? '40대 VIP 교차구매의 기준 매장(화장품)' : '40대 VIP 교차구매 중심 브랜드',
   }))
   const maxLift = Math.max(...pairs.map((p) => p[2])).toFixed(1)
+  const [topFrom, topTo, topLift] = pairs[0]
 
+  b.note(cosmetics ? '40대 VIP 고객이 화장품과 같은 날 함께 산 매장을 찾아볼게요.' : '40대 VIP 고객이 같은 날 함께 산 브랜드 쌍을 찾아볼게요.')
   b.tool(
     'analytics_cross_shopping',
     cosmetics ? '40대 VIP 고객의 화장품 교차구매 분석' : '40대 VIP 고객의 교차구매 분석',
     { level: cosmetics ? 'category' : 'brand', focal: cosmetics ? 'COSMETICS' : brandNameAt(world, rev, '3F-C01'), segment },
     json({ ok: true, segment, pairs: pairs.length, max_lift: Number(maxLift), n_customers: 1284 }),
     1000,
+    {
+      result: cosmetics
+        ? `화장품과 함께 사는 1위: ${brandNameAt(world, rev, topTo)}(평소의 ${topLift.toFixed(1)}배)`
+        : `가장 강한 쌍: ${brandNameAt(world, rev, topFrom)} + ${brandNameAt(world, rev, topTo)}(평소의 ${topLift.toFixed(1)}배)`,
+    },
   )
   b.ui('ui_draw_edges', `교차구매 관계선 ${edges.length}개 표시`, { edges: edges.length }, [
     replace('/floor', floor),
@@ -455,12 +525,14 @@ function layoutScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scr
   const best = [...alternatives].sort((x, y) => y.kpi_delta.sales_krw - x.kpi_delta.sales_krw)[0]
   const moved = [...new Set(best.moves.flatMap((m) => [m.from_unit, m.to_unit]))]
 
+  b.note(`${place} 배치 대안을 만들고 이동 효과를 추정해 비교할게요.`)
   b.tool(
     'layout_generate_alternatives',
     `${place} 재배치 대안 계산`,
     { rev, floors: [floor], constraints },
     json({ ok: true, alternatives: alternatives.map((a) => a.id), constraint_violations: violations }),
     1200,
+    { result: violations ? `대안 ${alternatives.length}개 · 제약 위반 ${violations}건` : `대안 ${alternatives.length}개 · 제약 모두 충족` },
   )
   b.tool(
     'whatif_score_moves',
@@ -468,6 +540,7 @@ function layoutScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scr
     { alternatives: alternatives.map((a) => a.id) },
     json({ ok: true, sales_krw: { low, high } }),
     800,
+    { result: `효과가 가장 큰 안: ${best.id}(매출 ${formatKrw(best.kpi_delta.sales_krw, true)})` },
   )
   b.ui('ui_show_panel', '재배치 대안 열기', { type: 'layout' }, [
     replace('/floor', floor),
@@ -530,13 +603,16 @@ function journeyScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Sc
   const stops = journey.stops
   const s = journey.summary
   const firstFloor = stops[0].floor
+  const who = segmentLabelKo(segment)
 
+  b.note(`${who || '조건에 맞는'} 고객 한 명의 하루 결제 순서를 찾아 도면에 이어 볼게요.`)
   b.tool(
     'analytics_customer_journey',
     '고객 동선 찾기',
     args,
     json({ ok: true, customer: journey.customer, date: journey.date, stops: stops.length, floors: s.floors, total_krw: s.total_krw }),
     1000,
+    { result: `결제 ${s.stops}건 · ${[firstFloor, ...journey.transitions.map((t) => t.to_floor)].map(floorLabel).join('→')}` },
   )
   b.ui('ui_clear', '이전 분석 표시 지우기', { what: 'all' }, [
     replace('/heatmap', null),
@@ -640,12 +716,18 @@ function routeScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scri
   const args = { rev, origin: start.ref, destination: end.ref, via }
   const change = route.transitions[0]
 
+  b.note(
+    change
+      ? `${via === 'elevator' ? '엘리베이터' : '에스컬레이터'}로 ${floorLabel(end.floor)}까지 가는 가장 짧은 길을 찾아 도면에 그릴게요.`
+      : '통로를 따라 걷는 거리가 가장 짧은 길을 찾아 도면에 그릴게요.',
+  )
   b.tool(
     'spatial_route',
     `${shortPlaceName(start)}에서 ${floorLabel(end.floor)} ${shortPlaceName(end)}까지 경로 계산`,
     args,
     json({ ok: true, walk_m: route.walk_m, floors: routeFloors(route), via: change?.via ?? null }),
     900,
+    { result: `걷는 거리 약 ${formatWalk(route.walk_m)}${change ? ` · ${change.floors}개 층 이동` : ''}` },
   )
   b.ui(
     'ui_show_route',
@@ -734,6 +816,27 @@ function flowStartFloor(flow: Flow, current: string): string {
 const people = (value: number | null | undefined) => `${formatNumber(value ?? 0)}명`
 const stripRank = (title: string | null) => (title ?? '').replace(/^후보 \d+ · /, '')
 
+/** The mock's single flow tool stands in for the backend's flow map, popup and egress tools. */
+const FLOW_METHODS: Record<FlowMode, string> = {
+  traffic: TOOL_METHODS.analytics_flow_map,
+  popup: TOOL_METHODS.spatial_popup_candidates,
+  egress: TOOL_METHODS.spatial_egress_check,
+}
+
+interface Stretch {
+  floor: string
+  label: string
+  value: number
+}
+
+/** Result line of the flow step, worded like the backend's flow map, popup and egress results. */
+function flowResult(mode: FlowMode, stretches: readonly Stretch[], markers: readonly FlowMarker[]): string | null {
+  if (mode === 'egress') return `좁은 통로 ${stretches.length}곳 · 피난 거리 초과 매장 ${markers.length}곳`
+  if (mode === 'popup') return markers.length ? `후보 ${markers.length}곳 · 1순위 ${stripRank(markers[0].title)}` : null
+  const top = [...stretches].sort((x, y) => y.value - x.value)[0]
+  return top ? `가장 많이 지나는 곳: ${top.floor} ${top.label}(약 ${people(top.value)})` : null
+}
+
 function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const message = req.message
   const mode = flowModeFromMessage(message)
@@ -759,13 +862,27 @@ function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scrip
   const args = { ...params, segment: segmentParam(params.segment ?? null) || undefined }
   const markers = sortedFlowMarkers(flow)
   const floors = flowDataFloors(flow)
+  const stretches = floors.flatMap((code) => (flow.floors[code]?.segments ?? []).map((s) => ({ floor: code, label: s.label ?? '통로', value: s.value ?? 0 })))
+  const who = flow.title.replace(/(?:의 추정 유동| 기준 팝업 후보).*$/, '')
+  const day = params.day_type === 'weekend' ? '주말 ' : params.day_type === 'weekday' ? '평일 ' : ''
+  const hours = Array.isArray(params.hours) ? `${params.hours[0]}~${params.hours[1]}시 ` : ''
+  const width = formatNumber(Number(flow.query?.min_width_m ?? 0), 1).replace(/\.0$/, '')
+  const travel = formatNumber(Number(flow.query?.max_travel_m ?? 0))
 
+  b.note(
+    mode === 'egress'
+      ? `통로 폭 ${width}m, 계단·출입구까지 ${travel}m를 기준으로 좁은 통로와 먼 매장을 찾을게요.`
+      : mode === 'popup'
+        ? `${who}의 ${day}${hours}유동을 추정하고 많이 지나는 자리에서 팝업 후보를 고를게요.`
+        : `${who}의 ${day}${hours}이동을 통로에 모아 가장 붐비는 통로를 찾을게요.`,
+  )
   b.tool(
     'spatial_flow',
     FLOW_TOOL_LABELS[mode],
     args,
     json({ ok: true, mode, floors, segments: Object.values(flow.floors).reduce((sum, f) => sum + f.segments.length, 0), markers: markers.length }),
     1100,
+    { method: FLOW_METHODS[mode], result: flowResult(mode, stretches, markers) },
   )
   b.ui(
     'ui_show_flow',
@@ -786,10 +903,8 @@ function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scrip
 
   const lines = resolved?.note ? [resolved.note, ''] : []
   if (mode === 'egress') {
-    const narrow = floors.flatMap((code) => (flow.floors[code]?.segments ?? []).map((s) => `${code} ${s.label ?? '통로'}`))
-    const width = Number(flow.query?.min_width_m ?? 0)
-    const travel = Number(flow.query?.max_travel_m ?? 0)
-    lines.push(`통로 폭 ${formatNumber(width, 1).replace(/\.0$/, '')}m, 계단·출입구까지 ${formatNumber(travel)}m를 기준으로 도면을 점검했어요.`, '')
+    const narrow = stretches.map((s) => `${s.floor} ${s.label}`)
+    lines.push(`통로 폭 ${width}m, 계단·출입구까지 ${travel}m를 기준으로 도면을 점검했어요.`, '')
     lines.push(`### 기준보다 좁은 통로 ${narrow.length}곳`, ...(narrow.length ? narrow.map((n) => `- ${n}`) : ['- 없어요.']), '')
     lines.push(`### 계단·출입구까지 먼 지점 ${markers.length}곳`, ...(markers.length ? markers.map((m) => `${m.rank}. ${m.title ?? m.unit_code ?? ''}`) : ['- 없어요.']), '')
     lines.push(
@@ -800,9 +915,6 @@ function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scrip
     return b.answer(lines.join('\n'))
   }
 
-  const who = flow.title.replace(/(?:의 추정 유동| 기준 팝업 후보).*$/, '')
-  const day = params.day_type === 'weekend' ? '주말 ' : params.day_type === 'weekday' ? '평일 ' : ''
-  const hours = Array.isArray(params.hours) ? `${params.hours[0]}~${params.hours[1]}시 ` : ''
   if (mode === 'popup') {
     lines.push(`${who}의 ${day}${hours}유동을 기준으로 팝업 후보 ${markers.length}곳을 골랐어요. 지나가는 고객이 많은 곳부터예요.`, '')
     for (const marker of markers) {
@@ -818,10 +930,7 @@ function flowScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scrip
     return b.answer(lines.join('\n'))
   }
 
-  const busiest = floors
-    .flatMap((code) => (flow.floors[code]?.segments ?? []).map((s) => ({ floor: code, label: s.label ?? '통로', value: s.value ?? 0 })))
-    .sort((x, y) => y.value - x.value)
-    .slice(0, 3)
+  const busiest = [...stretches].sort((x, y) => y.value - x.value).slice(0, 3)
   lines.push(
     `${flow.title}을 통로에 표시했어요. 고객-일 ${formatNumber(flow.summary.customer_days ?? 0)}, 이동 ${formatNumber(flow.summary.trips ?? 0)}건을 통로망 최단 경로로 이어 모은 추정이에요.`,
     '',
@@ -840,7 +949,10 @@ function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes:
   const floor = codes[0].split('-')[0]
   const details = mockProductivityDetails(world, rev, floor) ?? []
   const rows = details.filter((d) => codes.includes(d.unit_code))
-  b.tool('analytics_productivity', `${codes.join(', ')} 매장 성과 조회`, { rev, floor, level: 'unit', unit_codes: codes }, json({ ok: true, rows: rows.length }), 600)
+  b.note(`${codes.length > 2 ? `매장 ${codes.length}곳` : codes.join(', ')}의 ㎡당 매출과 층 안의 순위를 확인할게요.`)
+  b.tool('analytics_productivity', `${codes.join(', ')} 매장 성과 조회`, { rev, floor, level: 'unit', unit_codes: codes }, json({ ok: true, rows: rows.length }), 600, {
+    result: rows.length ? rows.slice(0, 2).map((d) => `${d.brand_name} ㎡당 ${formatNumber(d.sales_per_m2)}원(${d.percentile}백분위)`).join(' · ') : null,
+  })
   b.ui('ui_highlight_units', `매장 ${codes.length}곳 강조`, { unit_codes: codes }, [
     replace('/floor', floor),
     replace('/highlights', codes.map((c) => ({ unit_code: c, color: '#1e88e5', reason: '질문 대상 매장' }))),
@@ -859,6 +971,7 @@ function unitScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder, codes:
 function helpScript(_world: MockWorld, req: ChatRequest, b: ScriptBuilder): ScriptStep[] {
   const selection = req.ui_state.selection
   if (selection.length) {
+    b.note('선택한 매장이 잘 보이도록 화면을 옮길게요.')
     b.ui('ui_focus', '선택한 매장으로 확대', { unit_codes: selection }, [replace('/focus', { unit_codes: selection })])
   }
   return b.answer(
@@ -881,7 +994,10 @@ function tableScript(world: MockWorld, req: ChatRequest, b: ScriptBuilder): Scri
   const rows = [...details]
     .sort((x, y) => (y.sales_per_m2 ?? 0) - (x.sales_per_m2 ?? 0))
     .map((d) => [d.unit_code, d.brand_name, categoryName(d.category), d.sales_per_m2, d.percentile, d.driver])
-  b.tool('analytics_productivity', `${floorLabel(floor)} 공간 생산성 계산`, { rev, floor, level: 'unit' }, json({ ok: true, units: rows.length }), 700)
+  b.note(`${floorLabel(floor)} 매장의 ㎡당 매출을 계산해 높은 순으로 표에 정리할게요.`)
+  b.tool('analytics_productivity', `${floorLabel(floor)} 공간 생산성 계산`, { rev, floor, level: 'unit' }, json({ ok: true, units: rows.length }), 700, {
+    result: productivityResult(details),
+  })
   b.ui('ui_show_panel', '평효율 표 열기', { type: 'table' }, [
     replace('/floor', floor),
     replace('/panel', {

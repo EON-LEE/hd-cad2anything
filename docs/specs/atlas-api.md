@@ -13,10 +13,10 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | GET | `/api/artifacts/{rev}/{generator}/{file}` | 파일 본문(svg, xlsx, csv) |
 | POST | `/api/artifacts/{rev}/{generator}/review` | 본문 `{decision:"approve"\|"reject", reviewer, note}` → 갱신된 artifact |
 | POST | `/api/revisions/{rev}/process` | 파싱, diff, 영향 분석, 재생성을 실행하고 요약을 반환한다. |
-| GET | `/api/analytics/productivity?rev=&floor=&level=unit&top=` | `{rev, level, floor, period:{start, end, days}, summary, metric:{name, label, min, max}, rows:[{unit_code, floor, zone_code, brand_id, brand_name, category, category_name, area_m2, sales_krw, receipts, aov_krw, sales_per_m2, sales_per_pyeong, gmrof, percentile(0~100), floor_percentile, low_efficiency, driver}], low_efficiency:[...], note}`. 금액은 연환산 전체 규모 값이다. `level`은 `unit`·`zone`·`floor`·`category`. 가상 개정은 404 |
+| GET | `/api/analytics/productivity?rev=&floor=&level=unit&top=` | `{rev, level, floor, period:{start, end, days}, summary, metric:{name, label, min, max}, rows:[{unit_code, floor, zone_code, brand_id, brand_name, category, category_name, area_m2, sales_krw, receipts, aov_krw, sales_per_m2, sales_per_pyeong, gmrof, percentile(0~100), floor_percentile, low_efficiency, category_index, low_reason, driver}], low_efficiency:[...], category_weak:[...], category_mix:[{category, category_name, n_units, sales_per_m2, vs_scope_pct, low_efficiency}], reading_guide, note}`. 금액은 연환산 전체 규모 값이다. `level`은 `unit`·`zone`·`floor`·`category`. 가상 개정은 404. `category_index`는 같은 카테고리 매장(점포 전체, 3곳 이상) ㎡당 매출 중앙값 대비 비율이다. `low_reason`은 저효율 매장에만 있으며 `카테고리 특성`(지수 0.7 이상) 또는 `같은 카테고리 대비 부진`(0.7 미만)이다. `category_weak`는 지수 0.7 미만 매장, `category_mix`는 범위 안 카테고리별 ㎡당 매출과 범위 전체 대비 차이(%)다. 이 네 필드와 `summary.low_efficiency_by_reason`, `summary.category_weak`는 `level=unit`일 때만 있다. |
 | GET | `/api/analytics/cross-shopping?level=category&focal=&segment=age_band:40s;tier:VIP\|VVIP` | `{level, segment, basket, period, n_baskets, n_customers, caveat, pairs:[{a, b, a_name, b_name, lift, jaccard, confidence_ab, n_customers}]}`. `focal`을 주면 `a`가 focal이다. |
 | GET | `/api/analytics/transitions?segment=` | `{floors:[...], matrix:[[...]], top_transitions, fountain:{base_floor, share, customer_days}, shower:{top_floor, share, customer_days}, caveat}` |
-| POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints:{keep_anchors, area_tolerance, max_moves, n_alternatives, movable_categories, allow_cross_floor, save}}` → `{rev, period, label, caveats, alternatives:[{id, rev_id, summary, moves:[{brand_id, brand_name, from_unit, to_unit, delta, delta_low, delta_high, explanation}], objective_before, objective_after(억원), kpi_delta:{sales_krw, low, high}, constraints:[{name, ok, detail}], kpi_by_floor, explanations}]}`. 대안마다 가상 개정 `rev_id`가 저장된다. |
+| POST | `/api/layout/alternatives` | 본문 `{rev, floors, constraints:{keep_anchors, area_tolerance, max_moves, n_alternatives, movable_categories, allow_cross_floor, save}}` → `{rev, period, label, caveats, search:{status, net_upper_bound_krw, note}, alternatives:[{id, rev_id, summary, search_status, moves:[{brand_id, brand_name, from_unit, to_unit, delta, delta_low, delta_high, explanation}], objective_before, objective_after(억원), kpi_delta:{sales_krw, low, high}, constraints:[{name, ok, detail}], kpi_by_floor, explanations}]}`. 대안마다 가상 개정 `rev_id`가 저장된다. `search`는 `plan`의 같은 필드와 같다. |
 | GET | `/api/analytics/journey?customer_id=&date=&segment=&rank=1&rev=` | 고객 한 명의 하루 쇼핑 동선. 응답은 3절의 `journey` 객체와 같다. `customer_id`·`date`를 생략하면 조건(`segment`)에 맞는 고객 하루 중 `rank`번째를 고른다. `rev`를 주면 그 개정이 실제 매장 배치였던 기간에서만 고른다(가상 개정은 기준 실제 개정의 기간). 해당하는 동선이 없으면 404 |
 | GET | `/api/spatial/route?rev=&origin=&destination=&destination_category=&destination_floor=&via=escalator` | 두 지점 사이의 통로망 최단 경로. 응답은 3절의 `route` 객체와 같다. `origin`·`destination`은 매장 코드(`3F-C05`), 출입구 ID(`ENT-1`), 층을 붙인 수직동선·편의시설(`1F:ESC-A`, `8F:RESTROOM`)이다. `destination` 대신 `destination_category`와 `destination_floor`를 주면 그 층에서 걸어서 가장 가까운 해당 카테고리 매장으로 간다. `via`는 `escalator`(기본) 또는 `elevator`. 찾을 수 없는 지점이면 404 |
 | GET | `/api/spatial/flow?mode=traffic&rev=&floor=&segment=&day_type=&hours=&category=&min_width_m=&max_travel_m=` | 통로 위에 그리는 집계 결과. 응답은 3절의 `flow` 객체와 같다. `mode`는 `traffic`(추정 유동), `popup`(팝업 후보), `egress`(통로 폭·피난 거리 점검) 중 하나다. `segment`는 채팅 API와 같은 고객군 문자열(`age_band:40s;tier:VIP`), `day_type`은 `all`·`weekday`·`weekend`, `hours`는 `10-14`처럼 시작·끝 시각이다. 잘못된 인자는 400 |
@@ -93,7 +93,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
   "current": {"sales_krw": 0, "objective_krw": 0},
   "baseline": {"sales_krw": 0, "objective_krw": 0, "note": "퇴점·입점만 반영한 기준안"},
   "alternatives": [{
-    "alt_id": "ALT-1", "rev_id": "H8", "summary": "...",
+    "alt_id": "ALT-1", "rev_id": "H8", "summary": "...", "search_status": "optimal",
     "kpi": {"sales_delta_krw": 0, "sales_low_krw": 0, "sales_high_krw": 0, "objective_delta_krw": 0, "move_cost_krw": 0, "net_krw": 0,
             "vs_current_sales_krw": 0, "moves": 3},
     "changes": [{"type": "move", "brand_id": "BR0042", "brand_name": "...", "category_name": "...", "from_unit": "4F-C10",
@@ -101,6 +101,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
     "constraints": [{"name": "앵커 고정", "ok": true, "detail": "..."}],
     "explanations": ["이웃 매장 인접 친화도 변화에 따른 파급 효과: ..."]
   }],
+  "search": {"status": "optimal", "net_upper_bound_krw": 0, "note": "정수계획(CP-SAT)으로 풀어 ALT-1보다 순효과가 큰 배치가 없음을 확인했어요."},
   "unplaced": [{"brand_id": "BR0470", "brand_name": "...", "reason": "면적·선호 층에 맞는 빈 매장이 없습니다."}],
   "caveats": ["..."]
 }
@@ -108,6 +109,7 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 
 - `changes.type`은 `move`(이전), `entry`(입점, `from_unit` 없음), `exit`(퇴점, `to_unit` 없음) 중 하나다. 변경마다 `explanation`(근거)이 있다.
 - `explanations`는 변경 하나에 속하지 않는 참고 설명이다. 예: 입점 브랜드 위치 조정, 이웃 매장의 인접 친화도 파급 효과.
+- `search_status`와 `search.status`는 `optimal`(최적 증명), `feasible`(제한 시간 안에 증명 못 함), `heuristic`(정수계획 없이 탐색만 함) 중 하나다. 기준안(ALT-0)의 `search_status`는 `null`이다. `search`는 ALT-1 기준이다. `net_upper_bound_krw`는 어떤 배치로도 넘을 수 없는 순효과 상한이며, `heuristic`이면 `null`이다. 계산 방법은 [MCP 도구 명세 5절](mcp-tools.md#5-시즌-개편-계산)에 있다.
 - `current`는 지금 배치, `baseline`은 퇴점·입점만 반영하고 기존 브랜드를 옮기지 않은 배치다. 대안의 `kpi`는 `baseline` 대비 변화다. `vs_current_sales_krw`는 지금 배치 대비 기대 매출 변화다.
 - `objective_krw`는 시즌 가중치를 곱한 기대 매출이다. `objective=commission`이면 여기에 수수료율도 곱한다.
 - `move_cost_krw`는 이전하는 기존 브랜드의 공사 기간(`downtime_weeks`) 영업 손실 추정이다. 입점 브랜드에는 붙지 않는다.
@@ -228,15 +230,18 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 |---|---|---|
 | `RUN_STARTED` | `thread_id`, `run_id` | 실행 시작 |
 | `TEXT_MESSAGE_START` | `message_id` | 어시스턴트 메시지 시작. 한 실행에 메시지는 하나다. |
-| `TEXT_MESSAGE_CONTENT` | `message_id`, `delta` | 텍스트 조각. 모델이 생성하는 대로 스트리밍한다. |
+| `TEXT_MESSAGE_CONTENT` | `message_id`, `delta` | 답변 텍스트 조각. 모델이 생성하는 대로 스트리밍한다. 첫 줄(최대 200자)은 진행 노트인지 확인할 때까지 모았다가 보낸다. |
 | `TEXT_MESSAGE_END` | `message_id` | 메시지 종료 |
-| `TOOL_CALL_START` | `tool_call_id`, `tool_name`, `args`, `label`, `parent_tool_call_id?`, `agent?` | 도구 호출 시작. `label`은 사용자에게 보여 줄 한국어 설명이다. 예: "4층 공간 생산성 계산" |
-| `TOOL_CALL_END` | `tool_call_id`, `summary`, `label?`, `ok?` | 도구 호출 종료. `label`이 있으면 시작 때의 설명을 이 값으로 바꾼다. `summary`는 개발자용 원문이다. |
+| `THINKING_TEXT_MESSAGE_START` | `message_id`, `parent_tool_call_id?`, `agent?` | 진행 노트 시작. 에이전트가 도구를 부르기 직전에 쓴 한 문장(무엇을 어떤 방법으로 확인할지, 또는 방법을 바꾸는 이유)이다. 답변이 아니다. 전문 에이전트 안의 노트는 `parent_tool_call_id`와 `agent`를 붙인다. |
+| `THINKING_TEXT_MESSAGE_CONTENT` | `message_id`, `delta` | 진행 노트 텍스트 |
+| `THINKING_TEXT_MESSAGE_END` | `message_id` | 진행 노트 종료 |
+| `TOOL_CALL_START` | `tool_call_id`, `tool_name`, `args`, `label`, `method?`, `parent_tool_call_id?`, `agent?` | 도구 호출 시작. `label`은 사용자에게 보여 줄 한국어 단계 이름이다(예: "4층 공간 생산성 계산"). `method`는 그 단계가 답을 계산하는 방법을 한 문장으로 쓴 것이다(예: "결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요"). |
+| `TOOL_CALL_END` | `tool_call_id`, `summary`, `label?`, `method?`, `result?`, `ok?` | 도구 호출 종료. `label`이 있으면 시작 때의 설명을 이 값으로 바꾼다. `result`는 도구 결과에서 읽은 한 줄 요약이다(예: "매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)"). 할 말이 없으면 `null`이다. 도구가 인자 오류를 돌려주면 `ok`는 `false`, `result`는 "조건을 고쳐 다시 시도해요"이다. `summary`는 개발자용 원문이다. |
 | `STATE_DELTA` | `delta` | UI 상태에 적용할 JSON Patch(RFC 6902) 배열 |
 | `RUN_FINISHED` | `thread_id`, `run_id` | 실행 종료 |
 | `RUN_ERROR` | `message` | 오류 |
 
-**화면 표시 원칙:** 채팅은 대화처럼 보여야 한다. 도구 이름, 인자, `summary` 원문은 기본 화면에 보이지 않는다. 실행 중에는 진행 중인 `label` 한 줄만 보이고, 끝나면 단계 목록을 접어 둔다.
+**화면 표시 원칙:** 채팅은 대화처럼 보여야 한다. 실행 중에는 "분석 과정"을 펼쳐 진행 노트와 단계(이름, 계산 방법, 결과)를 도착한 순서대로 보여 준다. 전문 에이전트의 단계와 노트는 그 상담 단계 아래에 들여 쓴다. 답변이 나오기 시작하면 "분석 과정 보기 · 4단계 · 23초" 한 줄로 접는다(단계 수에 진행 노트는 넣지 않는다). 도구 이름, 인자, `summary` 원문은 "기술 정보"를 켰을 때만 보인다. `method`와 `result`는 코드가 정한 문장과 도구 결과에서 만든다. 진행 노트만 에이전트가 쓴다.
 
 ## 3. UI 상태 모델
 

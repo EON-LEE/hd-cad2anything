@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
-import { failedUiSteps, type ChatRun } from '../lib/chatRun'
+import { failedUiSteps, toolSteps, type ChatRun } from '../lib/chatRun'
 import { QUICK_PROMPTS } from '../lib/prompts'
 import { appReducer, createAppState, type AppState, type ChatItem } from '../state/reducer'
 import { createInitialUiState } from '../state/uiState'
@@ -145,17 +145,29 @@ describe('scripted mock chat streams', () => {
     const starts = events.filter((e): e is Extract<AgUiEvent, { type: 'TOOL_CALL_START' }> => e.type === 'TOOL_CALL_START')
     const ended = events.filter((e) => e.type === 'TOOL_CALL_END').map((e) => (e as { tool_call_id: string }).tool_call_id)
     expect(ended.sort()).toEqual(starts.map((e) => e.tool_call_id).sort())
-    // Every call carries a user-facing label; the answer is one message streamed in small deltas.
+    // Every call carries a user-facing label and its method; the answer is one message streamed in small deltas.
     for (const start of starts) expect(start.label?.length).toBeGreaterThan(2)
+    for (const start of starts) expect(start.method?.length).toBeGreaterThan(5)
     expect(events.filter((e) => e.type === 'TEXT_MESSAGE_START')).toHaveLength(1)
     const deltas = events.flatMap((e) => (e.type === 'TEXT_MESSAGE_CONTENT' ? [e.delta] : []))
     expect(deltas.length).toBeGreaterThan(10)
     expect(Math.max(...deltas.map((d) => [...d].length))).toBeLessThanOrEqual(5)
+    // One short plan note before the first tool call (none without tools); notes never reach the answer.
+    const notes = events.flatMap((e) => (e.type === 'THINKING_TEXT_MESSAGE_CONTENT' ? [e.delta] : []))
+    const topNotes = events.filter((e) => e.type === 'THINKING_TEXT_MESSAGE_START' && !e.parent_tool_call_id)
+    const firstTool = events.findIndex((e) => e.type === 'TOOL_CALL_START')
+    expect(topNotes).toHaveLength(firstTool < 0 ? 0 : 1)
+    if (firstTool >= 0) expect(events.findIndex((e) => e.type === 'THINKING_TEXT_MESSAGE_START')).toBeLessThan(firstTool)
+    for (const note of notes) {
+      expect([...note].length).toBeLessThanOrEqual(60)
+      expect(note).toMatch(/요\.$/)
+    }
     const state = reduce(events)
     const run = runOf(state)
     expect(run.status).toBe('done')
     expect(failedUiSteps(run)).toEqual([])
     expect(run.answer.length).toBeGreaterThan(20)
+    for (const note of notes) expect(run.answer).not.toContain(note)
     expect(state.chat.running).toBe(false)
   })
 
@@ -164,7 +176,8 @@ describe('scripted mock chat streams', () => {
     expect(state.ui).toMatchObject({ rev: 'R1', compareRev: 'R0', panel: { type: 'changes', payload: { rev_from: 'R0', rev_to: 'R1' } } })
     expect(state.ui.highlights.length).toBeGreaterThan(0)
     expect(state.panelSeq).toBe(1)
-    expect(runOf(state).steps.map((s) => s.label)).toEqual([
+    const steps = toolSteps(runOf(state))
+    expect(steps.map((s) => s.label)).toEqual([
       'S/S MD 개편(R1) 도면 변경 내역 확인',
       '다시 만들 산출물 확인',
       'R0 → R1 비교 표시',
@@ -172,6 +185,9 @@ describe('scripted mock chat streams', () => {
       '변경 구역으로 확대',
       '변경 목록 열기',
     ])
+    expect(steps[0].result).toMatch(/^변경 \d+건 · /)
+    expect(steps[1].result).toMatch(/^다시 만들 산출물 \d+개 · 게시 전 승인 \d+개$/)
+    expect(runOf(state).steps[0]).toMatchObject({ kind: 'note', label: 'R1 도면을 직전 개정(R0)과 매장 단위로 비교하고 다시 만들 산출물을 확인할게요.' })
   })
 
   it('answers questions about floors the mock lacks on 3F and says so', async () => {
@@ -183,19 +199,29 @@ describe('scripted mock chat streams', () => {
     expect(runOf(layout).answer).toContain('| ALT-3F-A |')
   })
 
-  it('nests the specialist agent calls under consult_specialist', async () => {
+  it('nests the specialist agent calls and notes under consult_specialist', async () => {
     const events = await collect(request('3층 저효율 zone과 원인'))
     const starts = events.filter((e): e is Extract<AgUiEvent, { type: 'TOOL_CALL_START' }> => e.type === 'TOOL_CALL_START')
     const consult = starts.find((e) => e.tool_name === 'consult_specialist')!
     const nested = starts.filter((e) => e.parent_tool_call_id === consult.tool_call_id)
     expect(nested.map((e) => e.tool_name)).toEqual(['analytics_productivity', 'analytics_drivers', 'analytics_cross_shopping'])
     expect(nested.every((e) => e.agent === 'space-productivity-analyst')).toBe(true)
-    const steps = runOf(reduce(events)).steps
-    expect(steps.filter((s) => s.parentId === consult.tool_call_id).map((s) => s.label)).toEqual([
-      '3층 공간 생산성 계산',
-      '효율 저하 원인 분석',
-      '저효율 매장 교차구매 확인',
+    // Methods come from the backend's wording (the specialist's own sentence for consult_specialist).
+    expect(consult.method).toBe('공간 생산성 분석 에이전트가 여러 지표로 원인을 깊게 분석해요')
+    expect(nested[0].method).toBe('결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요')
+    const run = runOf(reduce(events))
+    const children = run.steps.filter((s) => s.parentId === consult.tool_call_id)
+    expect(children.map((s) => [s.kind, s.label])).toEqual([
+      ['note', '먼저 ㎡당 매출로 하위 매장을 찾고 원인 후보를 좁혀 볼게요.'],
+      ['tool', '3층 공간 생산성 계산'],
+      ['tool', '효율 저하 원인 분석'],
+      ['tool', '저효율 매장 교차구매 확인'],
     ])
+    expect(children[0].agent).toBe('space-productivity-analyst')
+    expect(children[1].result).toMatch(/^매장 19곳 중 저효율 \d+곳 · 가장 낮은 곳 .+\(3F-[A-Z]\d{2}\)$/)
+    expect(children[2].result).toMatch(/^하위 2곳의 주요 요인: 동선 노출\(에스컬레이터까지 평균 \d+m, 층 평균 \d+m\)$/)
+    expect(run.steps.find((s) => s.id === consult.tool_call_id)?.result).toBe('공간 생산성 분석 에이전트의 분석을 받았어요')
+    expect(run.steps[0]).toMatchObject({ kind: 'note', parentId: null, label: '3층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요.' })
   })
 
   it('cosmetics cross-shopping prompt centers the relationships on 1F cosmetics stores', async () => {
@@ -210,12 +236,14 @@ describe('scripted mock chat streams', () => {
     const events = await collect(request('VIP 고객 한 명의 쇼핑 동선을 보여줘'))
     const state = reduce(events)
     const run = runOf(state)
-    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+    const steps = toolSteps(run)
+    expect(steps.map((s) => [s.label, s.toolName])).toEqual([
       ['고객 동선 찾기', 'analytics_customer_journey'],
       ['이전 분석 표시 지우기', 'ui_clear'],
       ['도면에 고객 동선 그리기', 'ui_show_journey'],
     ])
-    expect(run.steps[2].patchKeys).toEqual(['journey', 'floor', 'panel'])
+    expect(steps[0].result).toBe('결제 6건 · 1층→3층→1층')
+    expect(steps[2].patchKeys).toEqual(['journey', 'floor', 'panel'])
     const journey = state.ui.journey!
     expect(state.ui).toMatchObject({ heatmap: null, highlights: [], edges: [], compareRev: null })
     expect(state.ui.panel).toEqual({ type: 'journey', payload: {} })
@@ -255,12 +283,15 @@ describe('scripted mock chat streams', () => {
     const events = await collect(request('정문에서 3층 매장까지 가는 길 알려줘'))
     const state = reduce(events)
     const run = runOf(state)
-    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+    const steps = toolSteps(run)
+    expect(steps.map((s) => [s.label, s.toolName])).toEqual([
       ['정문에서 3층 Cafe Halune까지 경로 계산', 'spatial_route'],
       ['도면에 경로 그리기', 'ui_show_route'],
     ])
+    expect(steps[0].result).toBe('걷는 거리 약 85m · 2개 층 이동')
+    expect(run.steps[0]).toMatchObject({ kind: 'note', label: '에스컬레이터로 3층까지 가는 가장 짧은 길을 찾아 도면에 그릴게요.' })
     // ui_show_route clears the other analysis overlays like the backend does.
-    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'flow', 'route', 'floor'])
+    expect(steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'flow', 'route', 'floor'])
     expect(state.ui).toMatchObject({ floor: '1F', heatmap: null, highlights: [], edges: [], compareRev: null, journey: null })
     const route = state.ui.route!
     expect(route).toMatchObject({ title: 'ENT-1 정문 → Cafe Halune(3F-C05)', rev: 'R2', via_type: 'escalator', walk_m: 85 })
@@ -333,12 +364,16 @@ describe('scripted mock chat streams', () => {
   it('popup prompt draws ranked candidates on the weekend traffic and clears the other overlays', async () => {
     const state = reduce(await collect(request('주말 팝업 어디가 좋아?')))
     const run = runOf(state)
-    expect(run.steps.map((s) => [s.label, s.toolName])).toEqual([
+    const steps = toolSteps(run)
+    expect(steps.map((s) => [s.label, s.toolName])).toEqual([
       ['팝업 후보 위치 계산', 'spatial_flow'],
       ['도면에 팝업 후보 표시', 'ui_show_flow'],
     ])
+    // The mock's one flow tool borrows the method of the backend's popup tool.
+    expect(steps[0].method).toBe('추정 유동·승강장 가시성·남는 통로 폭으로 팝업 자리에 점수를 매겨요')
+    expect(steps[0].result).toMatch(/^후보 5곳 · 1순위 1F .+$/)
     // ui_show_flow clears the analysis displays, the journey and the route like the backend does.
-    expect(run.steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'route', 'flow', 'floor'])
+    expect(steps[1].patchKeys).toEqual(['heatmap', 'highlights', 'edges', 'compareRev', 'journey', 'route', 'flow', 'floor'])
     const flow = state.ui.flow!
     expect(flow).toMatchObject({ mode: 'popup', title: '전체 고객 기준 팝업 후보(주말)', rev: 'R2', query: { day_type: 'weekend', segment: null } })
     expect(flow.markers.map((m) => m.rank)).toEqual([1, 2, 3, 4, 5])

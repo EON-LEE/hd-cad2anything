@@ -1,3 +1,4 @@
+import itertools
 import math
 
 import numpy as np
@@ -10,6 +11,7 @@ from cad2anything.generators import load_specs, plan_impact
 from cad2anything.layout import (
     LayoutConstraints,
     check_constraints,
+    exact,
     fit_scoring_model,
     generate_alternatives,
     score_assignment,
@@ -366,6 +368,96 @@ def test_no_alternative_when_nothing_can_move(setup):
     constraints = LayoutConstraints(floors=FLOORS, movable_brands=["B308"])  # only an anchor is "movable"
 
     assert generate_alternatives(BASE, features, brands, pairs, params, constraints) == []
+
+
+AFFINITY = pd.DataFrame(
+    {
+        "level": ["brand"] * 3,
+        "item_a": ["B304", "B303", "B306"],
+        "item_b": ["B307", "B311", "B309"],
+        "lift": [3.0, 2.0, 1.6],
+    }
+)
+
+
+def test_exact_search_matches_brute_force_optimum(setup):
+    _, brands, features, pairs, _, params = setup
+    constraints = LayoutConstraints(floors=("3F",), max_moves=2)
+    info = brands.set_index("brand_id")
+    home = {b: u for u, b in BASE.items() if b}
+    movable = sorted(b for b in home if b.startswith("B3") and not info.loc[b, "anchor"])
+    vacant = [u for u, b in BASE.items() if u.startswith("3F") and b is None]
+
+    def gain(layout):
+        score = score_assignment(
+            layout, features, brands, params, affinity_pairs=AFFINITY, adjacency_pairs=pairs
+        )
+        return score.total
+
+    base_total = gain(BASE)
+    best = 0.0
+    for size in (1, 2):
+        for group in itertools.combinations(movable, size):
+            for targets in itertools.permutations(vacant + [home[b] for b in group], size):
+                if any(t == home[b] for b, t in zip(group, targets, strict=True)):
+                    continue
+                layout = dict(BASE) | {home[b]: None for b in group} | dict(zip(targets, group, strict=True))
+                checks = check_constraints(BASE, layout, features, brands, pairs, constraints)
+                if checks["satisfied"].all():
+                    best = max(best, gain(layout) - base_total)
+
+    alternatives = generate_alternatives(
+        BASE, features, brands, pairs, params, constraints, n_alternatives=3, seed=7, affinity_pairs=AFFINITY
+    )
+    heuristic = generate_alternatives(
+        BASE,
+        features,
+        brands,
+        pairs,
+        params,
+        constraints,
+        n_alternatives=1,
+        seed=7,
+        affinity_pairs=AFFINITY,
+        exact_search=False,
+    )
+
+    first = alternatives[0]
+    assert best > 0 and first.search_status == "optimal"
+    assert first.delta == pytest.approx(best, rel=1e-9)  # the proven optimum is the enumerated optimum
+    assert heuristic[0].delta <= first.delta * (1 + 1e-9)
+    assert 0 <= first.net_upper_bound_krw - first.delta < 1e5  # only the rounding allowance
+    assert "최적해 확인" in first.summary
+    assert len({frozenset((m.brand_id, m.to_unit) for m in a.moves) for a in alternatives}) == len(
+        alternatives
+    )
+    for alt in alternatives[1:]:
+        assert alt.delta <= first.delta * (1 + 1e-9) and "ALT-1(최적해)" in alt.summary
+        assert alt.constraint_checks["satisfied"].all()
+        assert alt.net_upper_bound_krw == first.net_upper_bound_krw
+
+
+def test_exact_search_switch_and_fallback(setup, monkeypatch):
+    _, brands, features, pairs, _, params = setup
+    constraints = LayoutConstraints(floors=FLOORS, max_moves=3)
+
+    def run(**kwargs):
+        alts = generate_alternatives(
+            BASE, features, brands, pairs, params, constraints, n_alternatives=2, seed=5, **kwargs
+        )
+        return alts, [[(m.brand_id, m.to_unit) for m in a.moves] for a in alts]
+
+    plain, plain_moves = run(exact_search=False)
+    assert plain and all(a.search_status == "heuristic" and math.isnan(a.net_upper_bound_krw) for a in plain)
+    assert "최적" not in plain[0].summary
+    monkeypatch.setenv(exact.ENV_SWITCH, "off")
+    assert not exact.enabled() and run()[1] == plain_moves
+    monkeypatch.delenv(exact.ENV_SWITCH)
+    monkeypatch.setenv(exact.ENV_SECONDS, "oops")
+    assert exact.enabled() and exact.time_limit() == exact.DEFAULT_TIME_LIMIT_S
+    monkeypatch.setattr(exact, "solve", lambda *args, **kwargs: None)  # e.g. OR-Tools missing
+    fallback, fallback_moves = run()
+    assert fallback_moves == plain_moves and fallback[0].search_status == "heuristic"
 
 
 def test_hypothetical_revision_matches_moves(setup):

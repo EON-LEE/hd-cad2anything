@@ -1,4 +1,5 @@
-"""Constraint-aware layout alternatives: constraint filter -> greedy -> simulated annealing (seeded).
+"""Constraint-aware layout alternatives: constraint filter -> greedy -> simulated annealing (seeded) ->
+exact MIP check.
 
 The objective is the total expected sales (추정치) of the units in scope, computed with
 ``whatif.AssignmentScorer`` so that engine numbers and ``score_assignment`` agree. Neighborhoods are
@@ -6,13 +7,15 @@ The objective is the total expected sales (추정치) of the units in scope, com
 constraint filter (anchors fixed, movable filter, area tolerance, preferred floors, cross-floor rule) or
 back to their original unit; new adjacencies between conflicting categories and more than ``max_moves``
 relocated brands are rejected. Later alternatives are penalized for repeating earlier relocations.
+When OR-Tools is installed the same problem is then solved as a mixed-integer program (``layout.exact``)
+warm-started with the heuristic layout; the better layout is kept and its optimality status recorded.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -20,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from cad2anything.analytics.prep import floor_sort_key
+from cad2anything.layout import exact
 from cad2anything.layout.whatif import (
     ESTIMATE_LABEL,
     SCORING_CAVEATS,
@@ -182,6 +186,11 @@ class LayoutAlternative:
     sales_high: float = math.nan
     move_cost_krw: float = 0.0
     objective_label: str = "기대 매출"
+    search_status: str = "heuristic"
+    """"optimal" (proven: ALT-1 over all feasible layouts; later alternatives under the diversity penalty
+    among layouts that differ from the earlier ones), "feasible" (solver time limit) or "heuristic"."""
+    net_upper_bound_krw: float = math.nan
+    """Upper bound of the net objective change any feasible layout can reach (from the ALT-1 solve)."""
 
     @property
     def delta(self) -> float:
@@ -216,6 +225,8 @@ class LayoutAlternative:
             "sales_high": self.sales_high,
             "move_cost_krw": self.move_cost_krw,
             "spillover_krw": self.spillover_krw,
+            "search_status": self.search_status,
+            "net_upper_bound_krw": self.net_upper_bound_krw,
             "moves": [asdict(m) for m in self.moves],
             "assignment": self.assignment,
             "kpi_deltas": self.kpi_deltas.to_dict(orient="records"),
@@ -644,6 +655,23 @@ class _Search:
     def placements(self, st: _State) -> frozenset[tuple[int, int]]:
         return frozenset((b, u) for b, u in enumerate(st.pos) if u != self.base_pos[b])
 
+    def objective_of(self, state: Sequence[int]) -> float:
+        """Weighted expected sales of a full scope state minus the move costs it incurs."""
+        value = sum(self.unit_value(list(state), u) for u in range(len(self.codes)))
+        return value - sum(self.cost[b] for u, b in enumerate(state) if b >= 0 and u != self.base_pos[b])
+
+    def state_of(self, state: Sequence[int], mu: float, placed: Mapping[tuple[int, int], int]) -> _State:
+        """Search state for a full assignment; ``raw``/``pen`` are measured from the base layout."""
+        pos = list(self.base_pos)
+        for u, b in enumerate(state):
+            if b >= 0:
+                pos[b] = u
+        moved = [b for b in range(len(self.bids)) if pos[b] != self.base_pos[b]]
+        raw = self.objective_of(state) - self.objective_of(self.base)
+        penalty = sum(placed.get((b, pos[b]), 0) for b in moved)
+        n_moved = sum(1 for b in moved if not self.free[b])
+        return _State(list(state), pos, n_moved, raw, raw - mu * penalty)
+
     def assignment(self, st: _State) -> dict[str, str | None]:
         return {
             code: (self.bids[b] if b >= 0 else None) for code, b in zip(self.codes, st.state, strict=True)
@@ -787,6 +815,7 @@ def generate_alternatives(
     move_cost: Mapping[str, float] | None = None,
     free: Collection[str] = (),
     objective_label: str = "기대 매출",
+    exact_search: bool | None = None,
 ) -> list[LayoutAlternative]:
     """Up to ``n_alternatives`` distinct, constraint-satisfying layouts that raise the objective.
 
@@ -795,11 +824,16 @@ def generate_alternatives(
     ``free`` brands are new entries already placed in ``base_assignment``; they may take any feasible
     unit without counting as a move. Without weights, costs and free brands this maximizes expected sales.
 
-    Deterministic for a given ``seed``. Each alternative runs greedy improvement, ``max_iter`` simulated
-    annealing steps and a final greedy polish (a heuristic: the best layout found, not a proven optimum).
-    Later alternatives pay ``diversity_weight * (average gain per relocation of the first alternative)``
-    for every relocation already used by an earlier alternative. Alternatives without a strict net
-    improvement are not returned, so the list may be shorter (or empty).
+    Each alternative runs greedy improvement, ``max_iter`` simulated annealing steps and a final greedy
+    polish (deterministic for a given ``seed``). Unless ``exact_search`` is False (default: the
+    ``ATLAS_LAYOUT_EXACT`` switch, on), the same objective is then solved as a mixed-integer program with
+    OR-Tools (``layout.exact``), warm-started with the heuristic layout and excluding the relocation sets
+    of earlier alternatives; the better layout is kept. ``search_status`` records "optimal" when the
+    solver proved optimality, "feasible" when it hit the time limit and "heuristic" when OR-Tools is not
+    available (the best layout found, no proof). Later alternatives pay ``diversity_weight * (average gain
+    per relocation of the first alternative)`` for every relocation already used by an earlier
+    alternative. Alternatives without a strict net improvement are not returned, so the list may be
+    shorter (or empty).
     """
     constraints = constraints or LayoutConstraints()
     base_assignment = normalize_assignment(base_assignment)
@@ -816,14 +850,30 @@ def generate_alternatives(
     before_units = before.units.set_index("unit_code")
     base_pos = {b: u for u, b in scope_base.items() if b is not None}
     custom = bool(weights or move_cost or free_ids)
+    gain_label = "순효과" if custom else "기대 매출 증가"
+    use_exact = exact.enabled() if exact_search is None else bool(exact_search)
+    time_limit = exact.time_limit()
+    base_objective = search.objective_of(search.base) if use_exact else 0.0
+    net_bound = math.nan
     placed: Counter[tuple[int, int]] = Counter()
     seen: list[frozenset[tuple[int, int]]] = []
     alternatives: list[LayoutAlternative] = []
     mu = 0.0
     for k in range(n_alternatives):
         accepted: _State | None = None
+        status = "heuristic"
         for attempt in range(3):
             st = search.run(seed, k, attempt, max_iter, mu, placed)
+            status = "heuristic"
+            if use_exact:
+                solved = exact.solve(search, mu, placed, st.state, seen, time_limit)
+                if solved is not None:
+                    candidate = search.state_of(solved.state, mu, placed)
+                    if search.placements(st) in seen or candidate.pen > st.pen + search.tol:
+                        st = candidate
+                    status = "optimal" if solved.optimal else "feasible"
+                    if not alternatives and attempt == 0:
+                        net_bound = solved.bound - base_objective
             moves = search.placements(st)
             if not moves or st.raw <= search.tol:
                 break
@@ -875,6 +925,19 @@ def generate_alternatives(
                 f"{format_krw_delta(after.total_low - before.total)}~{format_krw_delta(after.total_high - before.total)})."
             )
         explanations = [m.explanation for m in move_list]
+        if not alternatives and status == "optimal":
+            summary += f" 최적해 확인: 같은 제약에서 {gain_label}가 더 큰 배치는 없습니다."
+        elif not alternatives and status == "feasible" and math.isfinite(net_bound):
+            summary += (
+                f" 탐색 시간 안에 최적 증명을 끝내지 못했습니다(이론상 최대 {gain_label} "
+                f"{format_krw_delta(net_bound)})."
+            )
+        elif alternatives and alternatives[0].search_status == "optimal":
+            gap = max(0.0, alternatives[0].net_delta - net)
+            summary += (
+                f" ALT-1(최적해)과 겹치는 이동을 줄인 대안으로, {gain_label}가 ALT-1보다 "
+                f"{format_krw(gap)} 작습니다."
+            )
         for b in shifted:
             name = infos[b].brand_name if b in infos else b
             explanations.append(
@@ -908,6 +971,8 @@ def generate_alternatives(
                 sales_high=after.total_high,
                 move_cost_krw=cost,
                 objective_label=objective_label,
+                search_status=status,
+                net_upper_bound_krw=net_bound,
             )
         )
         placements = search.placements(accepted)

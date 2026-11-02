@@ -156,6 +156,9 @@ const KNOWN_TYPES = new Set([
   'TEXT_MESSAGE_START',
   'TEXT_MESSAGE_CONTENT',
   'TEXT_MESSAGE_END',
+  'THINKING_TEXT_MESSAGE_START',
+  'THINKING_TEXT_MESSAGE_CONTENT',
+  'THINKING_TEXT_MESSAGE_END',
   'TOOL_CALL_START',
   'TOOL_CALL_END',
   'STATE_DELTA',
@@ -176,8 +179,8 @@ function optionalText(value: unknown): string | undefined {
 
 /**
  * Normalize one decoded JSON payload to the contract's snake_case event shape.
- * camelCase aliases used by AG-UI SDKs (threadId, messageId, toolCallId, toolCallName) are accepted.
- * Returns null for unknown or malformed events.
+ * camelCase aliases used by AG-UI SDKs (threadId, messageId, toolCallId, toolCallName, parentToolCallId) are
+ * accepted. Returns null for unknown or malformed events; unknown fields are dropped.
  */
 export function normalizeAgUiEvent(raw: unknown, sseEventName = 'message'): AgUiEvent | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
@@ -188,6 +191,9 @@ export function normalizeAgUiEvent(raw: unknown, sseEventName = 'message'): AgUi
   const runId = str(r.run_id ?? r.runId)
   const messageId = str(r.message_id ?? r.messageId)
   const toolCallId = str(r.tool_call_id ?? r.toolCallId)
+  const parent = optionalText(r.parent_tool_call_id ?? r.parentToolCallId)
+  const agent = optionalText(r.agent)
+  const nested = { ...(parent ? { parent_tool_call_id: parent } : {}), ...(agent ? { agent } : {}) }
   switch (type) {
     case 'RUN_STARTED':
       return { type: 'RUN_STARTED', thread_id: threadId, run_id: runId }
@@ -199,27 +205,36 @@ export function normalizeAgUiEvent(raw: unknown, sseEventName = 'message'): AgUi
       return { type: 'TEXT_MESSAGE_CONTENT', message_id: messageId, delta: str(r.delta) }
     case 'TEXT_MESSAGE_END':
       return { type: 'TEXT_MESSAGE_END', message_id: messageId }
+    case 'THINKING_TEXT_MESSAGE_START':
+      return { type: 'THINKING_TEXT_MESSAGE_START', message_id: messageId, ...nested }
+    case 'THINKING_TEXT_MESSAGE_CONTENT':
+      return { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: messageId, delta: str(r.delta) }
+    case 'THINKING_TEXT_MESSAGE_END':
+      return { type: 'THINKING_TEXT_MESSAGE_END', message_id: messageId }
     case 'TOOL_CALL_START': {
       const label = optionalText(r.label)
-      const parent = optionalText(r.parent_tool_call_id ?? r.parentToolCallId)
-      const agent = optionalText(r.agent)
+      const method = optionalText(r.method)
       return {
         type: 'TOOL_CALL_START',
         tool_call_id: toolCallId,
         tool_name: str(r.tool_name ?? r.toolCallName ?? r.name),
         args: r.args,
         ...(label ? { label } : {}),
-        ...(parent ? { parent_tool_call_id: parent } : {}),
-        ...(agent ? { agent } : {}),
+        ...(method ? { method } : {}),
+        ...nested,
       }
     }
     case 'TOOL_CALL_END': {
       const label = optionalText(r.label)
+      const method = optionalText(r.method)
+      const result = optionalText(r.result)
       return {
         type: 'TOOL_CALL_END',
         tool_call_id: toolCallId,
         summary: r.summary === undefined || r.summary === null ? undefined : str(r.summary),
         ...(label ? { label } : {}),
+        ...(method ? { method } : {}),
+        ...(result ? { result } : {}),
         ...(typeof r.ok === 'boolean' ? { ok: r.ok } : {}),
       }
     }

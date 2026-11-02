@@ -88,7 +88,14 @@ function withRun(chat: ChatState, index: number, run: ChatRun): ChatState {
 }
 
 // Events that may open a run when none is active (server-initiated output without a user message).
-const OPENING_EVENTS = new Set<AgUiEvent['type']>(['RUN_STARTED', 'TEXT_MESSAGE_START', 'TEXT_MESSAGE_CONTENT', 'TOOL_CALL_START'])
+const OPENING_EVENTS = new Set<AgUiEvent['type']>([
+  'RUN_STARTED',
+  'TEXT_MESSAGE_START',
+  'TEXT_MESSAGE_CONTENT',
+  'THINKING_TEXT_MESSAGE_START',
+  'THINKING_TEXT_MESSAGE_CONTENT',
+  'TOOL_CALL_START',
+])
 
 function reduceChatEvent(state: AppState, event: AgUiEvent, at: number): AppState {
   let next = state
