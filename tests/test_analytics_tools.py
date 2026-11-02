@@ -38,6 +38,29 @@ def test_productivity_flags_the_planted_low_efficiency_band(toolkit):
     assert len(toolkit.analytics_productivity("R2", level="floor")["rows"]) == 9
 
 
+def test_productivity_separates_category_structure_from_weak_stores(toolkit):
+    result = toolkit.analytics_productivity("R2", floor="4F", top=500)
+    rows = {row["unit_code"]: row for row in result["rows"]}
+    by_reason = result["summary"]["low_efficiency_by_reason"]
+    assert sum(by_reason.values()) == result["summary"]["low_efficiency"] == len(result["low_efficiency"])
+    for row in result["low_efficiency"]:
+        weak = row["category_index"] < 0.7
+        assert row["low_reason"] == ("같은 카테고리 대비 부진" if weak else "카테고리 특성")
+    indexes = [row["category_index"] for row in result["category_weak"]]
+    assert indexes == sorted(indexes) and all(value < 0.7 for value in indexes)
+    assert result["summary"]["category_weak"] == len(result["category_weak"])
+    assert all(
+        rows[row["unit_code"]]["category_index"] == row["category_index"] for row in result["category_weak"]
+    )
+    mix = result["category_mix"]
+    rates = [m["sales_per_m2"] for m in mix]
+    assert rates == sorted(rates) and sum(m["n_units"] for m in mix) <= len(rows)
+    assert sum(m["low_efficiency"] for m in mix) == len(result["low_efficiency"])
+    assert "category_index" in result["reading_guide"]
+    floor_level = toolkit.analytics_productivity("R2", level="floor")
+    assert "category_mix" not in floor_level and "category_index" not in floor_level["rows"][0]
+
+
 def test_drivers_report_effects_per_low_unit(toolkit):
     result = toolkit.analytics_drivers("R2", floor="4F")
     assert 0 < result["r2"] <= 1 and result["label"] == "추정치"

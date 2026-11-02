@@ -1,6 +1,7 @@
-// Per-run chat model: folds the AG-UI events of one run into a conversational view (status line,
-// labelled steps, answer text). Pure and unit-tested; the reducer applies STATE_DELTA patches to the
-// UI state and passes the outcome in. Tool names, args and summaries are kept for the developer view only.
+// Per-run chat model: folds the AG-UI events of one run into a conversational view (status line, analysis
+// timeline of the agent's progress notes and labelled steps, answer text). Pure and unit-tested; the reducer
+// applies STATE_DELTA patches to the UI state and passes the outcome in. Tool names, args and summaries are
+// kept for the developer view only.
 import type { AgUiEvent } from '../types/api'
 import { flowModeLabel } from './flow'
 import { floorLabel, withEuro } from './format'
@@ -9,10 +10,13 @@ import { parsePointer, touchedKeys, type PatchOperation } from './jsonPatch'
 /** thinking -> working -> answering -> done | error (stopped = cancelled by the user). */
 export type RunStatus = 'thinking' | 'working' | 'answering' | 'done' | 'error' | 'stopped'
 export type StepStatus = 'running' | 'done' | 'error'
+/** tool = a tool call or a UI change; note = the agent's progress note (its plan, or why it changes approach). */
+export type StepKind = 'tool' | 'note'
 
 export interface RunStep {
   id: string
-  /** User-facing Korean label. */
+  kind: StepKind
+  /** User-facing Korean label; for notes the note text streamed so far. */
   label: string
   /** backend = event label, fallback = local tool-name table, ui = described from the applied UI patch. */
   labelSource: 'backend' | 'fallback' | 'ui'
@@ -21,6 +25,10 @@ export interface RunStep {
   /** Empty for UI changes that arrived without a tool call. */
   toolName: string
   args: unknown
+  /** How the step computes its answer (backend `method`), one Korean sentence. */
+  method: string | null
+  /** What the finished step found (backend `result`), one Korean line. */
+  result: string | null
   summary: string | null
   status: StepStatus
   /** Top-level UI state keys changed by STATE_DELTA while this step ran. */
@@ -36,6 +44,7 @@ export interface ChatRun {
   id: string
   runId: string | null
   status: RunStatus
+  /** Tool steps and the agent's progress notes, in arrival order. */
   steps: RunStep[]
   messageIds: string[]
   /** Assistant answer (Markdown subset, rendered by RichText). */
@@ -299,6 +308,7 @@ function toolStart(run: ChatRun, event: Extract<AgUiEvent, { type: 'TOOL_CALL_ST
         label,
         labelSource: event.label ? 'backend' : step.labelSource,
         args: event.args ?? step.args,
+        method: event.method ?? step.method,
         parentId: event.parent_tool_call_id ?? step.parentId,
         agent: event.agent ?? step.agent,
       }),
@@ -306,12 +316,15 @@ function toolStart(run: ChatRun, event: Extract<AgUiEvent, { type: 'TOOL_CALL_ST
   }
   const step: RunStep = {
     id,
+    kind: 'tool',
     label: event.label ?? toolLabel(event.tool_name),
     labelSource: event.label ? 'backend' : 'fallback',
     parentId: event.parent_tool_call_id ?? null,
     agent: event.agent ?? null,
     toolName: event.tool_name,
     args: event.args,
+    method: event.method ?? null,
+    result: null,
     summary: null,
     status: 'running',
     patchKeys: [],
@@ -330,12 +343,15 @@ function toolEnd(run: ChatRun, event: Extract<AgUiEvent, { type: 'TOOL_CALL_END'
     // END without START: record it as a finished step.
     const step: RunStep = {
       id: event.tool_call_id || `call-${run.steps.length + 1}`,
+      kind: 'tool',
       label: event.label ?? UNKNOWN_TOOL_LABEL,
       labelSource: event.label ? 'backend' : 'fallback',
       parentId: null,
       agent: null,
       toolName: '',
       args: undefined,
+      method: event.method ?? null,
+      result: event.result ?? null,
       summary: event.summary ?? null,
       status: failed ? 'error' : 'done',
       patchKeys: [],
@@ -355,6 +371,8 @@ function toolEnd(run: ChatRun, event: Extract<AgUiEvent, { type: 'TOOL_CALL_END'
         status,
         label: event.label ?? s.label,
         labelSource: event.label ? 'backend' : s.labelSource,
+        method: event.method ?? s.method,
+        result: event.result ?? s.result,
         summary: event.summary ?? s.summary,
         error: failed && !s.error ? (event.summary ?? '실패') : s.error,
         endedAt: at,
@@ -388,12 +406,15 @@ function stateDelta(run: ChatRun, ops: PatchOperation[], ctx: FoldContext): Chat
   }
   const step: RunStep = {
     id: `ui-${run.steps.length + 1}`,
+    kind: 'tool',
     label: describeUiChange(null, ops) ?? '화면 바꾸기',
     labelSource: 'ui',
     parentId: null,
     agent: null,
     toolName: '',
     args: undefined,
+    method: null,
+    result: null,
     summary: null,
     status: error ? 'error' : 'done',
     patchKeys: keys,
@@ -403,6 +424,51 @@ function stateDelta(run: ChatRun, ops: PatchOperation[], ctx: FoldContext): Chat
     endedAt: ctx.at,
   }
   return { ...run, steps: [...run.steps, step], status: run.status === 'thinking' ? 'working' : run.status }
+}
+
+// Notes get their own id space so that they never collide with tool call ids.
+const noteId = (messageId: string) => `note:${messageId}`
+
+/**
+ * A progress note (THINKING_TEXT_MESSAGE_*): the agent's plan sentence, shown in the analysis timeline and never
+ * in the answer. Like a tool call it means that the agent is working, so the run becomes 'working'.
+ */
+function noteStart(run: ChatRun, messageId: string, parentId: string | null, agent: string | null, at: number): ChatRun {
+  const id = messageId ? noteId(messageId) : `note-${run.steps.length + 1}`
+  if (run.steps.some((s) => s.id === id)) return run
+  const note: RunStep = {
+    id,
+    kind: 'note',
+    label: '',
+    labelSource: 'backend',
+    parentId,
+    agent,
+    toolName: '',
+    args: undefined,
+    method: null,
+    result: null,
+    summary: null,
+    status: 'done',
+    patchKeys: [],
+    patchError: null,
+    error: null,
+    startedAt: at,
+    endedAt: at,
+  }
+  return { ...run, steps: [...run.steps, note], status: workingStatus(run) }
+}
+
+function noteContent(run: ChatRun, messageId: string, delta: string, at: number): ChatRun {
+  if (!delta) return run
+  // Without a message id the delta continues the latest note; CONTENT without START starts a note.
+  let next = run
+  let index = messageId ? run.steps.findIndex((s) => s.id === noteId(messageId)) : lastIndexWhere(run.steps, (s) => s.kind === 'note')
+  if (index < 0) {
+    next = noteStart(run, messageId, null, null, at)
+    index = next.steps.length - 1
+  }
+  const note = next.steps[index]
+  return { ...next, steps: replaceStep(next, index, { ...note, label: note.label + delta }) }
 }
 
 function withMessage(run: ChatRun, messageId: string): ChatRun {
@@ -452,6 +518,12 @@ export function foldRunEvent(run: ChatRun, event: AgUiEvent, ctx: FoldContext): 
     }
     case 'TEXT_MESSAGE_END':
       return run
+    case 'THINKING_TEXT_MESSAGE_START':
+      return noteStart(run, event.message_id, event.parent_tool_call_id ?? null, event.agent ?? null, ctx.at)
+    case 'THINKING_TEXT_MESSAGE_CONTENT':
+      return noteContent(run, event.message_id, event.delta, ctx.at)
+    case 'THINKING_TEXT_MESSAGE_END':
+      return run
     case 'TOOL_CALL_START':
       return toolStart(run, event, ctx.at)
     case 'TOOL_CALL_END':
@@ -469,19 +541,52 @@ export function foldRunEvent(run: ChatRun, event: AgUiEvent, ctx: FoldContext): 
 
 // --- view helpers ------------------------------------------------------------------------------
 
-/** The live status line: null once the answer streams or the run ended. */
+/** Text of the latest top-level note (the notes of a finished specialist are no longer current). */
+function latestNoteText(run: ChatRun): string | null {
+  const ids = new Set(run.steps.map((s) => s.id))
+  for (let i = run.steps.length - 1; i >= 0; i -= 1) {
+    const step = run.steps[i]
+    if (step.kind !== 'note' || (step.parentId !== null && ids.has(step.parentId))) continue
+    const text = step.label.trim()
+    if (text) return text
+  }
+  return null
+}
+
+/**
+ * The live status line: the running step ("parent · child" when nested), else the agent's latest note, else
+ * "생각하는 중…". Null once the answer streams or the run ended.
+ */
 export function runStatusText(run: ChatRun): string | null {
   if (!isRunActive(run) || run.status === 'answering') return null
   const index = lastIndexWhere(run.steps, (s) => s.status === 'running')
-  if (index < 0) return THINKING_LABEL
+  if (index < 0) return latestNoteText(run) ?? THINKING_LABEL
   const running = run.steps[index]
   const parent = running.parentId ? run.steps.find((s) => s.id === running.parentId) : undefined
   return parent ? `${parent.label} · ${running.label}` : running.label
 }
 
-/** Label shown in the finished step list ("작업 중" reads oddly once a step is done). */
+/** Label shown in the step list ("작업 중" reads oddly once a step is done); notes show their text. */
 export function stepDisplayLabel(step: RunStep): string {
+  if (step.kind === 'note') return step.label.trim()
   return step.status !== 'running' && step.labelSource === 'fallback' && step.label === UNKNOWN_TOOL_LABEL ? '기타 작업' : step.label
+}
+
+/** Result line of a finished step; null when there is none or it only repeats the label ("매장 5곳 강조"). */
+export function stepResultText(step: RunStep): string | null {
+  const result = step.result?.trim()
+  if (step.kind !== 'tool' || step.status === 'running' || !result) return null
+  return step.label.includes(result) ? null : result
+}
+
+/** Tool steps (tool calls and UI changes) without the agent's notes. */
+export function toolSteps(run: ChatRun): RunStep[] {
+  return run.steps.filter((s) => s.kind === 'tool')
+}
+
+/** Items of the analysis timeline in arrival order: tool steps and notes (notes without text are left out). */
+export function timelineSteps(steps: readonly RunStep[]): RunStep[] {
+  return steps.filter((s) => s.kind === 'tool' || s.label.trim() !== '')
 }
 
 export interface StepNode {
@@ -512,9 +617,9 @@ export function formatElapsed(ms: number): string {
   return s ? `${m}분 ${s}초` : `${m}분`
 }
 
-/** Disclosure summary: "작업 과정 보기 · 4단계 · 23초" (time only once the run ended). */
+/** Disclosure summary: "분석 과정 보기 · 4단계 · 23초" (notes are not counted; time only once the run ended). */
 export function stepsSummaryText(run: ChatRun): string {
-  const parts = ['작업 과정 보기', `${run.steps.length}단계`]
+  const parts = ['분석 과정 보기', `${toolSteps(run).length}단계`]
   if (run.endedAt !== null) parts.push(formatElapsed(run.endedAt - run.startedAt))
   return parts.join(' · ')
 }

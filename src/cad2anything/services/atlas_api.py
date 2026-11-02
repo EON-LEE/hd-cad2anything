@@ -442,6 +442,7 @@ def create_api(
                     "id": alt["alt_id"],
                     "rev_id": alt.get("rev_id"),
                     "summary": alt["summary"],
+                    "search_status": alt.get("search_status"),
                     "moves": alt["moves"],
                     # Expected annual sales in 억원 so the UI can show compact objective values.
                     "objective_before": round(before / 1e8, 2),
@@ -463,7 +464,7 @@ def create_api(
                     "explanations": alt["explanations"],
                 }
             )
-        keys = ("rev", "fit_rev", "period", "constraints", "label", "caveats", "note")
+        keys = ("rev", "fit_rev", "period", "constraints", "label", "search", "caveats", "note")
         return {key: result.get(key) for key in keys} | {"alternatives": alternatives}
 
     @app.get("/api/relayout/briefs")

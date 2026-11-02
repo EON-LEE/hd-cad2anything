@@ -33,6 +33,10 @@ from cad2anything.analytics.prep import (
 
 LEVELS = ("unit", "zone", "floor", "category")
 LOW_SHARE = 0.10
+MIN_CATEGORY_PEERS = 3
+"""Fewest units of a category for a meaningful ``category_index`` (unit vs. category median)."""
+CATEGORY_WEAK_INDEX = 0.7
+"""``category_index`` below this marks a store that is weak for its category (30%+ below the median)."""
 ESTIMATE_LABEL = "추정치"
 CAUSAL_CAVEAT = "관측 데이터의 상관관계에 기반한 추정치이며 인과 효과로 해석하면 안 됩니다."
 UNZONED = "UNZONED"
@@ -278,7 +282,10 @@ def space_productivity(
     (sales x commission rate), ``gmrof`` (commission revenue per m2), ``percentile`` (store-wide rank of
     sales per m2, 0-100), ``floor_percentile`` (unit/zone) and ``low_efficiency`` (the ceil(10% x n)
     lowest sales per m2 within each floor for unit/zone, across all groups for floor/category; groups with
-    fewer than two rows are never flagged).
+    fewer than two rows are never flagged). Units also get ``category_index``: sales per m2 divided by the
+    store-wide median of units in the same category (NaN when the category has fewer than
+    ``MIN_CATEGORY_PEERS`` units). ``low_efficiency`` mixes category structure (categories with low sales
+    per m2 everywhere) with weak stores; ``category_index`` separates the latter.
 
     Units come from ``unit_features`` (occupied units, even without sales) plus any unit with sales in the
     period. Unit brand/category follow the brand with the highest gross sales in the period.
@@ -306,6 +313,12 @@ def space_productivity(
             _percentile
         )
     table["low_efficiency"] = bottom_share_flags(table, "sales_per_m2", group, keys, low_share)
+    if level == "unit":
+        by_category = table.groupby("category")["sales_per_m2"]
+        peers = by_category.transform("count")
+        table["category_index"] = (table["sales_per_m2"] / by_category.transform("median")).where(
+            peers >= MIN_CATEGORY_PEERS
+        )
     if "category" in table:
         table["category_name"] = table["category"].map(
             lambda c: category_name(c) if isinstance(c, str) else None
@@ -322,7 +335,8 @@ def space_productivity(
         "category": ["category", "category_name", "n_units"],
     }[level]
     rank_cols = ["percentile", "floor_percentile"] if level in ("unit", "zone") else ["percentile"]
-    result = table[[*ordered, *_METRIC_COLUMNS, *rank_cols, "low_efficiency"]].reset_index(drop=True)
+    extra = ["category_index"] if level == "unit" else []
+    result = table[[*ordered, *_METRIC_COLUMNS, *rank_cols, "low_efficiency", *extra]].reset_index(drop=True)
     lo, hi = period_bounds(start, end)
     result.attrs["level"] = level
     result.attrs["start"] = str(lo) if lo is not None else None

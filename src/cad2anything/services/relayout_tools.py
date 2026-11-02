@@ -155,6 +155,26 @@ def _more_less(value: Any) -> str:
     return f"연 {_krw(abs(number))} {'많아요' if number >= 0 else '적어요'}"
 
 
+def _search_note(engine: list[Any]) -> dict[str, Any]:
+    """How the alternatives were searched and whether ALT-1 is proven optimal."""
+    if not engine:
+        return {"status": None, "net_upper_bound_krw": None, "note": None}
+    first = engine[0]
+    notes = {
+        "optimal": "정수계획(CP-SAT)으로 풀어 ALT-1보다 순효과가 큰 배치가 없음을 확인했어요.",
+        "feasible": (
+            "정수계획(CP-SAT)이 제한 시간 안에 최적 증명을 끝내지 못했어요. 이론상 최대 순효과는 연 "
+            f"{_signed_krw(first.net_upper_bound_krw)}이에요."
+        ),
+        "heuristic": "탐색 알고리즘이 찾은 가장 좋은 배치예요. 최적인지는 증명하지 않았어요.",
+    }
+    return {
+        "status": first.search_status,
+        "net_upper_bound_krw": first.net_upper_bound_krw,
+        "note": notes.get(first.search_status),
+    }
+
+
 def _num(value: Any) -> float | int:
     """Whole numbers as int (2 weeks rather than 2.0 weeks)."""
     number = float(value)
@@ -1222,6 +1242,7 @@ class RelayoutTools:
         candidates: list[tuple[str, dict[str, str | None], Any]] = [("ALT-0", setup["start"], None)]
         candidates += [(alt.alt_id, alt.assignment, alt) for alt in engine]
         keep: set[str] = set()
+        best_net: float | None = None
         for alt_id, final, alt in candidates:
             final_score = baseline_score if alt is None else scorer.score({u: final.get(u) for u in scope})
             changes = self._changes(setup, final, alt.moves if alt else [], final_score, current_score)
@@ -1265,6 +1286,15 @@ class RelayoutTools:
                     f"{_krw(cost)}을 빼면 순효과는 연 {_signed_krw(kpi['net_krw'])}이에요. 기대 매출은 기준안보다 "
                     f"{_more_less(kpi['sales_delta_krw'])}, 지금보다 {_more_less(kpi['vs_current_sales_krw'])}."
                 )
+                if best_net is None:
+                    best_net = kpi["net_krw"]
+                    if alt.search_status == "optimal":
+                        summary += " 같은 조건에서 순효과가 이보다 큰 배치는 없어요(최적해)."
+                elif engine[0].search_status == "optimal":
+                    summary += (
+                        f" ALT-1과 겹치는 이동을 줄인 대안이라 순효과는 ALT-1보다 연 "
+                        f"{_krw(max(0.0, best_net - kpi['net_krw']))} 작아요."
+                    )
             rev_id = f"{brief_id}-A{alt_id.split('-')[-1]}"
             self._save_alternative(brief, alt_id, rev_id, changes)
             keep.add(rev_id)
@@ -1273,6 +1303,7 @@ class RelayoutTools:
                     "alt_id": alt_id,
                     "rev_id": rev_id,
                     "summary": summary,
+                    "search_status": alt.search_status if alt else None,
                     "kpi": kpi,
                     "changes": changes,
                     "constraints": [
@@ -1302,6 +1333,7 @@ class RelayoutTools:
                     "note": "퇴점·입점만 반영한 기준안",
                 },
                 "alternatives": results,
+                "search": _search_note(engine),
                 "unplaced": setup["unplaced"],
                 "caveats": caveats,
                 "label": "추정치",

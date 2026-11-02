@@ -158,14 +158,19 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     for (const raw of ['analytics_productivity', 'consult_specialist', 'ui_show_heatmap', '화면 갱신', '"ok"']) {
       expect(log().textContent).not.toContain(raw)
     }
-    // Collapsed steps above the answer; expanded they show labels with nested specialist calls.
-    const toggle = within(log()).getByRole('button', { name: /^작업 과정 보기 · 8단계 · / })
+    // Collapsed analysis above the answer; expanded it shows the plan note, labels with their method and result,
+    // and nested specialist calls and notes.
+    const toggle = within(log()).getByRole('button', { name: /^분석 과정 보기 · 8단계 · / })
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(within(log()).queryByText('효율 저하 원인 분석')).toBeNull()
     fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('true')
-    expect(within(log()).getByText('공간 생산성 전문 에이전트에게 확인')).toBeTruthy()
+    expect(within(log()).getByText('3층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요.')).toBeTruthy()
+    expect(within(log()).getByText('공간 생산성 분석 에이전트에게 확인')).toBeTruthy()
     expect(within(log()).getByText('효율 저하 원인 분석').closest('ol')?.classList.contains('nested')).toBe(true)
+    expect(within(log()).getByText('먼저 ㎡당 매출로 하위 매장을 찾고 원인 후보를 좁혀 볼게요.').closest('ol')?.classList.contains('nested')).toBe(true)
+    expect(within(log()).getByText('결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요')).toBeTruthy()
+    expect(within(log()).getByText(/^매장 19곳 중 저효율 \d+곳 · 가장 낮은 곳 /).textContent).toMatch(/^→결과: 매장 19곳/)
     expect(within(log()).getByText('저효율 매장 2곳 강조')).toBeTruthy()
     expect(within(log()).getAllByRole('img', { name: '완료' })).toHaveLength(8)
     // Technical details only on demand.
@@ -229,7 +234,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     fireEvent.click(await screen.findByRole('button', { name: 'VIP 고객 한 명의 쇼핑 동선을 보여줘' }))
     const journeyCard = await screen.findByRole('region', { name: '40대 여성 VIP 고객의 쇼핑 동선' })
     await waitFor(() => expect(log().textContent).toContain('결제 기록의 순서로 추정한 경로'))
-    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 3단계 · / })).toBeTruthy()
+    expect(within(log()).getByRole('button', { name: /^분석 과정 보기 · 3단계 · / })).toBeTruthy()
 
     // Card: summary chips, the timeline with floor changes, the caveat.
     const chips = within(within(journeyCard).getByRole('list', { name: '동선 요약' })).getAllByRole('listitem')
@@ -283,7 +288,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     fireEvent.click(await screen.findByRole('button', { name: '정문에서 3층까지 가는 길 알려줘' }))
     const box = await screen.findByRole('region', { name: 'ENT-1 정문 → Cafe Halune(3F-C05)' })
     await waitFor(() => expect(log().textContent).toContain('통로망 최단 경로로 계산한 거리라서'))
-    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 2단계 · / })).toBeTruthy()
+    expect(within(log()).getByRole('button', { name: /^분석 과정 보기 · 2단계 · / })).toBeTruthy()
 
     // Box: eyebrow, summary chips, the floors on the way and the caveat.
     expect(box.textContent).toContain('길 찾기')
@@ -337,7 +342,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     fireEvent.click(await screen.findByRole('button', { name: '주말 팝업 어디가 좋아?' }))
     const box = await screen.findByRole('region', { name: '전체 고객 기준 팝업 후보(주말)' })
     await waitFor(() => expect(log().textContent).toContain('팝업 후보 5곳'))
-    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 2단계 · / })).toBeTruthy()
+    expect(within(log()).getByRole('button', { name: /^분석 과정 보기 · 2단계 · / })).toBeTruthy()
 
     // Box: eyebrow, summary chips, the floors with data and the ranked candidates.
     expect(box.querySelector('.flow-eyebrow')?.textContent).toBe('팝업 후보')
@@ -388,7 +393,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     expect(within(screen.getByRole('complementary', { name: '범례' })).queryByRole('heading', { name: '팝업 후보' })).toBeNull()
   })
 
-  it('shows one live status line while working, then streams the answer', async () => {
+  it('shows the open timeline and one live status line while working, then streams the answer', async () => {
     const stream = controlledStream()
     await renderWithStream(stream.streamChat)
     const status = await within(log()).findByRole('status')
@@ -402,25 +407,31 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     await stream.push({ type: 'TOOL_CALL_START', tool_call_id: 'n1', tool_name: 'analytics_productivity', parent_tool_call_id: 'c1' })
     await waitFor(() => expect(within(log()).getByRole('status').textContent).toBe('공간 생산성 전문 에이전트에게 확인 · 공간 생산성 계산'))
     expect(screen.getByRole('button', { name: '중지' })).toBeTruthy()
-    // No steps disclosure while only the status line is live.
-    expect(within(log()).queryByRole('button', { name: /작업 과정 보기/ })).toBeNull()
+    // While working the analysis timeline is open above the status line; there is no disclosure yet.
+    expect(within(log()).queryByRole('button', { name: /분석 과정 보기/ })).toBeNull()
+    const timeline = within(log()).getByRole('list', { name: '분석 과정' })
+    expect(within(timeline).getByText('공간 생산성 계산').closest('ol')?.classList.contains('nested')).toBe(true)
+    expect(within(timeline).getAllByRole('img', { name: '진행 중' })).toHaveLength(2)
+    expect(timeline.compareDocumentPosition(within(log()).getByRole('status')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await stream.push(
       { type: 'TOOL_CALL_END', tool_call_id: 'n1' },
       { type: 'TOOL_CALL_END', tool_call_id: 'c1' },
       { type: 'TEXT_MESSAGE_START', message_id: 'm' },
       { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '먼저 3층과 비교해 볼게요.' },
     )
-    // Text streams: the status line is gone and a cursor follows the text.
+    // Text streams: the status line is gone, the timeline is folded and a cursor follows the text.
     await waitFor(() => expect(within(log()).queryByRole('status')).toBeNull())
     expect(log().querySelector('.answer .cursor')).not.toBeNull()
-    expect(within(log()).getByRole('button', { name: '작업 과정 보기 · 2단계' })).toBeTruthy()
+    expect(within(log()).queryByRole('list', { name: '분석 과정' })).toBeNull()
+    expect(within(log()).getByRole('button', { name: '분석 과정 보기 · 2단계' })).toBeTruthy()
     // A tool call between two text parts: the live line comes back below the text, without a cursor.
     await stream.push({ type: 'TOOL_CALL_START', tool_call_id: 'c2', tool_name: 'ui_show_heatmap', label: '4층 도면에 ㎡당 매출 색칠' })
     const between = await within(log()).findByRole('status')
     expect(between.textContent).toBe('4층 도면에 ㎡당 매출 색칠')
     expect(log().querySelector('.answer')!.compareDocumentPosition(between) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(log().querySelector('.answer .cursor')).toBeNull()
-    expect(within(log()).getByRole('button', { name: '작업 과정 보기 · 3단계' })).toBeTruthy()
+    expect(within(log()).queryByRole('list', { name: '분석 과정' })).toBeNull()
+    expect(within(log()).getByRole('button', { name: '분석 과정 보기 · 3단계' })).toBeTruthy()
     await stream.push(
       { type: 'TOOL_CALL_END', tool_call_id: 'c2', ok: true },
       { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '\n\n' },
@@ -430,11 +441,67 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     await stream.push({ type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null)
     await waitFor(() => expect(log().querySelector('.answer .cursor')).toBeNull())
     expect([...log().querySelectorAll('.answer p')].map((p) => p.textContent)).toEqual(['먼저 3층과 비교해 볼게요.', '4층에서 효율이 낮은 매장은 두 곳이에요.'])
-    expect(within(log()).getByRole('button', { name: /^작업 과정 보기 · 3단계 · / })).toBeTruthy()
+    expect(within(log()).getByRole('button', { name: /^분석 과정 보기 · 3단계 · / })).toBeTruthy()
     expect(screen.getByRole('button', { name: '보내기' })).toBeTruthy()
     // "새 대화" clears the conversation.
     fireEvent.click(screen.getByRole('button', { name: '새 대화' }))
     expect(screen.getByRole('heading', { name: '무엇을 도와드릴까요?' })).toBeTruthy()
+  })
+
+  it('shows the plan note, methods and results while working, then folds them above the answer', async () => {
+    const stream = controlledStream()
+    await renderWithStream(stream.streamChat)
+    const plan = '4층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요.'
+    const method = '결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요'
+    const found = '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)'
+    await stream.push(
+      { type: 'RUN_STARTED', thread_id: 't', run_id: 'r' },
+      { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n1' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n1', delta: plan },
+      { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n1' },
+    )
+    // The note opens the timeline; with nothing running the status line shows it too.
+    const timeline = within(log()).getByRole('list', { name: '분석 과정' })
+    expect(within(timeline).getByText(plan)).toBeTruthy()
+    await waitFor(() => expect(within(log()).getByRole('status').textContent).toBe(plan))
+    // Only the status line is a live region, not the timeline.
+    expect(within(log()).getByRole('status').getAttribute('aria-live')).toBe('polite')
+    expect(timeline.closest('[aria-live="polite"], [aria-live="assertive"]')).toBeNull()
+
+    await stream.push({ type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics_productivity', label: '4층 공간 생산성 계산', method })
+    expect(within(timeline).getByText(method)).toBeTruthy()
+    expect(within(timeline).getByRole('img', { name: '진행 중' })).toBeTruthy()
+    await waitFor(() => expect(within(log()).getByRole('status').textContent).toBe('4층 공간 생산성 계산'))
+    await stream.push({ type: 'TOOL_CALL_END', tool_call_id: 'c1', ok: true, method, result: found })
+    expect(within(timeline).getByText(found)).toBeTruthy()
+    expect(within(timeline).getByRole('img', { name: '완료' })).toBeTruthy()
+
+    // A recoverable tool error: a failed step saying the agent retries, not a run error.
+    await stream.push(
+      { type: 'TOOL_CALL_START', tool_call_id: 'c2', tool_name: 'analytics_drivers', label: '효율 저하 원인 분석' },
+      { type: 'TOOL_CALL_END', tool_call_id: 'c2', ok: false, summary: '{"ok": false, "error": "unit_codes must be a list"}', result: '조건을 고쳐 다시 시도해요' },
+    )
+    expect(within(timeline).getByRole('img', { name: '실패' })).toBeTruthy()
+    expect(within(timeline).getByText('조건을 고쳐 다시 시도해요')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(log().textContent).not.toContain('unit_codes')
+
+    // The answer starts: the timeline folds into one line above it.
+    await stream.push(
+      { type: 'TEXT_MESSAGE_START', message_id: 'm' },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '4층에서 효율이 낮은 매장은 다섯 곳이에요.' },
+    )
+    expect(within(log()).queryByRole('list', { name: '분석 과정' })).toBeNull()
+    const toggle = within(log()).getByRole('button', { name: '분석 과정 보기 · 2단계' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(log().textContent).not.toContain(plan)
+    await stream.push({ type: 'TEXT_MESSAGE_END', message_id: 'm' }, { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null)
+    await waitFor(() => expect(screen.getByRole('button', { name: '보내기' })).toBeTruthy())
+    // Expanded, the folded timeline shows the same note, methods and results.
+    fireEvent.click(within(log()).getByRole('button', { name: /^분석 과정 보기 · 2단계 · / }))
+    const folded = within(log()).getByRole('list', { name: '분석 과정' })
+    for (const text of [plan, method, found, '조건을 고쳐 다시 시도해요']) expect(within(folded).getByText(text)).toBeTruthy()
+    expect([...log().querySelectorAll('.answer p')].map((p) => p.textContent)).toEqual(['4층에서 효율이 낮은 매장은 다섯 곳이에요.'])
   })
 
   it('shows a friendly error with the technical message folded away', async () => {
@@ -453,7 +520,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     expect(details.open).toBe(false)
     expect(details.textContent).toContain('RateLimitError')
     expect(within(alert).getByRole('button', { name: '다시 시도' })).toBeTruthy()
-    fireEvent.click(within(log()).getByRole('button', { name: /^작업 과정 보기 · 1단계/ }))
+    fireEvent.click(within(log()).getByRole('button', { name: /^분석 과정 보기 · 1단계/ }))
     expect(within(log()).getByText('공간 생산성 계산')).toBeTruthy()
     expect(log().textContent).not.toContain('analytics_productivity')
     expect(log().textContent).not.toContain('raw summary')

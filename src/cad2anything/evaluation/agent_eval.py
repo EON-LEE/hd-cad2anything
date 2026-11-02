@@ -43,6 +43,7 @@ CHECK_TYPES = (
 class CaseRun:
     case_id: str
     text: str = ""
+    notes: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     ui_actions: list[str] = field(default_factory=list)
     specialists: list[str] = field(default_factory=list)
@@ -74,6 +75,8 @@ def collect(case_id: str, events: Iterable[dict[str, Any]]) -> CaseRun:
                 run.state_paths.extend(str(op.get("path")) for op in event.get("delta", []))
             elif kind == "TEXT_MESSAGE_CONTENT":
                 run.text += str(event.get("delta", ""))
+            elif kind == "THINKING_TEXT_MESSAGE_CONTENT":
+                run.notes.append(str(event.get("delta", "")))
             elif kind == "RUN_ERROR":
                 run.error = str(event.get("message"))
     except Exception as exc:  # the runtime re-raises after RUN_ERROR; keep evaluating other cases
@@ -98,7 +101,9 @@ def _check(kind: str, expected: Any, run: CaseRun) -> bool:
     if kind == "answer_all":
         return all(text in run.text for text in expected)
     if kind == "answer_none":
-        return not any(text in run.text for text in expected)
+        # Progress notes are shown to users as well, so they must not leak tool names either.
+        visible = "\n".join([run.text, *run.notes])
+        return not any(text in visible for text in expected)
     if kind == "consult_not_regex":
         pattern = re.compile(expected["pattern"])
         agents = set(expected.get("agents", []))

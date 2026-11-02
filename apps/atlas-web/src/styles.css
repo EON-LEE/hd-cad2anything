@@ -838,12 +838,14 @@ th {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
   min-height: 22px;
   font-size: 13px;
   color: var(--muted);
 }
 
 .run-status-dots {
+  flex: 0 0 auto;
   display: inline-flex;
   gap: 3px;
 }
@@ -877,7 +879,15 @@ th {
   }
 }
 
+/* A long note in the status line is cut to two lines; the timeline above shows it in full. */
 .run-status-text {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   background: linear-gradient(90deg, #6b7280 0%, #6b7280 40%, #111827 50%, #6b7280 60%, #6b7280 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -895,7 +905,8 @@ th {
   }
 }
 
-/* Collapsed work steps above the answer. */
+/* Analysis timeline (the agent's notes and steps): open while the agent works, folded above the answer once it
+   streams. */
 .run-steps {
   align-self: stretch;
 }
@@ -931,10 +942,16 @@ th {
   transform: rotate(45deg);
 }
 
-.run-steps-body {
+.run-steps-body,
+.run-timeline {
   margin: 6px 0 2px 8px;
   padding: 2px 0 4px 12px;
   border-left: 2px solid #e5e7eb;
+}
+
+.run-timeline {
+  align-self: stretch;
+  margin-top: 0;
 }
 
 .step-list {
@@ -942,8 +959,10 @@ th {
   margin: 0;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 5px;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .step-list.nested {
@@ -956,6 +975,63 @@ th {
   gap: 8px;
   color: #374151;
   line-height: 1.45;
+}
+
+.step-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.step-method {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.step-result {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.step-result.after {
+  margin: 4px 0 0 24px;
+}
+
+.step-result-arrow {
+  margin-right: 4px;
+  color: var(--muted);
+}
+
+/* The agent's progress note: muted text with a small dot instead of a status icon. */
+.step-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.step-note-mark {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 18px;
+}
+
+.step-note-mark::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c4c9d1;
+}
+
+.step-note-text {
+  min-width: 0;
 }
 
 .step-icon {

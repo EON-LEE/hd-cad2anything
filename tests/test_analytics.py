@@ -11,6 +11,7 @@ from cad2anything.analytics import (
     driver_decomposition,
     enrich_transactions,
     floor_transitions,
+    kpi,
     space_productivity,
     time_patterns,
     top_partners,
@@ -632,7 +633,7 @@ def store():
     return synthetic_store()
 
 
-def test_synthetic_store_net_sales_and_productivity(store):
+def test_synthetic_store_net_sales_and_productivity(store, monkeypatch):
     enriched, transactions, features, _, tenancies = store
 
     assert 2_500 <= len(transactions) <= 4_000
@@ -645,6 +646,17 @@ def test_synthetic_store_net_sales_and_productivity(store):
     assert table["sales"].sum() == pytest.approx(expected)
     assert table["txns"].sum() == pytest.approx(50.0 * (~returns).sum())
     assert table["low_efficiency"].sum() == 3  # one per floor (4 units each)
+    counts = table.groupby("category")["unit_code"].transform("count")
+    assert (counts < 3).all() and table["category_index"].isna().all()  # too few peers per category
+    monkeypatch.setattr(kpi, "MIN_CATEGORY_PEERS", 2)
+    table = space_productivity(enriched, features, tenancies)
+    index = table["category_index"]
+    assert index[counts < 2].isna().all() and index[counts >= 2].notna().any()
+    for _, part in table[counts >= 2].groupby("category"):
+        assert part["category_index"].median() == pytest.approx(1.0)
+        assert (part["category_index"] * part["sales_per_m2"].median()).tolist() == pytest.approx(
+            part["sales_per_m2"].tolist()
+        )
 
 
 def test_synthetic_store_planted_patterns(store):

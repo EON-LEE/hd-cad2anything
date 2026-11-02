@@ -108,8 +108,79 @@ describe('AG-UI decoding', () => {
 
   it('drops unknown or malformed events', () => {
     expect(normalizeAgUiEvent({ type: 'SOMETHING_ELSE' })).toBeNull()
+    expect(normalizeAgUiEvent({ type: 'THINKING_START' })).toBeNull()
     expect(normalizeAgUiEvent({ type: 'STATE_DELTA', delta: 'not-an-array' })).toBeNull()
     expect(normalizeAgUiEvent('text')).toBeNull()
+  })
+
+  it('decodes progress notes in snake_case and camelCase and drops unknown fields', () => {
+    expect(normalizeAgUiEvent({ type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n1', role: 'assistant' })).toStrictEqual({
+      type: 'THINKING_TEXT_MESSAGE_START',
+      message_id: 'n1',
+    })
+    expect(
+      normalizeAgUiEvent({ type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n2', parent_tool_call_id: 'c1', agent: ' space-productivity-analyst ' }),
+    ).toStrictEqual({ type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n2', parent_tool_call_id: 'c1', agent: 'space-productivity-analyst' })
+    expect(normalizeAgUiEvent({ type: 'THINKING_TEXT_MESSAGE_START', messageId: 'n3', parentToolCallId: 'c1', agent: '' })).toStrictEqual({
+      type: 'THINKING_TEXT_MESSAGE_START',
+      message_id: 'n3',
+      parent_tool_call_id: 'c1',
+    })
+    expect(normalizeAgUiEvent({ type: 'THINKING_TEXT_MESSAGE_CONTENT', messageId: 'n3', delta: '4층 매출부터 볼게요.', extra: 1 })).toStrictEqual({
+      type: 'THINKING_TEXT_MESSAGE_CONTENT',
+      message_id: 'n3',
+      delta: '4층 매출부터 볼게요.',
+    })
+    expect(normalizeAgUiEvent({ type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n3', parent_tool_call_id: 'c1' })).toStrictEqual({
+      type: 'THINKING_TEXT_MESSAGE_END',
+      message_id: 'n3',
+    })
+    expect(decodeAgUiMessage({ event: 'THINKING_TEXT_MESSAGE_CONTENT', data: '{"messageId":"n4","delta":"방법을 바꿔 볼게요."}' })).toEqual([
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n4', delta: '방법을 바꿔 볼게요.' },
+    ])
+  })
+
+  it('keeps the method and result of tool calls', () => {
+    const method = '결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요'
+    expect(
+      normalizeAgUiEvent({ type: 'TOOL_CALL_START', toolCallId: 'c1', toolCallName: 'analytics_productivity', label: '4층 공간 생산성 계산', method: ` ${method} `, extra: true }),
+    ).toStrictEqual({ type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics_productivity', args: undefined, label: '4층 공간 생산성 계산', method })
+    expect(
+      normalizeAgUiEvent({
+        type: 'TOOL_CALL_END',
+        tool_call_id: 'c1',
+        summary: '{"ok": true}',
+        method,
+        result: '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)',
+        ok: true,
+        extra: 'x',
+      }),
+    ).toStrictEqual({
+      type: 'TOOL_CALL_END',
+      tool_call_id: 'c1',
+      summary: '{"ok": true}',
+      method,
+      result: '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)',
+      ok: true,
+    })
+    // Null, empty or non-text values mean "nothing to say".
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_START', tool_call_id: 'c2', tool_name: 'x', method: null })).toStrictEqual({
+      type: 'TOOL_CALL_START',
+      tool_call_id: 'c2',
+      tool_name: 'x',
+      args: undefined,
+    })
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_END', toolCallId: 'c2', method: ' ', result: null, ok: false })).toStrictEqual({
+      type: 'TOOL_CALL_END',
+      tool_call_id: 'c2',
+      summary: undefined,
+      ok: false,
+    })
+    expect(normalizeAgUiEvent({ type: 'TOOL_CALL_END', tool_call_id: 'c3', result: { text: 'x' } })).toStrictEqual({
+      type: 'TOOL_CALL_END',
+      tool_call_id: 'c3',
+      summary: undefined,
+    })
   })
 
   it('keeps user-facing labels, nesting and outcome fields of tool calls', () => {

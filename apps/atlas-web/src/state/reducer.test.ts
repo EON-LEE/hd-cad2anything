@@ -353,6 +353,17 @@ describe('appReducer: chat runs', () => {
     expect(state.chat.items.map((i) => i.kind)).toEqual(['run'])
     expect(lastRun(state)).toMatchObject({ status: 'done', answer: '안내', steps: [] })
     expect(appReducer(state, { type: 'chat/reset' }).chat).toEqual({ threadId: null, runId: null, running: false, items: [] })
+
+    // A progress note opens a run too; it is shown as a note, never as answer text.
+    const noted = run(createAppState(ui), [
+      { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n', delta: '변경 도면부터 확인할게요.' },
+      { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n' },
+    ])
+    expect(noted.chat.running).toBe(true)
+    expect(lastRun(noted)).toMatchObject({ status: 'working', answer: '', messageIds: [] })
+    expect(lastRun(noted).steps.map((s) => [s.kind, s.label])).toEqual([['note', '변경 도면부터 확인할게요.']])
+    expect(run(createAppState(ui), [{ type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n' }]).chat.items).toEqual([])
   })
 
   it('applies user-originated patches through the same path', () => {

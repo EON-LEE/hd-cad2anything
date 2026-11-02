@@ -31,7 +31,7 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | registry | `registry_run` | `generator`, `rev`, `floors?` | 산출물 기록(상태, 파일, 요약, 이슈) |
 | registry | `registry_validate` | `rev`, `generator` | 검증 이슈 |
 | render | `render_adhoc_table` | `rev`, `entity_kind`, `fields`, `floor?`, `group_by?`, `title` | 즉석 표 산출물(초안)과 레지스트리 등록안 |
-| analytics | `analytics_productivity` | `rev`, `floor?`, `level?`, `start?`, `end?`, `top?` | 연환산 ㎡당 매출, 백분위, 저효율 플래그, 저효율 원인 |
+| analytics | `analytics_productivity` | `rev`, `floor?`, `level?`, `start?`, `end?`, `top?` | 연환산 ㎡당 매출, 백분위, 저효율 플래그, 저효율 원인. 매장 단위는 같은 카테고리 대비 지수, 저효율 구분(카테고리 특성·같은 카테고리 대비 부진), 카테고리 구성 |
 | analytics | `analytics_drivers` | `rev`, `floor?` | 회귀 계수, 설명력, 저효율 매장별 주요 요인(추정치) |
 | analytics | `analytics_cross_shopping` | `level?`, `focal?`, `segment?`, `start?`, `end?`, `top?`, `basket?`, `min_customers?` | lift, Jaccard, confidence |
 | analytics | `analytics_floor_transitions` | `segment?`, `start?`, `end?` | 층간 전이 행렬, 분수·샤워효과 지표 |
@@ -91,7 +91,17 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 
 ## 5. 시즌 개편 계산
 
-개편 대안은 LLM이 고르지 않는다. `relayout_plan`이 아래 최적화 문제를 결정론적 탐색(탐욕 개선 → 모의 담금질 3,000회 → 탐욕 마무리, 시드 고정)으로 푼다. 결과는 찾은 배치 중 가장 좋은 것이며 최적해를 증명하지 않는다.
+개편 대안은 LLM이 고르지 않는다. `relayout_plan`이 아래 최적화 문제를 두 단계로 푼다. 먼저 결정론적 탐색(탐욕 개선 → 모의 담금질 3,000회 → 탐욕 마무리, 시드 고정)으로 좋은 배치를 빠르게 찾는다. 다음에 같은 문제를 정수계획으로 바꿔 OR-Tools CP-SAT으로 풀고, 탐색 결과를 시작 해로 준다. 두 결과 중 목적 함수 값이 큰 배치를 쓴다. `layout_generate_alternatives`도 같은 방법을 쓴다.
+
+정수계획 결과는 `search_status`로 알린다.
+
+| 값 | 뜻 |
+|---|---|
+| `optimal` | 최적을 증명했다. ALT-1보다 순효과가 큰 배치는 없다. |
+| `feasible` | 제한 시간(결정론적 시간 10, `ATLAS_LAYOUT_EXACT_SECONDS`로 바꿈) 안에 증명을 끝내지 못했다. `net_upper_bound_krw`가 순효과 상한이다. |
+| `heuristic` | 정수계획을 쓰지 않았다(OR-Tools 없음 또는 `ATLAS_LAYOUT_EXACT=0`). 탐색이 찾은 가장 좋은 배치이며 최적을 증명하지 않는다. |
+
+CP-SAT은 정수 계수만 받으므로 금액을 100원 단위로 반올림한다. 반올림으로 생길 수 있는 오차의 최대치(브랜드 하나에 수백 원)를 상한에 더한다. 따라서 `optimal`은 "이 오차 한도보다 더 좋은 배치는 없다"는 뜻이다. 합성 데이터의 FW2026 브리프와 4층 대안 질문은 모두 `optimal`이고, 상한과 ALT-1의 차이는 10만 원 미만이며, 각각 1초 안팎에 풀린다.
 
 **입력(사람이 정함):** 개편 브리프(시즌, 적용일, 기준 개정, 대상 층, 목적, 최대 이동 수, 공사 기간, 이동 대상, 입점·퇴점 브랜드), 계약 정보(`leases`), 브랜드 카탈로그(목표 면적, 선호 층, 상충 카테고리).
 
@@ -109,7 +119,7 @@ $$\max \sum_{b} w_b \, S(b, u_b) \;-\; \sum_{b \in \text{이전}} w_b \, S(b, u_
 **절차:**
 
 1. 퇴점 브랜드를 빼고, 입점 브랜드를 가중 기대 매출이 가장 큰 빈 매장부터 넣는다. 이것이 기준안(ALT-0)이다.
-2. 기준안에서 위 문제를 풀어 대안(ALT-1~)을 만든다. 두 번째 대안부터는 앞 대안과 같은 이동에 벌점을 줘서 서로 다른 안을 낸다. 입점 브랜드의 위치 조정은 이동 수에 넣지 않는다.
+2. 기준안에서 위 문제를 풀어 대안(ALT-1~)을 만든다. 두 번째 대안부터는 앞 대안과 같은 이동에 벌점을 줘서 서로 다른 안을 낸다. 정수계획은 앞 대안과 이동 조합이 똑같은 배치를 제약으로 뺀다. ALT-1이 최적이면 뒤 대안의 순효과는 ALT-1보다 작고, 요약에 그 차이를 적는다. 입점 브랜드의 위치 조정은 이동 수에 넣지 않는다.
 3. 대안마다 기준안 대비 순효과, 목표 변화, 이전 비용, 기대 매출 변화와 범위, 지금 배치 대비 매출 변화, 제약 충족표를 계산하고 가상 개정으로 저장한다.
 
 사람은 대안 하나를 고른다(`relayout_select`). CAD팀이 그 대안대로 도면을 그려 올리면 `relayout_check_drawing`이 계획과 도면을 대조한다.

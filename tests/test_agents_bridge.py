@@ -259,12 +259,14 @@ def test_streaming_runtime_forwards_text_and_tool_progress_with_labels():
         ("TOOL_CALL_END", "f1"),
         ("TEXT_MESSAGE_START", None),
         ("TEXT_MESSAGE_CONTENT", None),
-        ("TEXT_MESSAGE_CONTENT", None),
         ("TEXT_MESSAGE_END", None),
         ("RUN_FINISHED", None),
     ]
     assert events[1]["label"] == "공간 생산성 계산" and events[2]["label"] == "4층 공간 생산성 계산"
+    assert events[1]["method"].startswith("결제 실적을 연 매출로 환산해")
     assert events[3]["label"] == "4층으로 이동" and events[5]["ok"] is True
+    assert events[5]["result"] is None  # the label already says what a UI action did
+    # A short answer is held until the response ends (it could still turn out to be a progress note).
     assert (
         "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
         == "4층 매장 중 다섯 곳이 낮아요."
@@ -287,6 +289,135 @@ def test_streaming_runtime_reports_failed_responses():
     except RuntimeError as exc:
         assert "rate limited" in str(exc)
     assert events[-1]["type"] == "RUN_ERROR"
+
+
+def _added(item):
+    return {"type": "response.output_item.added", "item": item}
+
+
+def _deltas(text, size=7):
+    return [
+        {"type": "response.output_text.delta", "delta": text[i : i + size]} for i in range(0, len(text), size)
+    ]
+
+
+def test_preamble_before_a_tool_becomes_a_progress_note_and_long_answers_stream():
+    plan = "4층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요."
+    answer = (
+        "4층에서 효율이 가장 낮은 곳은 란제리 매장 다섯 곳이에요.\n\n- Ravandre Nuit(4F-E05)가 가장 낮아요."
+    )
+    output = {
+        "rev": "R2",
+        "level": "unit",
+        "summary": {"rows": 50, "low_efficiency": 5},
+        "low_efficiency": [
+            {"unit_code": "4F-E02", "brand_name": "Merelle Nuit", "sales_per_m2": 5470000},
+            {"unit_code": "4F-E05", "brand_name": "Ravandre Nuit", "sales_per_m2": 4030000},
+        ],
+    }
+    mcp_added = {"type": "mcp_call", "id": "m1", "name": "analytics_productivity", "arguments": ""}
+    mcp_done = mcp_added | {
+        "arguments": '{"rev":"R2","floor":"4F"}',
+        "output": json.dumps(output, ensure_ascii=False),
+    }
+    failing = {
+        "type": "mcp_call",
+        "id": "m2",
+        "name": "spatial_query",
+        "arguments": '{"rev":"R2"}',
+        "output": '{"ok": false, "tool": "spatial_query", "error": "필드가 없어요"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [
+            [
+                _added({"type": "message"}),
+                *_deltas(plan),
+                _added(mcp_added),
+                {"type": "response.output_item.done", "item": mcp_done},
+                {"type": "response.output_item.done", "item": failing},
+                _added({"type": "message"}),
+                *_deltas(answer),
+                _completed([mcp_done, failing, _message(answer)]),
+            ]
+        ]
+    }
+    client = FakeClient({})
+    client.responses = FakeStreamResponses(scripted)
+    runtime = AgentRuntime(client, id_factory=lambda: "id", stream=True)
+
+    events = list(runtime.run("4층 효율 낮은 매장", {"floor": "3F"}))
+
+    types = [e["type"] for e in events]
+    note = types.index("THINKING_TEXT_MESSAGE_START")
+    assert types[note : note + 4] == [
+        "THINKING_TEXT_MESSAGE_START",
+        "THINKING_TEXT_MESSAGE_CONTENT",
+        "THINKING_TEXT_MESSAGE_END",
+        "TOOL_CALL_START",
+    ]
+    assert events[note + 1]["delta"] == plan
+    text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+    assert text == answer and plan not in text
+    assert types.count("TEXT_MESSAGE_CONTENT") > 2  # the answer streams once it is clearly an answer
+    ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
+    assert ends["m1"]["ok"] is True
+    assert ends["m1"]["result"] == "매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)"
+    assert ends["m2"]["ok"] is False and ends["m2"]["result"] == "조건을 고쳐 다시 시도해요"
+    assert ends["m2"]["method"] == "도면에서 계산한 매장 속성으로 거르고 묶어 집계해요"
+
+
+def test_specialist_preambles_are_nested_notes_and_not_part_of_its_answer():
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 MD 개편 공개 사례를 조사해줘"}',
+    }
+    floor = {"type": "function_call", "call_id": "f1", "name": "ui_set_floor", "arguments": '{"floor":"4F"}'}
+    scripted = {
+        "atlas-orchestrator": [
+            {"output": [_message("공개 사례를 먼저 찾아볼게요."), consult]},
+            {"output": [floor]},
+            {"output": [_message("국내 백화점은 시즌마다 층별 MD를 바꿔요.")]},
+        ],
+        "market-researcher": [
+            {
+                "output": [
+                    _message("백화점 개편 기사를 검색할게요."),
+                    {"type": "web_search_call", "id": "w1", "action": {"query": "백화점 MD 개편"}},
+                    _message("조사 결과: 3건"),
+                ]
+            }
+        ],
+    }
+    client = FakeClient(scripted)
+    events = list(AgentRuntime(client, id_factory=lambda: "id").run("MD 개편 사례", {}))
+
+    notes = [e for e in events if e["type"] == "THINKING_TEXT_MESSAGE_START"]
+    contents = [e["delta"] for e in events if e["type"] == "THINKING_TEXT_MESSAGE_CONTENT"]
+    assert contents == ["공개 사례를 먼저 찾아볼게요.", "백화점 개편 기사를 검색할게요."]
+    assert "parent_tool_call_id" not in notes[0]
+    assert notes[1]["parent_tool_call_id"] == "c1" and notes[1]["agent"] == "market-researcher"
+    specialist_input = client.responses.calls[2]["input"]
+    assert specialist_input[0]["output"] == "조사 결과: 3건"
+    ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
+    assert ends["c1"]["result"] == "시장 조사 에이전트의 분석을 받았어요"
+    assert ends["c1"]["method"].startswith("시장 조사 에이전트가")
+    text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+    assert text == "국내 백화점은 시즌마다 층별 MD를 바꿔요."
+
+
+def test_answer_written_before_a_last_ui_call_is_still_the_answer():
+    floor = {"type": "function_call", "call_id": "f1", "name": "ui_set_floor", "arguments": '{"floor":"4F"}'}
+    scripted = {
+        "atlas-orchestrator": [
+            {"output": [_message("4층 효율이 가장 낮아요."), floor]},
+            {"output": []},
+        ]
+    }
+    events = list(AgentRuntime(FakeClient(scripted), id_factory=lambda: "id").run("4층", {}))
+    text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+    assert text == "4층 효율이 가장 낮아요." and events[-1]["type"] == "RUN_FINISHED"
 
 
 def test_ui_show_journey_draws_the_path_and_reports_stops_to_the_model():

@@ -971,6 +971,16 @@ export type AgUiEvent =
   | { type: 'TEXT_MESSAGE_START'; message_id: string }
   | { type: 'TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
   | { type: 'TEXT_MESSAGE_END'; message_id: string }
+  /** Progress note: the agent's short plan sentence before the tool calls it announces (never answer text). */
+  | {
+      type: 'THINKING_TEXT_MESSAGE_START'
+      message_id: string
+      /** Set for notes written inside a specialist agent (the specialist's consult call). */
+      parent_tool_call_id?: string
+      agent?: string
+    }
+  | { type: 'THINKING_TEXT_MESSAGE_CONTENT'; message_id: string; delta: string }
+  | { type: 'THINKING_TEXT_MESSAGE_END'; message_id: string }
   | {
       type: 'TOOL_CALL_START'
       tool_call_id: string
@@ -978,6 +988,8 @@ export type AgUiEvent =
       args?: unknown
       /** User-facing Korean description (e.g. "4층 공간 생산성 계산"). */
       label?: string
+      /** How this step computes its answer, one Korean sentence. */
+      method?: string
       /** Set for calls made inside a specialist agent (the specialist's consult call). */
       parent_tool_call_id?: string
       agent?: string
@@ -989,6 +1001,10 @@ export type AgUiEvent =
       summary?: string
       /** Replaces the label from TOOL_CALL_START when present. */
       label?: string
+      /** Same as TOOL_CALL_START (may repeat). */
+      method?: string
+      /** What the step found, one Korean line; null or absent when there is nothing to say. */
+      result?: string | null
       ok?: boolean
     }
   | { type: 'STATE_DELTA'; delta: PatchOperation[] }

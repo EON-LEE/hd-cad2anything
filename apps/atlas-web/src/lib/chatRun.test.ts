@@ -11,9 +11,12 @@ import {
   formatElapsed,
   runStatusText,
   stepDisplayLabel,
+  stepResultText,
   stepsSummaryText,
   stepTree,
+  timelineSteps,
   toolLabel,
+  toolSteps,
   type ChatRun,
 } from './chatRun'
 
@@ -97,8 +100,14 @@ describe('chat run fold: journey example from the contract', () => {
     expect(run.steps[0]).toMatchObject({ toolName: 'analytics_customer_journey', args: { segment: 'tier:VIP' }, summary: '{"stops": 4}' })
     expect(run.answer).toBe('40대 여성 VIP 고객은 지하 1층에서 시작해 3층까지 갔어요.')
     expect(run).toMatchObject({ startedAt: 0, endedAt: 12000, error: null })
-    expect(stepsSummaryText(run)).toBe('작업 과정 보기 · 2단계 · 12초')
+    expect(stepsSummaryText(run)).toBe('분석 과정 보기 · 2단계 · 12초')
     expect(failedUiSteps(run)).toEqual([])
+    // A backend without notes, methods or results: plain tool steps, nothing extra to show.
+    expect(run.steps.map((s) => [s.kind, s.method, s.result, stepResultText(s)])).toEqual([
+      ['tool', null, null, null],
+      ['tool', null, null, null],
+    ])
+    expect(timelineSteps(run.steps)).toEqual(run.steps)
   })
 })
 
@@ -346,6 +355,159 @@ describe('chat run fold: errors and endings', () => {
     expect(formatElapsed(23_400)).toBe('23초')
     expect(formatElapsed(65_000)).toBe('1분 5초')
     expect(formatElapsed(120_000)).toBe('2분')
-    expect(stepsSummaryText(createRun('r', 0))).toBe('작업 과정 보기 · 0단계')
+    expect(stepsSummaryText(createRun('r', 0))).toBe('분석 과정 보기 · 0단계')
+  })
+})
+
+describe('chat run fold: progress notes, methods and results', () => {
+  const PRODUCTIVITY = '결제 실적을 연 매출로 환산해 ㎡당 매출을 구하고 층 하위 10%를 저효율로 봐요'
+  const PLAN = '4층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요.'
+  const events: AgUiEvent[] = [
+    { type: 'RUN_STARTED', thread_id: 't', run_id: 'r' },
+    { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n1' },
+    { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n1', delta: '4층 매장의 ㎡당 매출을 계산하고 ' },
+    { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n1', delta: '하위 매장의 원인을 나눠 볼게요.' },
+    { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n1' },
+    {
+      type: 'TOOL_CALL_START',
+      tool_call_id: 'c1',
+      tool_name: 'consult_specialist',
+      label: '공간 생산성 분석 에이전트에게 확인',
+      method: '공간 생산성 분석 에이전트가 여러 지표로 원인을 깊게 분석해요',
+    },
+    { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n2', parent_tool_call_id: 'c1', agent: 'space-productivity-analyst' },
+    { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n2', delta: '먼저 ㎡당 매출로 하위 매장을 찾을게요.' },
+    { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n2' },
+    { type: 'TOOL_CALL_START', tool_call_id: 'p1', tool_name: 'analytics_productivity', label: '4층 공간 생산성 계산', method: PRODUCTIVITY, parent_tool_call_id: 'c1' },
+    { type: 'TOOL_CALL_END', tool_call_id: 'p1', ok: true, method: PRODUCTIVITY, result: '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)' },
+    { type: 'TOOL_CALL_END', tool_call_id: 'c1', ok: true, result: '공간 생산성 분석 에이전트의 분석을 받았어요' },
+    { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n3' },
+    { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n3', delta: '결과를 도면에 칠해 볼게요.' },
+    { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'n3' },
+    { type: 'TOOL_CALL_START', tool_call_id: 'u1', tool_name: 'ui_highlight_units', label: '매장 5곳 강조', method: '근거가 되는 매장을 강조해요' },
+    { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/highlights', value: [] }] },
+    { type: 'TOOL_CALL_END', tool_call_id: 'u1', ok: true, result: '매장 5곳 강조' },
+    { type: 'TEXT_MESSAGE_START', message_id: 'm' },
+    { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '4층 저효율 매장은 다섯 곳이에요.' },
+    { type: 'TEXT_MESSAGE_END', message_id: 'm' },
+    { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' },
+  ]
+
+  it('folds notes in arrival order, nests specialist notes and keeps them out of the answer', () => {
+    const run = fold(events)
+    expect(run.steps.map((s) => [s.kind, stepDisplayLabel(s), s.parentId])).toEqual([
+      ['note', PLAN, null],
+      ['tool', '공간 생산성 분석 에이전트에게 확인', null],
+      ['note', '먼저 ㎡당 매출로 하위 매장을 찾을게요.', 'c1'],
+      ['tool', '4층 공간 생산성 계산', 'c1'],
+      ['note', '결과를 도면에 칠해 볼게요.', null],
+      ['tool', '매장 5곳 강조', null],
+    ])
+    expect(run.steps[2]).toMatchObject({ agent: 'space-productivity-analyst', status: 'done' })
+    expect(stepTree(run.steps).map((n) => [n.step.kind, n.children.map((c) => c.step.kind)])).toEqual([
+      ['note', []],
+      ['tool', ['note', 'tool']],
+      ['note', []],
+      ['tool', []],
+    ])
+    expect(run.answer).toBe('4층 저효율 매장은 다섯 곳이에요.')
+    expect(run.messageIds).toEqual(['m'])
+  })
+
+  it('keeps the method and result of each step and counts only tool steps', () => {
+    const run = fold(events)
+    expect(toolSteps(run).map((s) => [s.method, s.result])).toEqual([
+      ['공간 생산성 분석 에이전트가 여러 지표로 원인을 깊게 분석해요', '공간 생산성 분석 에이전트의 분석을 받았어요'],
+      [PRODUCTIVITY, '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)'],
+      ['근거가 되는 매장을 강조해요', '매장 5곳 강조'],
+    ])
+    // A result that only repeats the label is not shown again.
+    expect(toolSteps(run).map(stepResultText)).toEqual([
+      '공간 생산성 분석 에이전트의 분석을 받았어요',
+      '매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)',
+      null,
+    ])
+    expect(stepsSummaryText(run)).toBe('분석 과정 보기 · 3단계 · 22초')
+    // The method is shown while the step runs; the result once it is done.
+    const running = fold(events.slice(0, 10))
+    expect(running.steps.at(-1)).toMatchObject({ status: 'running', method: PRODUCTIVITY, result: null })
+  })
+
+  it('shows the running step, else the latest top-level note, in the status line', () => {
+    const runs = trace(events)
+    expect(runs.map((r) => r.status).slice(0, 5)).toEqual(['thinking', 'working', 'working', 'working', 'working'])
+    expect(runs.map(runStatusText)).toEqual([
+      THINKING_LABEL,
+      THINKING_LABEL,
+      '4층 매장의 ㎡당 매출을 계산하고',
+      PLAN,
+      PLAN,
+      '공간 생산성 분석 에이전트에게 확인',
+      '공간 생산성 분석 에이전트에게 확인',
+      '공간 생산성 분석 에이전트에게 확인',
+      '공간 생산성 분석 에이전트에게 확인',
+      '공간 생산성 분석 에이전트에게 확인 · 4층 공간 생산성 계산',
+      '공간 생산성 분석 에이전트에게 확인',
+      // The specialist is done: its own note is no longer current.
+      PLAN,
+      PLAN,
+      '결과를 도면에 칠해 볼게요.',
+      '결과를 도면에 칠해 볼게요.',
+      '매장 5곳 강조',
+      '매장 5곳 강조',
+      '결과를 도면에 칠해 볼게요.',
+      '결과를 도면에 칠해 볼게요.',
+      null,
+      null,
+      null,
+    ])
+  })
+
+  it('shows a recoverable tool error as a failed step with its result while the run goes on', () => {
+    const run = fold([
+      { type: 'TOOL_CALL_START', tool_call_id: 'a', tool_name: 'analytics_drivers', label: '효율 저하 원인 분석', method: '㎡당 매출을 노출·통로 접면·면적·카테고리로 회귀 분해해요' },
+      { type: 'TOOL_CALL_END', tool_call_id: 'a', ok: false, summary: '{"ok": false, "error": "unit_codes must be a list"}', result: '조건을 고쳐 다시 시도해요' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'b', tool_name: 'analytics_drivers', label: '효율 저하 원인 분석' },
+    ])
+    expect(run.status).toBe('working')
+    expect(run.error).toBeNull()
+    expect(run.steps[0]).toMatchObject({ status: 'error', result: '조건을 고쳐 다시 시도해요', error: '{"ok": false, "error": "unit_codes must be a list"}' })
+    expect(stepResultText(run.steps[0])).toBe('조건을 고쳐 다시 시도해요')
+    expect(failedUiSteps(run)).toEqual([])
+    expect(runStatusText(run)).toBe('효율 저하 원인 분석')
+  })
+
+  it('handles notes without START or message id, empty notes and notes after answer text', () => {
+    const run = fold([
+      { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'empty' },
+      { type: 'THINKING_TEXT_MESSAGE_END', message_id: 'empty' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'x', delta: '자료를 ' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'x', delta: '확인할게요.' },
+      { type: 'THINKING_TEXT_MESSAGE_START', message_id: '' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: '', delta: '방법을 바꿔 ' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: '', delta: '층 평균과 비교해 볼게요.' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'x', delta: '' },
+    ])
+    expect(run.steps.map((s) => [s.kind, s.label])).toEqual([
+      ['note', ''],
+      ['note', '자료를 확인할게요.'],
+      ['note', '방법을 바꿔 층 평균과 비교해 볼게요.'],
+    ])
+    expect(new Set(run.steps.map((s) => s.id)).size).toBe(3)
+    expect(timelineSteps(run.steps).map((s) => s.label)).toEqual(['자료를 확인할게요.', '방법을 바꿔 층 평균과 비교해 볼게요.'])
+    expect(run).toMatchObject({ status: 'working', answer: '' })
+    expect(runStatusText(run)).toBe('방법을 바꿔 층 평균과 비교해 볼게요.')
+
+    // Answer text, then a note announcing more tool calls: the run is working again.
+    const statuses = trace([
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '먼저 결과를 정리하면' },
+      { type: 'THINKING_TEXT_MESSAGE_START', message_id: 'n' },
+      { type: 'THINKING_TEXT_MESSAGE_CONTENT', message_id: 'n', delta: '도면에도 표시해 볼게요.' },
+    ]).map((r) => [r.status, r.answer])
+    expect(statuses).toEqual([
+      ['answering', '먼저 결과를 정리하면'],
+      ['working', '먼저 결과를 정리하면'],
+      ['working', '먼저 결과를 정리하면'],
+    ])
   })
 })
