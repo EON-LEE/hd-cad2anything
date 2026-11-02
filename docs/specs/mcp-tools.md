@@ -8,6 +8,7 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 - 응답은 기본 50행으로 제한하고 `truncated` 플래그를 둔다.
 - 인증은 요청 헤더 `x-api-key`로 한다. 값은 Key Vault와 Foundry 프로젝트 연결에만 둔다.
 - 인자 오류나 데이터 없음은 MCP 오류(`isError`) 대신 `{ok: false, tool, error, hint}` 결과로 반환한다. Foundry Agent Service는 MCP 도구 오류를 응답 전체의 실패(HTTP 400)로 처리하기 때문이다. 모델은 이 결과를 읽고 인자를 고쳐 다시 호출한다.
+- 결과는 JSON 텍스트 하나(`content[0].text`)로만 반환하고 구조화 결과(`structuredContent`, `outputSchema`)는 두지 않는다. 구조화 결과가 있으면 Foundry가 같은 결과를 `{"structuredResponse": …}`로 도구 출력 뒤에 한 번 더 붙여, 모델이 읽는 양이 두 배가 된다.
 
 ## 2. 도구 목록
 

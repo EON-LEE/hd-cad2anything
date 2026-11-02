@@ -182,11 +182,18 @@ def recoverable(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
 def build_mcp(
     toolkit: Toolkit, extra_tools: dict[str, tuple[Callable[..., Any], str]] | None = None
 ) -> MCPServer:
+    # Tools return their result as JSON text only. With structured content as well, Foundry appends a second
+    # copy (``{"structuredResponse": ...}``) to the tool output that the model reads, doubling its input.
     server = MCPServer(name="cad2anything", instructions=INSTRUCTIONS)
     for name in TOOL_DESCRIPTIONS:
-        server.add_tool(recoverable(name, getattr(toolkit, name)), name=name, description=_require(name))
+        server.add_tool(
+            recoverable(name, getattr(toolkit, name)),
+            name=name,
+            description=_require(name),
+            structured_output=False,
+        )
     for name, (fn, description) in (extra_tools or {}).items():
-        server.add_tool(fn, name=name, description=description)
+        server.add_tool(fn, name=name, description=description, structured_output=False)
     return server
 
 

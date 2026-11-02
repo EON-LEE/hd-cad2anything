@@ -20,7 +20,7 @@ from typing import Any
 
 from cad2anything.agents import ORCHESTRATOR, SPECIALISTS
 from cad2anything.agents.labels import tool_label
-from cad2anything.agents.progress import specialist_result, tool_method, tool_result
+from cad2anything.agents.progress import parse_tool_output, specialist_result, tool_method, tool_result
 from cad2anything.agents.ui_actions import UiActionHandler
 
 logger = logging.getLogger(__name__)
@@ -92,10 +92,7 @@ def _safe_json(value: Any) -> dict[str, Any]:
 
 
 def _output_ok(output: str) -> bool:
-    try:
-        parsed = json.loads(output)
-    except (TypeError, json.JSONDecodeError):
-        return True
+    parsed = parse_tool_output(output)
     return not (isinstance(parsed, dict) and parsed.get("ok") is False)
 
 

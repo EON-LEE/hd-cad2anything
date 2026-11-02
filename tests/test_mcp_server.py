@@ -40,6 +40,9 @@ def test_tools_over_the_protocol(server):
 
             ok = await client.call_tool("spatial_floor_summary", {"rev": "R1", "floor": "3F"})
             assert not ok.is_error and json.loads(ok.content[0].text)["units"] == 42
+            # JSON text only: Foundry would append structured content to the output as a second copy.
+            assert len(ok.content) == 1 and ok.structured_content is None
+            assert all(tool.output_schema is None for tool in tools.values())
 
             bad = await client.call_tool("spatial_floor_summary", {"rev": "R7", "floor": "3F"})
             payload = json.loads(bad.content[0].text)

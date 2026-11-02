@@ -6,7 +6,14 @@ import pytest
 
 from cad2anything.agents import SPECIALISTS
 from cad2anything.agents.deploy import load_ui_tools
-from cad2anything.agents.progress import SPECIALIST_METHODS, specialist_result, tool_method, tool_result
+from cad2anything.agents.progress import (
+    SPECIALIST_METHODS,
+    parse_tool_output,
+    specialist_result,
+    tool_method,
+    tool_result,
+)
+from cad2anything.agents.runtime import _output_ok
 from cad2anything.services.mcp_server import TOOL_DESCRIPTIONS
 
 
@@ -167,3 +174,17 @@ def test_results_for_failures_ui_actions_and_odd_outputs():
         specialist_result("space_productivity_analyst", True) == "공간 생산성 분석 에이전트의 분석을 받았어요"
     )
     assert "받지 못해" in specialist_result("researcher", False)
+
+
+def test_results_read_hosted_mcp_output_with_a_structured_copy():
+    # Foundry appends MCP structured content to the text content as a second JSON document.
+    data = {"rev": "R2", "rows": [], "summary": "4층 매장 50곳을 집계했습니다. 다음 문장."}
+    joined = json.dumps(data, ensure_ascii=False, indent=2) + "\n" + json.dumps({"structuredResponse": data})
+    assert tool_result("unknown_tool", {}, joined) == "4층 매장 50곳을 집계했습니다"
+    failed = '{"ok": false, "error": "x"}\n{"structuredResponse": {"ok": false, "error": "x"}}'
+    assert tool_result("spatial_query", {}, failed) == "조건을 고쳐 다시 시도해요"
+    assert parse_tool_output(json.dumps({"structuredResponse": {"ok": True}})) == {"ok": True}
+    assert parse_tool_output("  [1, 2] trailing") == [1, 2]
+    assert parse_tool_output("not json") is None
+    assert not _output_ok(failed)
+    assert _output_ok("plain text output")

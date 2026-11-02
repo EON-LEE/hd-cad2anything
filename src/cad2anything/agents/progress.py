@@ -512,6 +512,24 @@ SILENT = {
 }
 
 
+def parse_tool_output(output: Any) -> Any:
+    """The JSON value of a tool output, or None when it is not JSON.
+
+    Foundry's hosted MCP output is the tool's text content followed by any structured content as a second
+    document (``{"structuredResponse": ...}``), so only the first JSON document is read.
+    """
+    if not isinstance(output, str):
+        return output
+    text = output.lstrip()
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(data, dict) and set(data) == {"structuredResponse"}:
+        return data["structuredResponse"]
+    return data
+
+
 def tool_result(name: str | None, args: dict[str, Any] | None, output: Any) -> str | None:
     """What a finished tool call found, in one short Korean line (None when there is nothing to say).
 
@@ -520,12 +538,7 @@ def tool_result(name: str | None, args: dict[str, Any] | None, output: Any) -> s
     """
     name = name or ""
     args = args if isinstance(args, dict) else {}
-    data = output
-    if isinstance(output, str):
-        try:
-            data = json.loads(output)
-        except (TypeError, json.JSONDecodeError):
-            data = None
+    data = parse_tool_output(output)
     if not isinstance(data, dict):
         return None
     if data.get("ok") is False:
