@@ -88,6 +88,10 @@ def test_extended_review_has_100_cases_and_115_turns_without_mutating_templates(
     ("text", "passed"),
     [
         ("Studio Korara는 88.7% 증가했고 비교군보다 컸지만, 증가분 전체를 이동 효과로 볼 수는 없어요.", True),
+        (
+            "Studio Korara는 88.7% 증가했고 같은 층 변경 없는 매장보다 높았지만, 이전의 인과 효과는 아니에요.",
+            True,
+        ),
         ("Studio Korara는 88.7% 증가했고 비교군보다 컸어요. 증가분 전체가 이동 효과예요.", False),
         ("Studio Korara는 87% 증가했지만 비교군과 비교만으로 인과 효과를 단정할 수 없어요.", False),
     ],
