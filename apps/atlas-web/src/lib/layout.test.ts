@@ -55,6 +55,13 @@ describe('normalizeAlternative', () => {
     expect(list[0]).toMatchObject({ id: 'ALT-3', moves: [], kpi_delta: { sales_krw: 1, low: 1, high: 1 } })
     expect(normalizeAlternatives(undefined)).toEqual([])
   })
+
+  it('preserves supported solver status without inventing optimality for unknown status', () => {
+    expect(normalizeAlternative({ id: 'A', search_status: 'optimal' }, 0)?.search_status).toBe('optimal')
+    expect(normalizeAlternative({ id: 'A', search_status: 'feasible' }, 0)?.search_status).toBe('feasible')
+    expect(normalizeAlternative({ id: 'A', search_status: 'heuristic' }, 0)?.search_status).toBe('heuristic')
+    expect(normalizeAlternative({ id: 'A', search_status: 'unknown' }, 0)?.search_status).toBeUndefined()
+  })
 })
 
 describe('formatObjective', () => {

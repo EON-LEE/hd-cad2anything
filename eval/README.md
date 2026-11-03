@@ -75,6 +75,10 @@ uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golde
 PostgreSQL이 중지되어 있으면 대안 저장 같은 쓰기는 실패할 수 있다. 서비스가 정상이 된 뒤 재실행해도
 이전 실패 기록은 지우거나 성공으로 덮어쓰지 않는다.
 
+분당 토큰 한도에 반복해서 걸리면 `--pause-seconds 10 --error-cooldown-seconds 60`을 지정해
+턴 사이와 실행 오류 뒤에 쉰다. 오류가 난 턴을 자동 재시도하거나 성공으로 바꾸지 않는다.
+평가 도중 배포를 바꾸지 않으며, 에이전트 지침이나 서비스를 수정한 뒤에는 다른 결과 파일로 새 실행을 시작한다.
+
 사례마다 답변이 비어 있지 않고 `RUN_FINISHED`가 왔는지, 시작된 도구가 모두 완료됐는지 검사한다.
 `tools_any`, `tools_all`, `ui_any`는 시작 이벤트만으로 통과하지 않는다. `ok: true`로 끝난 호출만 센다.
 실패 후 정정된 성공 호출은 허용하되 실패 호출도 원본 기록에 남긴다.

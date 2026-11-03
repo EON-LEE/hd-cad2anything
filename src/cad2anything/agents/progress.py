@@ -64,7 +64,7 @@ TOOL_METHODS: dict[str, str] = {
     "ui_draw_edges": "매장·카테고리 사이 관계를 선으로 그려요",
     "ui_focus": "해당 매장으로 화면을 확대해요",
     "ui_compare": "두 개정의 차이를 도면에 표시해요",
-    "ui_show_panel": "결과를 패널에 열어요",
+    "ui_show_panel": "결과 화면을 준비해요",
     "ui_show_journey": "결제 순서를 통로망 최단 경로로 이어 도면에 그려요",
     "ui_show_route": "최단 경로를 도면에 그려요",
     "ui_show_flow": "통로 위에 집계 결과를 그려요",

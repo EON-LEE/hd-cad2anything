@@ -104,7 +104,7 @@ export const TOOL_LABELS: Readonly<Record<string, string>> = {
   ui_draw_edges: '관계선 표시',
   ui_focus: '화면 확대',
   ui_compare: '개정 비교 표시',
-  ui_show_panel: '패널 열기',
+  ui_show_panel: '결과 화면 준비',
   ui_show_journey: '도면에 고객 동선 그리기',
   ui_show_route: '도면에 경로 그리기',
   ui_show_flow: '도면에 통로 집계 그리기',
@@ -166,12 +166,12 @@ const UI_PRIMARY_KEY: Readonly<Record<string, string>> = {
 const DESCRIBE_ORDER = ['floor', 'rev', 'compareRev', 'journey', 'route', 'flow', 'heatmap', 'highlights', 'edges', 'panel', 'focus', 'layers']
 
 const PANEL_LABELS: Readonly<Record<string, string>> = {
-  changes: '변경 목록 열기',
-  artifact: '산출물 열기',
-  layout: '재배치 대안 열기',
+  changes: '변경 목록 준비',
+  artifact: '산출물 준비',
+  layout: '재배치 대안 준비',
   table: '표 열기',
   journey: '동선 목록 열기',
-  uploads: '도면 업로드 열기',
+  uploads: '도면 업로드 준비',
   none: '패널 닫기',
 }
 
@@ -213,7 +213,7 @@ function describeKey(key: string, values: Map<string, unknown>): string | null {
       const payload = isRecord(value.payload) ? value.payload : {}
       const title = typeof payload.title === 'string' ? payload.title : ''
       if (type === 'table' && title) return `표 열기 · ${title}`
-      if (type === 'layout' && typeof payload.brief_id === 'string' && payload.brief_id) return `시즌 개편 열기 · ${payload.brief_id}`
+      if (type === 'layout' && typeof payload.brief_id === 'string' && payload.brief_id) return `시즌 개편 준비 · ${payload.brief_id}`
       return PANEL_LABELS[type] ?? null
     }
     case 'journey':

@@ -353,6 +353,10 @@ Atlas 웹앱과 백엔드(`atlas-api`, FastAPI) 사이의 계약이다. 같은 �
 | `panel.type` | `changes`, `artifact`, `layout`, `table`, `journey`, `uploads`, `none` 중 하나다. `journey`는 `journey` 상태의 동선 목록을 연다. `uploads`는 개정 검토 탭의 업로드 영역을 연다. |
 | `panel.payload` | `changes`: `{rev_from, rev_to}`, `artifact`: `{generator}`, `layout`: `{rev, floors, alternatives}` 또는 `{brief_id}`(시즌 개편 프로젝트를 연다), `uploads`: `{job_id?}`(업로드 작업을 연다), `table`: `{title, columns, rows}`. 백엔드는 `table`의 객체 행과 열 단위 데이터를 값 배열 행으로 바꾼다. 행이 없으면 패널을 열지 않고 에이전트에게 오류를 돌려준다. |
 
+채팅 응답 중 `changes`, `artifact`, `layout`, `uploads` 결과가 도착해도 현재 탭을 바꾸지 않는다. 채팅 위의 **개정 검토 보기** 또는 **레이아웃 대안 보기**, 해당 탭의 **새 결과** 표시로 사용자가 직접 연다. 응답 완료와 상태 갱신이 한 번에 도착해도 이 규칙을 유지한다. 채팅 밖에서 명시적으로 여는 패널 요청은 기존대로 해당 탭을 선택한다.
+
+배치 대안 화면은 예상 연매출 변화와 이동 수를 먼저 비교하고, 이동 목록·검사한 제약·계산 근거는 펼쳐 본다. `search_status`가 있는 대안만 최적성 상태를 표시한다. 제약 검사 목록이 비었으면 **제약 검사 미확인**으로 표시한다. 대안이 없는 결과는 현재 조건에서 개선안을 찾지 못한 것이며, 모든 조건에서 현재 배치가 최적이라는 뜻은 아니다.
+
 **표기 규칙**
 
 - SSE는 `data: {...}` 다음에 빈 줄을 두는 표준 형식을 쓴다.

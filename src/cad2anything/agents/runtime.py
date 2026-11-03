@@ -434,9 +434,14 @@ class AgentRuntime:
             yield {"type": "TEXT_MESSAGE_END", "message_id": message_id}
             yield {"type": "RUN_FINISHED", "thread_id": conversation_id, "run_id": run_id}
         except Exception as exc:  # surfaced to the UI; details stay in server logs
+            limited = getattr(exc, "status_code", None) == 429 or "rate limit" in str(exc).lower()
             yield {
                 "type": "RUN_ERROR",
-                "message": f"에이전트 실행 중 오류가 발생했습니다: {type(exc).__name__}",
+                "message": (
+                    "AI 서비스의 요청 한도에 도달했어요. 잠시 후 다시 시도해 주세요."
+                    if limited
+                    else "답변을 완료하지 못했어요. 잠시 후 다시 시도해 주세요."
+                ),
             }
             raise
 

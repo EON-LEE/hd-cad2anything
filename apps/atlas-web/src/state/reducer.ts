@@ -22,6 +22,8 @@ export interface AppState {
   selection: string[]
   /** Incremented whenever `/panel` is patched, so the side panel can react even to identical values. */
   panelSeq: number
+  /** Captured at patch time, before a batched RUN_FINISHED can change chat.running. */
+  deferPanel: boolean
   /** Incremented whenever `/focus` is patched, so the canvas re-fits even to an identical focus. */
   focusSeq: number
   /** Text pushed into the chat input from elsewhere (e.g. the unit details card). */
@@ -44,6 +46,7 @@ export function createAppState(ui: UiState): AppState {
     chat: { threadId: null, runId: null, running: false, items: [] },
     selection: [],
     panelSeq: 0,
+    deferPanel: false,
     focusSeq: 0,
     composer: { text: '', seq: 0 },
   }
@@ -51,7 +54,7 @@ export function createAppState(ui: UiState): AppState {
 
 type PatchResult = { state: AppState; keys: string[]; error?: string }
 
-function applyUiPatch(state: AppState, ops: PatchOperation[]): PatchResult {
+function applyUiPatch(state: AppState, ops: PatchOperation[], deferPanel = false): PatchResult {
   const keys = touchedKeys(ops)
   let ui: UiState
   try {
@@ -69,6 +72,7 @@ function applyUiPatch(state: AppState, ops: PatchOperation[]): PatchResult {
       ui,
       selection: ui.floor !== state.ui.floor || ui.rev !== state.ui.rev ? [] : state.selection,
       panelSeq: touched.has('panel') || rootReplaced ? state.panelSeq + 1 : state.panelSeq,
+      deferPanel: touched.has('panel') || rootReplaced ? deferPanel : state.deferPanel,
       focusSeq: touched.has('focus') || rootReplaced ? state.focusSeq + 1 : state.focusSeq,
     },
   }
@@ -101,7 +105,7 @@ function reduceChatEvent(state: AppState, event: AgUiEvent, at: number): AppStat
   let next = state
   let patch: { keys: string[]; error?: string } | undefined
   if (event.type === 'STATE_DELTA') {
-    const result = applyUiPatch(state, event.delta)
+    const result = applyUiPatch(state, event.delta, state.chat.running)
     if (result.error) console.warn('[atlas] STATE_DELTA rejected:', result.error)
     next = result.state
     patch = { keys: result.keys, error: result.error }

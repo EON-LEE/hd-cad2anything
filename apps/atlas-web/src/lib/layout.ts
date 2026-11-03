@@ -52,6 +52,9 @@ export function normalizeAlternative(raw: unknown, index: number): LayoutAlterna
     constraints,
     explanations,
     ...(typeof raw.rev_id === 'string' && raw.rev_id ? { rev_id: raw.rev_id } : {}),
+    ...(raw.search_status === 'optimal' || raw.search_status === 'feasible' || raw.search_status === 'heuristic'
+      ? { search_status: raw.search_status }
+      : {}),
   }
 }
 
