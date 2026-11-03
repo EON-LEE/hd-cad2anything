@@ -167,6 +167,10 @@ cases:
     question: "R2 4층 재배치 대안 3개를 만들어줘. 앵커 유지, 면적 오차 10%, 최대 이동 브랜드 수 1개로 제한해줘."
     expect:
       tool_args: [{tool: layout_generate_alternatives, path: /max_moves, equals: 1}]
+      tool_values:
+        - {tool: layout_generate_alternatives, path: /constraints/max_moves, equals: 1}
+        - {tool: layout_generate_alternatives, path: /alternatives, equals: []}
+      answer_patterns: ["찾지 못|없|생성되지", "1개|한 개", "제약|조건"]
   - id: optimizer-two-moves
     extends: layout-4f-alternatives
     question: "R2 4층 대안 3개, 앵커 고정, 면적 오차 10%, 최대 이동 브랜드 수는 2개로 계산해줘."

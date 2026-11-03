@@ -77,6 +77,7 @@ def test_extended_review_has_100_cases_and_115_turns_without_mutating_templates(
     assert len(cases) == 100
     assert sum(1 + len(c.get("turns", [])) for c in cases) == 115
     assert len({c["id"] for c in cases}) == 100
+    assert len({t["question"] for c in cases for t in [c, *c.get("turns", [])]}) == 99
     by_id = {c["id"]: c for c in cases}
     assert by_id["optimizer-one-move"]["expect"]["tool_args"][0]["equals"] == 1
     assert "tool_args" not in by_id["layout-4f-alternatives"]["expect"]
