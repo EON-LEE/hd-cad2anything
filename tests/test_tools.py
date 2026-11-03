@@ -91,6 +91,34 @@ def test_adhoc_table_groups_and_proposes_spec(toolkit: Toolkit):
         toolkit.render_adhoc_table("R2", "zone", ["floor", "zone_label"], "구역표")
 
 
+def test_adhoc_table_groups_by_floor_and_zone(toolkit: Toolkit):
+    result = toolkit.render_adhoc_table(
+        "R2",
+        "unit",
+        ["floor", "zone_code", "area_m2"],
+        "층과 구역별 청소 검토표",
+        group_by=["floor", "zone_code"],
+    )
+    assert result["status"] == "draft"
+    assert result["columns"] == ["floor", "zone_code", "count", "area_m2"]
+    expected = {}
+    for unit in toolkit._model("R2").units():
+        key = (unit.floor, unit.attributes.get("zone_code"))
+        count, area = expected.get(key, (0, 0.0))
+        expected[key] = (count + 1, area + round(unit.geometry.area, 2))
+    for floor, zone, count, area in result["preview"]:
+        n, total = expected[(floor, zone)]
+        assert count == n and area == pytest.approx(total)
+    with pytest.raises(ToolError, match="group_by"):
+        toolkit.render_adhoc_table(
+            "R2",
+            "unit",
+            ["floor", "area_m2"],
+            "없는 그룹 키",
+            group_by=["floor", "zone_code"],
+        )
+
+
 def test_hypothetical_move_and_swap(toolkit: Toolkit):
     units = toolkit.spatial_find_units("R2", floor="3F", vacant=False)["units"]
     first, second = units[0], units[1]

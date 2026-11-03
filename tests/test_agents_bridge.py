@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from cad2anything.agents import SPECIALISTS
 from cad2anything.agents.deploy import load_definitions, load_ui_tools, tool_specs
 from cad2anything.agents.runtime import AgentRuntime
@@ -41,6 +43,40 @@ def test_normalize_scales_and_inverts():
     assert normalize({"a": 10, "b": 20, "c": 15}) == {"a": 0.0, "b": 1.0, "c": 0.5}
     assert normalize({"a": 10, "b": 20}, invert=True) == {"a": 1.0, "b": 0.0}
     assert normalize({}) == {}
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_raw_tool_outputs_are_only_in_opt_in_evaluation_traces(capture):
+    client = FakeClient(
+        {
+            "atlas-orchestrator": [
+                {
+                    "output": [
+                        {
+                            "type": "mcp_call",
+                            "id": "m1",
+                            "name": "spatial_query",
+                            "arguments": "{}",
+                            "output": '{"matched": 5}',
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "f1",
+                            "name": "ui_set_floor",
+                            "arguments": '{"floor": "4F"}',
+                        },
+                    ]
+                },
+                {"output": [_message("4층이에요.")]},
+            ]
+        }
+    )
+    events = list(AgentRuntime(client, capture_tool_outputs=capture).run("4층", {}))
+    ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
+    assert all(("output" in e) is capture for e in ends.values())
+    if capture:
+        assert ends["m1"]["output"] == {"matched": 5}
+        assert ends["f1"]["output"] == {"ok": True, "floor": "4F"}
 
 
 def test_runtime_handles_mcp_ui_and_specialist_calls():

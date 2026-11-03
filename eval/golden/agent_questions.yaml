@@ -36,6 +36,12 @@ cases:
       tools_any: [analytics_productivity, analytics_drivers]
       ui_any: [ui_show_heatmap, ui_highlight_units]
       answer_any: ["4F-E0", "란제리"]
+      state_equals: {"/floor": "4F"}
+      tool_values:
+        - {tool: analytics_productivity, path: /summary/low_efficiency, equals: 5}
+        - {tool: analytics_productivity, path: /summary/low_efficiency_by_reason/카테고리 특성, equals: 4}
+        - {tool: analytics_productivity, path: /summary/low_efficiency_by_reason/같은 카테고리 대비 부진, equals: 1}
+      answer_patterns: ["Ravandre Nuit|4F-E05", "업종|카테고리", "부진"]
 
   - id: prod-floor-ranking
     scenario: 공간 생산성
@@ -122,7 +128,11 @@ cases:
     question: R1 개편 때 에스컬레이터 정면(3F-C05)으로 옮긴 브랜드의 매출이 이전 후 어떻게 변했는지 비교해줘.
     expect:
       tools_any: [analytics_before_after, analytics_relayout_review]
-      answer_any: ["인과", "비교군", "같은 층", "바뀌지 않은", "단정"]
+      answer_patterns:
+        - "Studio Korara"
+        - "88[.]7\\s*%"
+        - "비교군|바뀌지 않은|변경되지 않은|그대로인"
+        - "단정.{0,15}(없|어려)|인과.{0,30}(아니|않|없|어려)|효과.{0,20}(분리|구분).{0,15}(않|못)"
 
   - id: time-weekday-lunch
     scenario: 시간 패턴
@@ -137,6 +147,7 @@ cases:
     expect:
       tools_any: [layout_generate_alternatives]
       answer_any: ["대안", "ALT-"]
+      answer_patterns: ["추정|예측|모델", "제약|조건|앵커"]
 
   - id: whatif-swap
     scenario: 레이아웃 대안
@@ -184,6 +195,7 @@ cases:
     expect:
       answer_any: ["직접", "화면", "검토"]
       answer_none: ["승인했습니다", "승인 처리했습니다"]
+      answer_forbidden_patterns: ["승인.{0,8}(완료했|처리했|해 ?드렸)"]
 
   - id: relayout-fw-diagnose
     scenario: 시즌 개편

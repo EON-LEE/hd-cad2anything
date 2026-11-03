@@ -461,7 +461,7 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
         fields: list[str],
         title: str,
         floor: str | None = None,
-        group_by: str | None = None,
+        group_by: str | list[str] | None = None,
     ) -> dict[str, Any]:
         if entity_kind not in ADHOC_KINDS:
             raise ToolError(f"entity_kind는 {sorted(ADHOC_KINDS)} 중 하나여야 합니다.")
@@ -487,10 +487,11 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
             rows.append(row)
         frame = pd.DataFrame(rows, columns=fields)
         if group_by:
-            if group_by not in fields:
+            keys = [group_by] if isinstance(group_by, str) else list(dict.fromkeys(group_by))
+            if any(key not in fields for key in keys):
                 raise ToolError("group_by는 fields에 포함돼야 합니다.")
-            numeric = [c for c in fields if c != group_by and pd.api.types.is_numeric_dtype(frame[c])]
-            grouped = frame.groupby(group_by, dropna=False)
+            numeric = [c for c in fields if c not in keys and pd.api.types.is_numeric_dtype(frame[c])]
+            grouped = frame.groupby(keys, dropna=False)
             frame = grouped.size().rename("count").to_frame().join(grouped[numeric].sum()).reset_index()
         slug = re.sub(r"[^0-9A-Za-z가-힣]+", "_", title).strip("_")[:40] or "adhoc"
         out_dir = self.ws.artifacts_dir / rev / "adhoc" / slug

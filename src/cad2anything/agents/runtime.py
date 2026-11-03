@@ -184,12 +184,14 @@ class AgentRuntime:
         specialists: dict[str, str] | None = None,
         id_factory: Callable[[], str] | None = None,
         stream: bool = False,
+        capture_tool_outputs: bool = False,
     ):
         self.client = openai_client
         self.ui_handler = ui_handler or UiActionHandler()
         self.orchestrator = orchestrator
         self.specialists = specialists or SPECIALISTS
         self.stream = stream
+        self.capture_tool_outputs = capture_tool_outputs
         self._new_id = id_factory or (lambda: uuid.uuid4().hex[:12])
 
     @classmethod
@@ -311,6 +313,11 @@ class AgentRuntime:
                     "method": method,
                     "result": tool_result(call["tool_name"], call["args"], call["output"]),
                     "ok": not call["error"],
+                    **(
+                        {"output": parse_tool_output(call["output"]), "args": call["args"]}
+                        if self.capture_tool_outputs
+                        else {}
+                    ),
                 }
             )
         return events
@@ -486,5 +493,6 @@ class AgentRuntime:
             "method": method,
             "result": result,
             "ok": ok,
+            **({"output": parse_tool_output(output)} if self.capture_tool_outputs else {}),
         }
         return {"type": "function_call_output", "call_id": call_id, "output": output}
