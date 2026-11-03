@@ -55,15 +55,48 @@ uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golde
 
 특정 사례만 실행하려면 `--only rev-ss-changes,prod-4f-low`처럼 사례 ID를 지정한다. 결과는 `eval/results/`에 JSON으로 저장한다. 이 폴더는 모델 답변을 담으므로 커밋하지 않는다.
 
+**확장 검토**
+
+`agent_review.yaml`은 기존 35개와 추가 65개로 구성한 100개 사례다. 추가 사례는 표현·조건 변경 20개,
+후속 대화 15개, 데이터 경계·잘못된 입력 15개, 최적화·판정 10개, UI 상태 5개다.
+후속 질문까지 합하면 독립 실행 한 번에 115턴이고, 3회 반복하면 최대 345턴이다.
+사례 수는 고유 질문 문장의 수가 아니다. 후속 대화의 첫 질문 등은 기존 질문을 재사용한다.
+UI 상태 5개는 화면 상태 패치를 검사하며 실제 브라우저 렌더링 검증을 대신하지 않는다.
+
+```powershell
+# 외부 호출 없이 구성 확인
+uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --list
+# 동일한 사례를 매번 새 대화로 독립 실행. 자동 재시도가 아니다.
+uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --repeat 3 --out eval/results/review-full.json
+```
+
+실행 전에 Atlas와 PostgreSQL이 모두 준비 상태인지 확인한다. Atlas가 메모리에서 조회에 응답하더라도
+PostgreSQL이 중지되어 있으면 대안 저장 같은 쓰기는 실패할 수 있다. 서비스가 정상이 된 뒤 재실행해도
+이전 실패 기록은 지우거나 성공으로 덮어쓰지 않는다.
+
+사례마다 답변이 비어 있지 않고 `RUN_FINISHED`가 왔는지, 시작된 도구가 모두 완료됐는지 검사한다.
+`tools_any`, `tools_all`, `ui_any`는 시작 이벤트만으로 통과하지 않는다. `ok: true`로 끝난 호출만 센다.
+실패 후 정정된 성공 호출은 허용하되 실패 호출도 원본 기록에 남긴다.
+
+결과에는 실행 번호(`attempt`), 대화 턴(`turn`), 대화 ID, 도구 인자·성공 여부·출력, 최종 UI 상태가 포함된다.
+원본 도구 출력 기록은 평가 런타임의 `capture_tool_outputs`를 켰을 때만 활성화된다.
+일반 서비스 응답에는 이 원본 출력 필드를 추가하지 않는다.
+각 턴이 끝날 때마다 결과 파일을 저장하므로 긴 실행 중에도 완료한 기록을 확인할 수 있다.
+반복 실행별 점수와 모든 반복을 통과한 사례 수를 별도로 표시하며, 일부 재실행의 성공을 전체 통과로 보고하지 않는다.
+
 **점검 유형**
 
 | 유형 | 통과 조건 |
 |---|---|
 | `tools_any`, `tools_all`, `tools_none` | 지정한 도구를 하나라도, 모두, 하나도 호출하지 않음. 전문 에이전트 안의 호출도 포함한다. |
-| `ui_any` | 지정한 UI 함수 중 하나 이상으로 화면을 바꿈 |
+| `ui_any` | 지정한 UI 함수 중 하나 이상이 성공. 실제 상태는 `state_equals`로 별도 검증 |
 | `specialists_any` | 지정한 전문 에이전트 중 하나 이상과 상담 |
 | `answer_any`, `answer_all`, `answer_none` | 답변에 지정 문구가 하나라도, 모두, 하나도 나오지 않음 |
 | `consult_not_regex` | 지정한 전문 에이전트에 넘긴 요청이 정규식(예: 내부 매출 금액)과 일치하지 않음 |
+| `answer_patterns` | 정규식 목록을 **모두** 충족. 한 패턴 안의 `|`는 표현 대안 |
+| `answer_forbidden_patterns` | 답변이 금지 정규식 중 어느 것과도 일치하지 않음 |
+| `state_equals` | 최종 UI 상태의 JSON Pointer 경로별 값이 기대값과 같음 |
+| `tool_args`, `tool_values` | 성공한 도구 호출의 인자 또는 원본 출력에서 지정 경로의 값 검증. `equals`, `contains`, `approx`와 절대 오차 `tolerance` 지원 |
 
 `defaults.expect`의 점검은 모든 사례에 적용한다. 사례에 같은 유형이 있으면 사례의 값을 쓴다. 단, `*_none` 목록은 두 목록을 합친다. 기본 점검은 답변에 도구 이름이나 JSON이 나오지 않는지 확인한다. 답변은 사용자가 읽는 대화체여야 하기 때문이다.
 
@@ -118,7 +151,11 @@ uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golde
 
 ## 4. 한계
 
-- 규칙 채점은 도구 호출과 핵심 문구만 확인한다. 답변이 도구 결과와 일치하는지는 결과 파일의 답변을 사람이 확인한다.
+- 규칙 채점은 성공한 도구 호출, 일부 수치·인자, 최종 UI 상태, 지정한 답변 문구와 정규식을 검사한다.
+  예를 들어 R2 4층 생산성은 도구 출력의 저효율 5곳과 업종 특성 4곳·개별 부진 1곳을,
+  Studio Korara의 전후 비교는 답변의 88.7%와 비교군·인과 해석 유보 표현을 함께 검사한다.
+  모든 답변의 모든 수치를 원천 데이터와 자동 대조하는 범용 의미 평가자는 아니다.
+  정규식에 맞으면서 의미가 틀린 답변도 가능하므로 결과 파일을 사람이 검토한다.
 - 같은 질문이라도 실행마다 도구 선택과 표현이 달라질 수 있다. 데모 전에는 여러 번 실행해 실패 경향을 본다.
 - 점검표의 기준은 합성 데이터의 정답이다. 실제 데이터에는 정답이 없으므로 표본을 사람이 검증해야 한다.
 - Foundry Evaluation의 LLM 평가자(근거 일치, 도구 호출 정확도)는 아직 연결하지 않았다.

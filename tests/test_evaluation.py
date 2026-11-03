@@ -1,6 +1,6 @@
 import pytest
 
-from cad2anything.evaluation.agent_eval import collect, load_cases, score, summarize
+from cad2anything.evaluation.agent_eval import collect, load_cases, run_cases, score, summarize
 from cad2anything.evaluation.scorecard import run_scorecard, to_markdown
 
 GOLDEN = "eval/golden/agent_questions.yaml"
@@ -24,6 +24,8 @@ def _events(text="4F-E05는 노출이 낮습니다.", consult_request="백화점
     }
     yield {"type": "TOOL_CALL_START", "tool_call_id": "f1", "tool_name": "ui_show_heatmap", "args": {}}
     yield {"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/heatmap", "value": {}}]}
+    for call_id in ("m1", "c1", "s1", "f1"):
+        yield {"type": "TOOL_CALL_END", "tool_call_id": call_id, "ok": True}
     yield {"type": "TEXT_MESSAGE_CONTENT", "message_id": "m", "delta": text}
     yield {"type": "RUN_FINISHED", "thread_id": "t", "run_id": "r"}
 
@@ -68,6 +70,19 @@ def test_default_checks_apply_to_every_case(tmp_path):
     assert [c["check"] for c in leaky["checks"] if not c["passed"]] == ["answer_none"]
 
 
+def test_extended_review_has_100_cases_and_115_turns_without_mutating_templates():
+    from pathlib import Path
+
+    _, cases = load_cases(Path("eval/golden/agent_review.yaml"))
+    assert len(cases) == 100
+    assert sum(1 + len(c.get("turns", [])) for c in cases) == 115
+    assert len({c["id"] for c in cases}) == 100
+    by_id = {c["id"]: c for c in cases}
+    assert by_id["optimizer-one-move"]["expect"]["tool_args"][0]["equals"] == 1
+    assert "tool_args" not in by_id["layout-4f-alternatives"]["expect"]
+    assert all("answer_none" in c["expect"] for c in cases)
+
+
 def test_scoring_counts_nested_tools_ui_actions_and_answers():
     case = {
         "id": "c",
@@ -99,6 +114,102 @@ def test_errors_fail_the_case_and_appear_in_the_summary():
     assert not result["passed"] and "RateLimitError" in result["run"]["error"]
     table = summarize([result])
     assert "실패" in table and "통과 0/1" in table
+
+
+@pytest.mark.parametrize("ok", [False, None])
+def test_call_start_or_failure_is_not_tool_success(ok):
+    events = [
+        {"type": "TOOL_CALL_START", "tool_call_id": "a", "tool_name": "analytics_productivity"},
+        {"type": "TEXT_MESSAGE_CONTENT", "delta": "분석 결과예요."},
+        {"type": "RUN_FINISHED"},
+    ]
+    if ok is not None:
+        events.insert(1, {"type": "TOOL_CALL_END", "tool_call_id": "a", "ok": ok})
+    result = score(
+        {"id": "a", "question": "q", "expect": {"tools_any": ["analytics_productivity"]}},
+        collect("a", events),
+    )
+    assert not result["passed"]
+
+
+def test_trace_records_outputs_arguments_and_final_state():
+    events = [
+        {"type": "RUN_STARTED", "thread_id": "conversation"},
+        {"type": "TOOL_CALL_START", "tool_call_id": "a", "tool_name": "count", "args": {"floor": "4F"}},
+        {"type": "TOOL_CALL_END", "tool_call_id": "a", "ok": True, "output": {"count": 50}},
+        {"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/floor", "value": "4F"}]},
+        {"type": "TEXT_MESSAGE_CONTENT", "delta": "매장 50곳이에요. 인과로 단정할 수는 없어요."},
+        {"type": "RUN_FINISHED"},
+    ]
+    case = {
+        "id": "a",
+        "question": "q",
+        "expect": {
+            "state_equals": {"/floor": "4F"},
+            "tool_args": [{"tool": "count", "path": "/floor", "equals": "4F"}],
+            "tool_values": [{"tool": "count", "path": "/count", "approx": 50, "tolerance": 0}],
+            "answer_patterns": [r"50\s*곳", r"단정할\s*수는?\s*없"],
+            "answer_forbidden_patterns": [r"단정해요"],
+        },
+    }
+    initial = {"floor": "3F"}
+    run = collect("a", events, initial)
+    assert score(case, run)["passed"]
+    assert initial == {"floor": "3F"} and run.thread_id == "conversation"
+    run.calls[0]["output"]["count"] = 49
+    assert not score(case, run)["passed"]
+    run.calls[0]["output"]["count"] = 50
+    run.text = "매장 50곳이고 인과라고 단정해요."
+    assert not score(case, run)["passed"]
+
+
+def test_streamed_arguments_are_taken_from_tool_completion():
+    run = collect(
+        "a",
+        [
+            {
+                "type": "TOOL_CALL_START",
+                "tool_call_id": "a",
+                "tool_name": "layout_generate_alternatives",
+                "args": {},
+            },
+            {"type": "TOOL_CALL_END", "tool_call_id": "a", "ok": True, "args": {"max_moves": 2}},
+        ],
+    )
+    assert run.calls[0]["args"] == {"max_moves": 2}
+
+
+def test_empty_or_truncated_answers_fail_even_without_expectations():
+    assert not score({"id": "a", "question": "q"}, collect("a", [{"type": "RUN_FINISHED"}]))["passed"]
+    assert not score(
+        {"id": "a", "question": "q"}, collect("a", [{"type": "TEXT_MESSAGE_CONTENT", "delta": "답"}])
+    )["passed"]
+
+
+def test_followup_turns_share_conversation_and_state_but_repeats_are_independent():
+    class Runtime:
+        def __init__(self):
+            self.received = []
+
+        def run(self, message, state, conversation_id=None):
+            self.received.append((message, state.copy(), conversation_id))
+            yield {"type": "RUN_STARTED", "thread_id": conversation_id or f"thread-{len(self.received)}"}
+            yield {"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/floor", "value": "4F"}]}
+            yield {"type": "TEXT_MESSAGE_CONTENT", "delta": "완료"}
+            yield {"type": "RUN_FINISHED"}
+
+    runtime = Runtime()
+    cases = [{"id": "a", "question": "첫 질문", "turns": [{"question": "후속 질문"}]}]
+    results = run_cases(runtime, cases, {"ui_state": {"floor": "3F"}}, repeat=2)
+    assert len(results) == 4 and all(r["passed"] for r in results)
+    assert runtime.received == [
+        ("첫 질문", {"floor": "3F"}, None),
+        ("후속 질문", {"floor": "4F"}, "thread-1"),
+        ("첫 질문", {"floor": "3F"}, None),
+        ("후속 질문", {"floor": "4F"}, "thread-3"),
+    ]
+    results[0]["passed"] = False
+    assert "모든 독립 실행에서 통과한 사례: 0/1" in summarize(results)
 
 
 def test_scorecard_runs_on_the_small_synthetic_store(tmp_path, populate):

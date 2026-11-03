@@ -31,7 +31,7 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | registry | `registry_impact` | `rev_from`, `rev_to` | 재생성 계획(생성기, 위험도, 승인 방식, 사유) |
 | registry | `registry_run` | `generator`, `rev`, `floors?` | 산출물 기록(상태, 파일, 요약, 이슈) |
 | registry | `registry_validate` | `rev`, `generator` | 검증 이슈 |
-| render | `render_adhoc_table` | `rev`, `entity_kind`, `fields`, `floor?`, `group_by?`, `title` | 즉석 표 산출물(초안)과 레지스트리 등록안 |
+| render | `render_adhoc_table` | `rev`, `entity_kind`, `fields`, `floor?`, `group_by?`(필드명 또는 필드명 목록), `title` | 즉석 표 산출물(초안)과 레지스트리 등록안. `fields`는 원본 필드명이고 숫자 필드는 그룹별 합산. 층·구역별 매장 면적표는 `fields=[floor,zone_code,area_m2]`, `group_by=[floor,zone_code]`. 공용부를 포함한 청소 면적으로 해석하지 않음 |
 | analytics | `analytics_productivity` | `rev`, `floor?`, `level?`, `start?`, `end?`, `top?` | 연환산 ㎡당 매출, 백분위, 저효율 플래그, 저효율 원인. 매장 단위는 같은 카테고리 대비 지수, 저효율 구분(카테고리 특성·같은 카테고리 대비 부진), 카테고리 구성 |
 | analytics | `analytics_drivers` | `rev`, `floor?` | 회귀 계수, 설명력, 저효율 매장별 주요 요인(추정치) |
 | analytics | `analytics_cross_shopping` | `level?`, `focal?`, `segment?`, `start?`, `end?`, `top?`, `basket?`, `min_customers?` | lift, Jaccard, confidence |

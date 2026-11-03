@@ -33,7 +33,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "registry_impact": "두 개정의 변경으로 다시 만들어야 하는 산출물과 사유, 위험도, 승인 방식을 반환한다.",
     "registry_run": "생성기를 실행해 산출물 초안을 만든다. 같은 입력이면 기존 결과를 재사용한다. 승인은 하지 않는다.",
     "registry_validate": "생성된 산출물의 검증 결과(오류, 경고)를 반환한다.",
-    "render_adhoc_table": "등록되지 않은 산출물을 즉석 표로 만들고(초안), 레지스트리 등록안을 함께 만든다.",
+    "render_adhoc_table": (
+        "등록되지 않은 산출물을 즉석 표 파일(초안)로 만들고 레지스트리 등록안을 함께 만든다. "
+        "fields는 원본 필드명만 받으며 sum:area_m2 같은 식은 받지 않는다. group_by는 필드명 또는 필드명 목록이고 "
+        "숫자 필드를 합산한다. 층·구역별 청소 구역표 예: entity_kind=unit, fields=[floor,zone_code,area_m2], "
+        "group_by=[floor,zone_code]. 이 면적은 매장 면적 합계이며 실제 청소 면적은 별도 검토가 필요하다."
+    ),
     "analytics_productivity": "실제 개정의 적용 기간 실적으로 매장·구역·층·카테고리별 연환산 ㎡당 매출, 평당 매출, GMROF, 백분위, 저효율 여부와 저효율 원인을 반환한다. 매장 단위에서는 같은 카테고리 매장 대비 지수, 저효율 구분(카테고리 특성 또는 같은 카테고리 대비 부진), 같은 업종보다 부진한 매장 목록, 카테고리별 ㎡당 매출 구성도 반환한다. 가상 개정은 지원하지 않는다.",
     "analytics_drivers": "매장 ㎡당 매출을 노출(에스컬레이터 보행거리), 통로 접면, 면적, 카테고리로 분해한 회귀 결과와 저효율 매장별 주요 하락 요인을 반환한다(추정치, 인과 아님).",
     "analytics_cross_shopping": "교차구매 lift, Jaccard, confidence를 반환한다. segment(age_band, gender, tier, home_area)로 고객군을 거르고, focal을 주면 함께 사는 상위 항목을 반환한다. 기본 장바구니는 같은 고객의 같은 날 구매다.",
