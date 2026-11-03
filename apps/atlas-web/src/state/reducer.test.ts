@@ -53,6 +53,18 @@ const flow = {
 }
 
 describe('appReducer: chat runs', () => {
+  it('remembers an agent result arrived during a run even when finish is batched with it', () => {
+    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u', text: '비교해줘' })
+    state = run(state, [
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'layout', payload: {} } }] },
+      { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' },
+    ])
+    expect(state.chat.running).toBe(false)
+    expect(state.deferPanel).toBe(true)
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/panel', value: { type: 'changes', payload: {} } }] })
+    expect(state.deferPanel).toBe(false)
+  })
+
   it('folds a run: labelled steps, STATE_DELTA patches and the streamed answer', () => {
     let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u1', text: '4층 저효율 매장', at: 0 })
     expect(state.chat.running).toBe(true)

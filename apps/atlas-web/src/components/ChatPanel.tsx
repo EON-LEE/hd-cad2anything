@@ -293,6 +293,7 @@ export function ChatPanel() {
   const logRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottom = useRef(true)
+  const [showLatest, setShowLatest] = useState(false)
 
   useEffect(() => {
     if (composer.seq === 0) return
@@ -318,7 +319,10 @@ export function ChatPanel() {
 
   const onScroll = () => {
     const el = logRef.current
-    if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (el) {
+      stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+      setShowLatest(!stickToBottom.current)
+    }
   }
 
   // The one-row suggestion strip scrolls sideways with a regular mouse wheel too.
@@ -333,6 +337,7 @@ export function ChatPanel() {
       if (!message || chat.running) return
       setInput('')
       stickToBottom.current = true
+      setShowLatest(false)
       dispatch({ type: 'chat/user', id: `user-${Date.now().toString(36)}-${chat.items.length}`, text: message, at: Date.now() })
       const controller = new AbortController()
       abortRef.current = controller
@@ -385,7 +390,7 @@ export function ChatPanel() {
 
   return (
     <div className="chat-panel">
-      <div className="chat-log" ref={logRef} onScroll={onScroll} role="log" aria-label="에이전트 대화" aria-live="off">
+      <div className="chat-log" ref={logRef} onScroll={onScroll} role="log" tabIndex={-1} aria-label="에이전트 대화" aria-live="off">
         {items.length === 0 ? (
           <EmptyState onPick={(prompt) => void send(prompt)} disabled={chat.running} />
         ) : (
@@ -407,6 +412,22 @@ export function ChatPanel() {
         {liveText}
       </p>
       <div className="composer-area">
+        {showLatest && items.length > 0 && (
+          <button
+            type="button"
+            className="jump-latest"
+            onClick={() => {
+              stickToBottom.current = true
+              setShowLatest(false)
+              if (logRef.current) {
+                logRef.current.scrollTop = logRef.current.scrollHeight
+                logRef.current.focus({ preventScroll: true })
+              }
+            }}
+          >
+            최신 답변으로 이동 ↓
+          </button>
+        )}
         {items.length > 0 && (
           <div className="suggestion-row" role="group" aria-label="추천 질문" onWheel={onChipsWheel}>
             {QUICK_PROMPTS.map((prompt) => (
@@ -425,7 +446,9 @@ export function ChatPanel() {
             ref={inputRef}
             value={input}
             rows={1}
-            placeholder="무엇이든 물어보세요 (Enter 전송, Shift+Enter 줄바꿈)"
+            name="question"
+            autoComplete="off"
+            placeholder="예: 4층 재배치안을 비교해줘…"
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
           />
@@ -442,7 +465,7 @@ export function ChatPanel() {
           )}
         </form>
         <div className="composer-meta">
-          <span className="composer-context">{selection.length ? `선택한 매장 ${selection.join(', ')}도 함께 보내요` : ''}</span>
+          <span className="composer-context">{selection.length ? `선택한 매장 ${selection.join(', ')}도 함께 보내요` : 'Enter 보내기 · Shift+Enter 줄바꿈'}</span>
           <button type="button" className="text-button" disabled={chat.running || items.length === 0} onClick={() => dispatch({ type: 'chat/reset' })}>
             새 대화
           </button>

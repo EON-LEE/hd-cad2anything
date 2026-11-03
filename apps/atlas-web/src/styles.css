@@ -665,6 +665,39 @@ th {
   background: #f59e0b;
 }
 
+.side-tabs .result-mark {
+  display: block;
+  font-size: 10px;
+  color: var(--brand);
+}
+
+.result-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #eff6ff;
+  font-size: 12px;
+}
+
+.result-notice span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.result-notice button {
+  flex-shrink: 0;
+  color: var(--brand);
+}
+
+.jump-latest {
+  align-self: center;
+  margin-bottom: 8px;
+  color: var(--brand);
+}
+
 .tab-panel {
   position: relative;
   flex: 1;
@@ -705,6 +738,11 @@ th {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.chat-log:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .turn-user {
@@ -2211,6 +2249,54 @@ th {
 
 .alt-card table.moves {
   margin-top: 6px;
+}
+
+.alt-kpi {
+  margin: 10px 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.alt-details summary {
+  cursor: pointer;
+  color: var(--brand);
+  padding: 8px 0;
+}
+
+.layout-empty {
+  margin: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.layout-empty p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.layout-comparison {
+  margin: 14px;
+  overflow-x: auto;
+}
+
+.layout-comparison table {
+  font-variant-numeric: tabular-nums;
+}
+
+.layout-comparison caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 8px;
+}
+
+.layout-comparison .selected {
+  background: #fff3e0;
+}
+
+.comparison-constraint {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .range-bar {

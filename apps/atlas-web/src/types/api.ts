@@ -224,6 +224,7 @@ export interface LayoutAlternative {
   explanations: string[]
   /** Optional extension: hypothetical revision saved for this alternative. */
   rev_id?: string
+  search_status?: 'optimal' | 'feasible' | 'heuristic'
 }
 
 export interface LayoutRequest {

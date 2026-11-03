@@ -325,6 +325,8 @@ def test_streaming_runtime_reports_failed_responses():
     except RuntimeError as exc:
         assert "rate limited" in str(exc)
     assert events[-1]["type"] == "RUN_ERROR"
+    assert "요청 한도" in events[-1]["message"]
+    assert "rate limited" not in events[-1]["message"]
 
 
 def _added(item):
@@ -598,6 +600,8 @@ def test_table_panels_are_normalized_or_rejected():
         "ui_show_panel", {"type": "changes", "payload": {"rev_from": "R0", "rev_to": "R1"}}, {}
     )
     assert changes.patches[0]["value"] == {"type": "changes", "payload": {"rev_from": "R0", "rev_to": "R1"}}
+    assert "개정 검토 보기" in json.loads(changes.output)["shown"]
+    assert "열었습니다" not in json.loads(changes.output)["shown"]
 
 
 def test_heatmaps_carry_legend_hints_for_non_scalar_metrics():

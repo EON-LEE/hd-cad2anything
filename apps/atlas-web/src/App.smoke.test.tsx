@@ -147,7 +147,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     const suggestions = within(screen.getByRole('group', { name: '추천 질문' })).getAllByRole('button')
     expect(suggestions.map((b) => b.textContent)).toEqual([...QUICK_PROMPTS])
     expect((screen.getByRole('textbox', { name: '에이전트에게 질문' }) as HTMLTextAreaElement).placeholder).toBe(
-      '무엇이든 물어보세요 (Enter 전송, Shift+Enter 줄바꿈)',
+      '예: 4층 재배치안을 비교해줘…',
     )
 
     // Low-efficiency question (the mock has no 4F, so it answers on 3F).
@@ -192,6 +192,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
 
     // Revision review -> compare mode + review tab with changes, impact and artifacts.
     fireEvent.click(screen.getByRole('button', { name: 'S/S 개편 도면에서 뭐가 바뀌었는지 알려줘' }))
+    fireEvent.click(await screen.findByRole('button', { name: '개정 검토 보기' }))
     await waitFor(() => expect(screen.getByRole('tab', { name: '개정 검토' }).getAttribute('aria-selected')).toBe('true'))
     expect(await screen.findByRole('heading', { name: /변경 목록/ })).toBeTruthy()
     expect((screen.getByRole('combobox', { name: /^개정/ }) as HTMLSelectElement).value).toBe('R1')
@@ -207,6 +208,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     // Layout alternatives -> layout tab with three alternatives and a preview button.
     fireEvent.click(screen.getByRole('tab', { name: /에이전트/ }))
     fireEvent.click(screen.getByRole('button', { name: '4층 재배치안 3개 만들어 비교해줘' }))
+    fireEvent.click(await screen.findByRole('button', { name: '레이아웃 대안 보기' }))
     await waitFor(() => expect(screen.getByRole('tab', { name: '레이아웃 대안' }).getAttribute('aria-selected')).toBe('true'))
     expect(await screen.findByRole('heading', { name: 'ALT-3F-A' })).toBeTruthy()
     expect(screen.getAllByRole('button', { name: /미리보기/ })).toHaveLength(3)
@@ -979,6 +981,89 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
   })
 
   describe('agent panel requests', () => {
+    it('keeps chat visible during analysis and after completion until the user opens the prepared result', async () => {
+      const stream = controlledStream()
+      await renderWithStream(stream.streamChat)
+      await stream.push({
+        type: 'STATE_DELTA',
+        delta: [replaceOp('/panel', { type: 'layout', payload: { floors: ['3F'], alternatives: [] } })],
+      })
+      expect(screen.getByRole('tab', { name: '에이전트' }).getAttribute('aria-selected')).toBe('true')
+      expect(screen.getByRole('button', { name: '레이아웃 대안 보기' })).toBeTruthy()
+      await stream.push(
+        { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '현재 조건에서 개선 대안을 찾지 못했어요.' },
+        { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null,
+      )
+      expect(screen.getByRole('tab', { name: '에이전트' }).getAttribute('aria-selected')).toBe('true')
+      expect(log().textContent).toContain('현재 조건에서 개선 대안을 찾지 못했어요.')
+      fireEvent.click(screen.getByRole('button', { name: '레이아웃 대안 보기' }))
+      const tab = screen.getByRole('tab', { name: '레이아웃 대안' })
+      expect(tab.getAttribute('aria-selected')).toBe('true')
+      expect(document.activeElement).toBe(tab)
+      expect(await screen.findByText('현재 조건에서 개선 대안을 찾지 못했어요.', { selector: 'strong' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: '레이아웃 대안 보기' })).toBeNull()
+      fireEvent.keyDown(tab, { key: 'Home' })
+      expect(screen.getByRole('tab', { name: '에이전트' }).getAttribute('aria-selected')).toBe('true')
+    })
+
+    it('does not override a manually selected tab when another result arrives during analysis', async () => {
+      const stream = controlledStream()
+      await renderWithStream(stream.streamChat)
+      fireEvent.click(screen.getByRole('tab', { name: '관계 그래프' }))
+      await stream.push({ type: 'STATE_DELTA', delta: [replaceOp('/panel', { type: 'changes', payload: {} })] })
+      expect(screen.getByRole('tab', { name: '관계 그래프' }).getAttribute('aria-selected')).toBe('true')
+      await stream.push({ type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null)
+      expect(screen.getByRole('img', { name: '새 메시지' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('tab', { name: '개정 검토' }))
+      expect(screen.getByRole('tab', { name: '개정 검토' }).getAttribute('aria-selected')).toBe('true')
+    })
+
+    it('compares layout KPIs first, discloses details and rejects invalid calculation inputs', async () => {
+      await renderWith(<SidePanel />)
+      act(() => dispatch({
+        type: 'chat/event',
+        event: { type: 'STATE_DELTA', delta: [replaceOp('/panel', {
+          type: 'layout', payload: { rev: 'R2', floors: ['3F'], alternatives: [{
+            id: 'A', moves: [{ brand_id: 'B', brand_name: 'Quorelle', from_unit: '3F-E01', to_unit: '3F-C06' }],
+            objective_before: 100, objective_after: 110, kpi_delta: { sales_krw: 10, low: 5, high: 15 },
+            constraints: [], explanations: ['모델 계산'], search_status: 'optimal',
+          }] },
+        })] },
+      }))
+      const card = (await screen.findByRole('heading', { name: 'A' })).closest('article')!
+      expect(within(card).getByText('제약 검사 미확인')).toBeTruthy()
+      expect(within(card).queryByText('검사한 제약 충족')).toBeNull()
+      expect(within(card).getByText('이 대안의 모델·제약 범위에서 최적해 확인')).toBeTruthy()
+      expect(card.querySelector('details')?.open).toBe(false)
+      const compare = screen.getByRole('table', { name: '대안 한눈에 비교 · 예상 연매출 변화' })
+      fireEvent.click(within(compare).getByRole('button', { name: 'A 도면에서 보기' }))
+      expect(within(card).getByRole('button', { name: '미리보는 중' }).getAttribute('aria-pressed')).toBe('true')
+      const moves = screen.getByRole('spinbutton', { name: '최대 이동 수' })
+      fireEvent.change(moves, { target: { value: '11' } })
+      expect(screen.getByRole('alert').textContent).toContain('1~10')
+      expect(screen.getByRole('button', { name: '대안 생성 (R2)' }).hasAttribute('disabled')).toBe(true)
+      fireEvent.change(moves, { target: { value: '3' } })
+      fireEvent.click(screen.getByRole('checkbox', { name: '3F' }))
+      expect(screen.getByRole('alert').textContent).toContain('대상 층')
+      expect(screen.getByRole('button', { name: '대안 생성 (R2)' }).hasAttribute('disabled')).toBe(true)
+    })
+
+    it('lets a reader return to the latest answer without pulling them away from earlier text', async () => {
+      const stream = controlledStream()
+      await renderWithStream(stream.streamChat)
+      const conversation = log()
+      Object.defineProperty(conversation, 'scrollHeight', { configurable: true, value: 1500 })
+      conversation.scrollTop = 100
+      fireEvent.scroll(conversation)
+      await stream.push({ type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '새 답변이에요.' })
+      expect(conversation.scrollTop).toBe(100)
+      fireEvent.click(screen.getByRole('button', { name: '최신 답변으로 이동 ↓' }))
+      expect(conversation.scrollTop).toBe(1500)
+      expect(document.activeElement).toBe(conversation)
+      expect(screen.queryByRole('button', { name: '최신 답변으로 이동 ↓' })).toBeNull()
+      await stream.push({ type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }, null)
+    })
+
     it('open the upload area, the season brief and the what-if view in the side panel', async () => {
       await renderWith(<SidePanel />)
       act(() => {

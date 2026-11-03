@@ -279,15 +279,27 @@ def run_cases(
     defaults: dict[str, Any],
     on_result: Callable[[dict[str, Any]], None] | None = None,
     repeat: int = 1,
+    pause_seconds: int = 0,
+    error_cooldown_seconds: int = 0,
 ) -> list[dict[str, Any]]:
     results = []
     if repeat < 1:
         raise ValueError("repeat must be positive")
+    if pause_seconds < 0 or error_cooldown_seconds < 0:
+        raise ValueError("pauses must be nonnegative")
     for attempt in range(1, repeat + 1):
         for case in cases:
             ui_state = copy.deepcopy({**defaults.get("ui_state", {}), **case.get("ui_state", {})})
             thread_id = None
             for index, turn in enumerate([case, *case.get("turns", [])]):
+                if results:
+                    delay = (
+                        max(pause_seconds, error_cooldown_seconds)
+                        if results[-1]["run"]["error"]
+                        else pause_seconds
+                    )
+                    if delay:
+                        time.sleep(delay)
                 current = {
                     **case,
                     **turn,
@@ -351,6 +363,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", help="comma-separated case ids")
     parser.add_argument("--out", type=Path, help="JSON results path (default eval/results/<timestamp>.json)")
     parser.add_argument("--repeat", type=int, default=1, help="independent runs, not automatic retries")
+    parser.add_argument("--pause-seconds", type=int, default=0, help="pause between turns")
+    parser.add_argument(
+        "--error-cooldown-seconds",
+        type=int,
+        default=0,
+        help="pause after a runtime error; preserves the failed result",
+    )
     parser.add_argument(
         "--list", action="store_true", help="list case and turn counts without calling Foundry"
     )
@@ -364,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         cases = [case for case in cases if case["id"] in wanted]
     if args.repeat < 1:
         parser.error("--repeat must be positive")
+    if args.pause_seconds < 0 or args.error_cooldown_seconds < 0:
+        parser.error("pauses must be nonnegative")
     if args.list:
         print(
             f"cases={len(cases)} turns={sum(1 + len(c.get('turns', [])) for c in cases)} repeat={args.repeat}"
@@ -394,6 +415,8 @@ def main(argv: list[str] | None = None) -> int:
         defaults,
         on_result=save_result,
         repeat=args.repeat,
+        pause_seconds=args.pause_seconds,
+        error_cooldown_seconds=args.error_cooldown_seconds,
     )
     print(summarize(results))
     print(f"결과 파일: {out}")

@@ -16,11 +16,12 @@ const TABS: { id: TabId; label: string }[] = [
 ]
 
 export function SidePanel() {
-  const { ui, panelSeq, chat, composer } = useAppState()
+  const { ui, panelSeq, deferPanel, chat, composer } = useAppState()
   const [active, setActive] = useState<TabId>('chat')
   // Panels mount on first visit (avoids eager requests) and then stay mounted to keep their state.
   const [visited, setVisited] = useState<ReadonlySet<TabId>>(() => new Set<TabId>(['chat']))
   const [unread, setUnread] = useState(false)
+  const [pending, setPending] = useState<TabId | null>(null)
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
   const wasRunning = useRef(chat.running)
 
@@ -28,16 +29,24 @@ export function SidePanel() {
     setVisited((prev) => (prev.has(active) ? prev : new Set([...prev, active])))
   }, [active])
 
-  // Agent `ui_show_panel` -> switch to the matching tab.
+  // Keep the conversation visible while the agent prepares a result; the user chooses when to open it.
   useEffect(() => {
     if (panelSeq === 0) return
     const tab = panelTab(ui.panel)
-    if (tab) setActive(tab)
+    if (!tab) setPending(null)
+    if (tab && deferPanel) setPending(tab)
+    else if (tab) {
+      setActive(tab)
+      setPending(null)
+    }
     // Intentionally keyed on panelSeq only.
   }, [panelSeq])
 
   useEffect(() => {
-    if (composer.seq > 0) setActive('chat')
+    if (composer.seq > 0) {
+      setActive('chat')
+      setUnread(false)
+    }
   }, [composer.seq])
 
   // An answer that finished while another tab was open is marked as unread.
@@ -49,6 +58,7 @@ export function SidePanel() {
   const select = (id: TabId) => {
     setActive(id)
     if (id === 'chat') setUnread(false)
+    if (id === pending) setPending(null)
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -89,10 +99,26 @@ export function SidePanel() {
               {badge && (
                 <span className="dot" role="img" aria-label={chat.running ? '응답 중' : '새 메시지'} />
               )}
+              {pending === tab.id && !selected && <span className="result-mark" aria-hidden="true">새 결과</span>}
             </button>
           )
         })}
       </div>
+      {active === 'chat' && pending && (
+        <div className="result-notice">
+          <span role="status">결과 화면을 준비했어요. 채팅을 이어 읽거나 지금 열어볼 수 있어요.</span>
+          <button
+            type="button"
+            onClick={() => {
+              const target = pending
+              select(target)
+              tabRefs.current[TABS.findIndex((tab) => tab.id === target)]?.focus()
+            }}
+          >
+            {TABS.find((tab) => tab.id === pending)?.label} 보기
+          </button>
+        </div>
+      )}
       {TABS.map((tab) => (
         <div
           key={tab.id}

@@ -63,7 +63,7 @@ cases:
     extends: layout-4f-alternatives
     turns:
       - question: "추천은 알겠어. 아직 결정은 기록하지 말고 최적해의 의미와 예측의 한계만 설명해줘."
-        expect: {tools_none: [relayout_select], answer_patterns: ["모델|목적함수", "제약|조건", "추정|예측"]}
+        expect: {tools_none: [relayout_select], answer_patterns: ["모델|모형|목적함수", "제약|조건", "추정|예측"]}
   - id: follow-season-no-decision
     extends: relayout-fw-plan
     turns:

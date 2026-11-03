@@ -84,6 +84,51 @@ def test_extended_review_has_100_cases_and_115_turns_without_mutating_templates(
     assert all("answer_none" in c["expect"] for c in cases)
 
 
+@pytest.mark.parametrize(
+    ("text", "passed"),
+    [
+        ("Studio Korara는 88.7% 증가했고 비교군보다 컸지만, 증가분 전체를 이동 효과로 볼 수는 없어요.", True),
+        ("Studio Korara는 88.7% 증가했고 비교군보다 컸어요. 증가분 전체가 이동 효과예요.", False),
+        ("Studio Korara는 87% 증가했지만 비교군과 비교만으로 인과 효과를 단정할 수 없어요.", False),
+    ],
+)
+def test_before_after_rubric_preserves_numeric_and_causal_requirements(text, passed):
+    from pathlib import Path
+
+    _, cases = load_cases(Path(GOLDEN))
+    case = next(c for c in cases if c["id"] == "md-relayout-before-after")
+    result = score(case, collect(case["id"], _events(text=text)))
+    check = next(c for c in result["checks"] if c["check"] == "answer_patterns")
+    assert check["passed"] is passed
+
+
+def test_evaluation_pauses_after_errors_without_retrying_or_hiding_them(monkeypatch):
+    from cad2anything.evaluation import agent_eval
+
+    sleeps = []
+    monkeypatch.setattr(agent_eval.time, "sleep", sleeps.append)
+
+    class Runtime:
+        def __init__(self):
+            self.questions = []
+
+        def run(self, question, ui_state):
+            self.questions.append(question)
+            if question == "first":
+                return iter([{"type": "RUN_ERROR", "message": "APIError"}])
+            return _events()
+
+    runtime = Runtime()
+    cases = [{"id": q, "question": q} for q in ("first", "second", "third")]
+    results = run_cases(runtime, cases, {}, pause_seconds=5, error_cooldown_seconds=60)
+    assert sleeps == [60, 5]
+    assert runtime.questions == ["first", "second", "third"]
+    assert len(results) == 3 and results[0]["passed"] is False
+    assert results[0]["run"]["error"] == "APIError"
+    with pytest.raises(ValueError, match="nonnegative"):
+        run_cases(runtime, cases, {}, pause_seconds=-1)
+
+
 def test_scoring_counts_nested_tools_ui_actions_and_answers():
     case = {
         "id": "c",

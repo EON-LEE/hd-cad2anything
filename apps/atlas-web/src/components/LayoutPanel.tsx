@@ -67,7 +67,8 @@ export function LayoutPanel() {
   })
   const viewRefs = useRef<(HTMLButtonElement | null)[]>([])
   const [selectedFloors, setSelectedFloors] = useState<string[]>([ui.floor])
-  const [maxMoves, setMaxMoves] = useState(3)
+  const [maxMoves, setMaxMoves] = useState('3')
+  const movesValid = Number.isInteger(Number(maxMoves)) && Number(maxMoves) >= 1 && Number(maxMoves) <= 10
   const [keepAnchor, setKeepAnchor] = useState(true)
   const [result, setResult] = useState<{ alternatives: LayoutAlternative[]; origin: 'agent' | 'request'; rev: string } | null>(null)
   const [loading, setLoading] = useState(false)
@@ -113,11 +114,12 @@ export function LayoutPanel() {
   const generate = async () => {
     setLoading(true)
     setError(null)
+    setResult(null)
     try {
       const response = await source.getLayoutAlternatives({
         rev: ui.rev,
-        floors: selectedFloors.length ? selectedFloors : [ui.floor],
-        constraints: { max_moves: maxMoves, keep_anchors: keepAnchor },
+        floors: selectedFloors,
+        constraints: { max_moves: Number(maxMoves), keep_anchors: keepAnchor },
       })
       setResult({ alternatives: normalizeAlternatives(response.alternatives), origin: 'request', rev: ui.rev })
       setPreviewId(null)
@@ -181,7 +183,7 @@ export function LayoutPanel() {
         {seasonVisited && <RelayoutSection request={seasonRequest} />}
       </div>
       <div role="tabpanel" id="layout-view-panel-whatif" aria-labelledby="layout-view-whatif" className="layout-view" hidden={view !== 'whatif'}>
-        <p className="muted">제약 기반 배치 대안(what-if)을 만들고 KPI 영향 범위를 비교합니다.</p>
+        <p className="muted">브랜드를 어느 매장으로 옮길지 비교해요. 예상 매출은 모델 계산값이며, 실제 매출 증가를 보장하지 않아요.</p>
         <form
           className="layout-form"
           onSubmit={(e) => {
@@ -203,14 +205,27 @@ export function LayoutPanel() {
           <div className="form-row">
             <label className="field inline">
               <span>최대 이동 수</span>
-              <input type="number" min={1} max={10} value={maxMoves} onChange={(e) => setMaxMoves(Math.max(1, Number(e.target.value) || 1))} />
+              <input
+                type="number"
+                name="max_moves"
+                autoComplete="off"
+                inputMode="numeric"
+                required
+                min={1}
+                max={10}
+                value={maxMoves}
+                aria-invalid={!movesValid}
+                onChange={(e) => setMaxMoves(e.target.value)}
+              />
             </label>
             <label className="toggle">
               <input type="checkbox" checked={keepAnchor} onChange={(e) => setKeepAnchor(e.target.checked)} />
               앵커 브랜드 고정
             </label>
           </div>
-          <button type="submit" className="primary" disabled={loading}>
+          {!movesValid && <p className="error-text" role="alert">최대 이동 수는 1~10 사이의 정수로 입력해 주세요.</p>}
+          {selectedFloors.length === 0 && <p className="error-text" role="alert">대상 층을 하나 이상 선택해 주세요.</p>}
+          <button type="submit" className="primary" disabled={loading || !movesValid || selectedFloors.length === 0}>
             {loading ? '생성 중…' : `대안 생성 (${ui.rev})`}
           </button>
         </form>
@@ -224,7 +239,38 @@ export function LayoutPanel() {
             {result.origin === 'agent' ? '에이전트가 제시한' : '요청한'} 대안 {result.alternatives.length}개 · 기준 개정 {result.rev}
           </p>
         )}
-        {result?.alternatives.length === 0 && <p className="muted">조건을 만족하는 대안이 없습니다.</p>}
+        {loading && <p className="muted" role="status">이동 조건을 확인하고 배치 대안을 계산하고 있어요…</p>}
+        {result?.alternatives.length === 0 && (
+          <div className="layout-empty" role="status">
+            <strong>현재 조건에서 개선 대안을 찾지 못했어요.</strong>
+            <p>대안이 없다는 뜻이지, 현재 배치가 모든 조건에서 최적이라는 뜻은 아니에요. 이동 수나 대상 층을 조정해 다시 계산해 보세요.</p>
+          </div>
+        )}
+        {result && result.alternatives.length > 0 && (
+          <div className="layout-comparison">
+            <table>
+              <caption>대안 한눈에 비교 · 예상 연매출 변화</caption>
+              <thead>
+                <tr><th scope="col">대안</th><th scope="col">이동</th><th scope="col">예상 변화</th><th scope="col">도면</th></tr>
+              </thead>
+              <tbody>
+                {result.alternatives.map((alt) => (
+                  <tr key={alt.id} className={previewId === alt.id ? 'selected' : undefined}>
+                    <th scope="row">
+                      {alt.id}
+                      <span className={`comparison-constraint ${alt.constraints.some((c) => !c.ok) ? 'fail-text' : 'muted'}`}>
+                        {alt.constraints.some((c) => !c.ok) ? '제약 위반' : alt.constraints.length ? '검사한 제약 충족' : '제약 미확인'}
+                      </span>
+                    </th>
+                    <td>{alt.moves.length}곳</td>
+                    <td>{formatKrw(alt.kpi_delta.sales_krw, true)}</td>
+                    <td><button type="button" aria-label={`${alt.id} 도면에서 보기`} aria-pressed={previewId === alt.id} onClick={() => preview(alt)}>보기</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         {result?.alternatives.map((alt) => {
           const failed = alt.constraints.filter((c) => !c.ok)
           const active = previewId === alt.id
@@ -232,11 +278,19 @@ export function LayoutPanel() {
             <article key={alt.id} className={`alt-card${active ? ' active' : ''}`} aria-labelledby={`alt-${alt.id}`}>
               <header>
                 <h3 id={`alt-${alt.id}`}>{alt.id}</h3>
-                <span className={`badge ${failed.length ? 'danger' : 'ok'}`}>{failed.length ? `제약 위반 ${failed.length}` : '제약 충족'}</span>
+                <span className={`badge ${failed.length ? 'danger' : alt.constraints.length ? 'ok' : ''}`}>{failed.length ? `제약 위반 ${failed.length}` : alt.constraints.length ? '검사한 제약 충족' : '제약 검사 미확인'}</span>
                 <button type="button" aria-pressed={active} onClick={() => preview(alt)}>
                   {active ? '미리보는 중' : '미리보기'}
                 </button>
               </header>
+              <p className="alt-kpi"><strong>예상 연매출 {formatKrw(alt.kpi_delta.sales_krw, true)}</strong></p>
+              {alt.search_status && (
+                <p className="muted">
+                  {alt.search_status === 'optimal' ? '이 대안의 모델·제약 범위에서 최적해 확인' : alt.search_status === 'feasible' ? '실행 가능한 해 · 최적성 미확인' : '휴리스틱 탐색 · 최적성 미확인'}
+                </p>
+              )}
+              <details className="alt-details">
+                <summary>이동 {alt.moves.length}곳 · 제약 · 계산 근거 보기</summary>
               <table className="moves">
                 <caption className="visually-hidden">{alt.id} 이동 목록</caption>
                 <thead>
@@ -257,12 +311,12 @@ export function LayoutPanel() {
                 </tbody>
               </table>
               <dl className="kv">
-                <dt>목적함수</dt>
+                <dt>모델 평가값</dt>
                 <dd>
                   {formatObjective(alt.objective_before)} → {formatObjective(alt.objective_after)} (
                   {formatObjective(alt.objective_after - alt.objective_before, true)})
                 </dd>
-                <dt>매출 영향</dt>
+                <dt>예상 연매출 변화</dt>
                 <dd>
                   {formatKrw(alt.kpi_delta.sales_krw, true)}
                   <span className="muted">
@@ -289,6 +343,7 @@ export function LayoutPanel() {
                 </ul>
               )}
               {alt.rev_id && <p className="muted">가상 개정 {alt.rev_id}로 저장됨</p>}
+              </details>
             </article>
           )
         })}
