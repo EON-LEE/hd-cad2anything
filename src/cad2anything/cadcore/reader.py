@@ -2,8 +2,11 @@
 
 The reader works at the file-format level only: DXF entity types, drawing units and text encodings. It knows
 nothing about layer semantics. Coordinates are converted to meters from ``$INSUNITS`` (falling back to the
-manifest ``units`` field and finally to the drawing extents). Texts are decoded (``\\U+xxxx`` escapes) and
-checked for mojibake (CP949 bytes decoded with a western code page); repairable texts are fixed and flagged.
+manifest ``units`` field and finally to the drawing extents). A unit guessed from the extents is checked
+against the scaled bounding box: when the floor does not come out at a building's size the other common
+units are tried, ``unit_source`` records the correction (``heuristic_cm``...) and an issue asks for explicit
+units. Texts are decoded (``\\U+xxxx`` escapes) and checked for mojibake (CP949 bytes decoded with a western
+code page); repairable texts are fixed and flagged.
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ UNIT_NAMES_TO_M: dict[str, float] = {
     "feet": 0.3048,
 }
 HANGUL = re.compile(r"[\uac00-\ud7a3]")
+FLOOR_SPAN_M = (10.0, 500.0)  # a building floor's bounding box after scaling
+SCALE_NAMES = {1.0: "m", 0.1: "dm", 0.01: "cm", 0.001: "mm", 0.3048: "ft", 0.0254: "in"}
+SCALE_ORDER = (0.001, 0.01, 1.0, 0.3048, 0.0254, 0.1)  # tried in order when the guessed unit is implausible
+_EXTENT_SAMPLE = 2_000
 _HIGH_RUN = re.compile(r"[\u0080-\u00ff\udc80-\udcff]{2,}")
 _SUSPECT = re.compile(r"[\u0080-\u00ff]{3,}|[\ufffd\udc80-\udcff]")
 _FLOOR_FILE = re.compile(r"_(B\d+F?|\d+F)\.dxf$", re.IGNORECASE)
@@ -231,6 +238,29 @@ def resolve_scale(insunits: int, manifest_units: str | None, extent: float | Non
     return 1.0, "extent"
 
 
+def plausible_span(span: tuple[float, float], scale: float) -> bool:
+    """Does a floor's bounding box look like a building floor (every side within ``FLOOR_SPAN_M``)?"""
+    sides = sorted(float(value) * scale for value in span if value > 0)
+    if not sides:
+        return True  # nothing measurable: no reason to doubt the unit
+    return sides[0] >= FLOOR_SPAN_M[0] and sides[-1] <= FLOOR_SPAN_M[1]
+
+
+def correct_scale(span: tuple[float, float], scale: float) -> tuple[float, str] | None:
+    """Alternative unit that puts an implausible floor bounding box back in range (None when none does).
+
+    The extent heuristic assumes millimeters above 5,000 drawing units, so a centimeter drawing of a 120 m
+    floor (12,000 units) would shrink to 12 m. Trying the other common units and keeping the one whose
+    bounding box is a plausible floor size recovers it.
+    """
+    if plausible_span(span, scale):
+        return None
+    for candidate in SCALE_ORDER:
+        if candidate != scale and plausible_span(span, candidate):
+            return candidate, SCALE_NAMES[candidate]
+    return None
+
+
 # --- blocks ------------------------------------------------------------------------------------------
 
 
@@ -337,6 +367,26 @@ def _extent(msp: Any) -> float | None:
     return max(values) if values else None
 
 
+def _extent_span(msp: Any) -> tuple[float, float]:
+    """Width and depth of the modelspace bounding box in drawing units (sampled, 0 when empty)."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for entity in msp.query("LWPOLYLINE LINE"):
+        if entity.dxftype() == "LINE":
+            for vertex in (entity.dxf.start, entity.dxf.end):
+                xs.append(float(vertex.x))
+                ys.append(float(vertex.y))
+        else:
+            for x, y in entity.get_points("xy"):
+                xs.append(float(x))
+                ys.append(float(y))
+        if len(xs) > _EXTENT_SAMPLE:
+            break
+    if not xs:
+        return 0.0, 0.0
+    return max(xs) - min(xs), max(ys) - min(ys)
+
+
 def _other_location(entity: Any, scale: float) -> list[tuple[float, float]]:
     for key in ("center", "insert", "defpoint", "location", "start"):
         value = entity.dxf.get(key)
@@ -355,6 +405,36 @@ def read_floor(path: Path, floor: str, manifest_units: str | None = None) -> Flo
     scale, unit_source = resolve_scale(insunits, manifest_units, None)
     if unit_source != "header":
         scale, unit_source = resolve_scale(insunits, manifest_units, _extent(msp))
+        span = _extent_span(msp)
+        if unit_source == "extent":
+            # The extent rule only separates mm from m; check the result against a real floor's size.
+            corrected = correct_scale(span, scale)
+            if corrected is not None:
+                scale, name = corrected
+                unit_source = f"heuristic_{name}"
+                issues.append(
+                    Issue(
+                        "warning",
+                        "units_corrected",
+                        f"도면 크기가 {span[0] * scale:.0f}×{span[1] * scale:.0f} m가 되도록 단위를 "
+                        f"{name}로 보정했다(1 도면단위 = {scale:g} m). 층 크기로 보기 어려운 값이 나와 "
+                        "추정한 것이니 manifest의 units나 도면 프로파일에 단위를 명시해 달라.",
+                        floor,
+                        data={"span": list(span), "scale": scale},
+                    )
+                )
+            elif not plausible_span(span, scale):
+                issues.append(
+                    Issue(
+                        "error",
+                        "units_unresolved",
+                        f"단위를 추정했지만 도면 크기가 {span[0] * scale:.0f}×{span[1] * scale:.0f} m로 "
+                        f"층 크기({FLOOR_SPAN_M[0]:g}~{FLOOR_SPAN_M[1]:g} m)를 벗어난다. "
+                        "manifest의 units나 도면 프로파일에 단위를 명시해 달라.",
+                        floor,
+                        data={"span": list(span), "scale": scale},
+                    )
+                )
         issues.append(
             Issue(
                 "warning",

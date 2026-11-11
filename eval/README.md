@@ -17,7 +17,10 @@
 uv run --no-sync python -m cad2anything.evaluation.scorecard --root data/workspace --truth data/generated/truth
 ```
 
-하나라도 `실패`이면 종료 코드 1을 반환한다. 파싱 모델이나 정답 파일이 없는 항목은 `건너뜀`으로 표시한다.
+하나라도 `실패`이면 종료 코드 1을 반환한다. 점검 항목은 고정된 예상 목록을 기준으로 만든다.
+필수 모델·업무 데이터·정답 파일이 없으면 `건너뜀`과 사유를 표시하고, 기본적으로 종료 코드 1을 반환한다.
+fixture나 정답 파일이 준비되지 않은 실행을 허용하려면 `--allow-skips`를 지정한다.
+계산 중 예외가 발생하면 건너뛰지 않고 `실패`로 기록한다.
 
 **항목**
 
@@ -46,6 +49,7 @@ uv run --no-sync python -m cad2anything.evaluation.scorecard --root data/workspa
 - 에이전트가 배포되어 있다(`infra/README.md` 4단계).
 - `FOUNDRY_PROJECT_ENDPOINT`가 설정되어 있다.
 - 히트맵 값을 계산할 작업공간이 있다. 기본값은 `data/workspace`다.
+- `--preflight`를 쓸 때는 Atlas 주소를 `ATLAS_API_URL` 또는 `MCP_SERVER_URL`로 지정한다.
 
 **실행**
 
@@ -57,55 +61,88 @@ uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golde
 
 **확장 검토**
 
-`agent_review.yaml`은 기존 35개와 추가 65개로 구성한 100개 사례다. 추가 사례는 표현·조건 변경 20개,
-후속 대화 15개, 데이터 경계·잘못된 입력 15개, 최적화·판정 10개, UI 상태 5개다.
-후속 질문까지 합하면 독립 실행 한 번에 115턴이고, 3회 반복하면 최대 345턴이다.
-사례 수는 고유 질문 문장의 수가 아니다. 현재 고유 질문 문장은 99개이며,
-후속 대화의 첫 질문 등은 기존 질문을 재사용한다.
-UI 상태 5개는 화면 상태 패치를 검사하며 실제 브라우저 렌더링 검증을 대신하지 않는다.
+`agent_review.yaml`은 기존 35개와 추가 사례를 합친 확장 세트다. 표현·조건 변경, 후속 대화,
+데이터 경계, 최적화, UI 상태, R3 추정치·출처, 선택·공사·도면 대조 흐름을 포함한다.
+후속 질문까지 포함한 사례·턴·고유 질문 수는 루브릭을 바꾸면 달라질 수 있으므로 `--list`로 확인한다.
+`mutates: true`인 사례는 공유 작업공간을 바꿀 수 있어 기본적으로 건너뛴다.
+의도적으로 실행할 때만 `--allow-mutation`을 지정한다.
+UI 상태 검사는 에이전트 런타임이 만든 상태 패치와 최종 오버레이를 확인한다.
+실제 브라우저 렌더링·상호작용 검증은 `apps/atlas-web`의 Playwright 테스트가 담당한다.
 
 ```powershell
 # 외부 호출 없이 구성 확인
 uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --list
+# 사전 점검을 통과하면 지정 사례 평가를 시작
+uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --preflight --only prod-4f-low
 # 동일한 사례를 매번 새 대화로 독립 실행. 자동 재시도가 아니다.
-uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --repeat 3 --out eval/results/review-full.json
+uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --repeat 3 --pace-seconds 10 --out eval/results/review-full.json
+# 저장된 trace를 현재 루브릭으로 다시 채점. Foundry를 호출하지 않는다.
+uv run --no-sync python -m cad2anything.evaluation.agent_eval --cases eval/golden/agent_review.yaml --rescore eval/results/review-full.json --out eval/results/review-rescored.json
 ```
 
-실행 전에 Atlas와 PostgreSQL이 모두 준비 상태인지 확인한다. Atlas가 메모리에서 조회에 응답하더라도
-PostgreSQL이 중지되어 있으면 대안 저장 같은 쓰기는 실패할 수 있다. 서비스가 정상이 된 뒤 재실행해도
-이전 실패 기록은 지우거나 성공으로 덮어쓰지 않는다.
+`--preflight`는 Azure 기본 자격 증명으로 토큰을 얻고, 설정한 `ATLAS_API_URL` 또는 `MCP_SERVER_URL`의
+`/readyz`나 `/healthz` 응답을 확인한다. 이 검사는 Foundry 배포 이름, MCP 도구 실행, PostgreSQL 쓰기,
+R3 데이터 존재 여부를 확인하지 않는다. 이 항목은 실제 평가 전에 별도로 확인한다.
 
-분당 토큰 한도에 반복해서 걸리면 `--pause-seconds 10 --error-cooldown-seconds 60`을 지정해
+분당 토큰 한도에 반복해서 걸리면 `--pace-seconds 10 --error-cooldown-seconds 60`을 지정해
 턴 사이와 실행 오류 뒤에 쉰다. 오류가 난 턴을 자동 재시도하거나 성공으로 바꾸지 않는다.
 평가 도중 배포를 바꾸지 않으며, 에이전트 지침이나 서비스를 수정한 뒤에는 다른 결과 파일로 새 실행을 시작한다.
+
+반복 실행은 새 대화로 시작하지만 작업공간을 초기화하지 않는다. Atlas와 MCP 도구는 배포된 공유 작업공간을
+읽고 쓴다. 따라서 앞선 반복이나 다른 사용자의 작업이 다음 반복의 상태에 영향을 줄 수 있다.
+`--allow-mutation`으로 상태 변경 사례를 실행하면 특히 그렇다. 격리된 작업공간이 필요하면 별도 Atlas
+환경을 사용한다.
 
 사례마다 답변이 비어 있지 않고 `RUN_FINISHED`가 왔는지, 시작된 도구가 모두 완료됐는지 검사한다.
 `tools_any`, `tools_all`, `ui_any`는 시작 이벤트만으로 통과하지 않는다. `ok: true`로 끝난 호출만 센다.
 실패 후 정정된 성공 호출은 허용하되 실패 호출도 원본 기록에 남긴다.
 
-결과에는 실행 번호(`attempt`), 대화 턴(`turn`), 대화 ID, 도구 인자·성공 여부·출력, 최종 UI 상태가 포함된다.
+결과에는 실행 번호(`attempt`), 대화 턴(`turn`), 대화 ID, 도구 인자·성공 여부·출력, 최종 UI 상태,
+오류 클래스·HTTP 상태·공급자 요청 ID·`retry-after`가 포함된다.
 원본 도구 출력 기록은 평가 런타임의 `capture_tool_outputs`를 켰을 때만 활성화된다.
 일반 서비스 응답에는 이 원본 출력 필드를 추가하지 않는다.
 각 턴이 끝날 때마다 결과 파일을 저장하므로 긴 실행 중에도 완료한 기록을 확인할 수 있다.
-반복 실행별 점수와 모든 반복을 통과한 사례 수를 별도로 표시하며, 일부 재실행의 성공을 전체 통과로 보고하지 않는다.
+결과 파일은 실행 시작·종료 시각, Git 커밋과 dirty 여부, 루브릭 버전·해시, 사례 해시,
+endpoint 호스트 이름, 런타임이 노출하는 에이전트 이름·버전, 반복 횟수와 간격을 기록한다.
+endpoint URL 전체와 자격 증명은 저장하지 않는다.
+요약은 실행 가용성(완료율)과 완료된 턴의 규칙 통과율을 별도로 표시한다.
+실패한 턴은 결과에 남고 전체 통과율의 실패로 계산한다. 반복 실행별 점수와 모든 독립 실행에서 통과한
+사례 수도 별도로 표시한다.
+
+`--rescore`는 저장된 도구 trace와 답변을 현재 사례·기대값에 다시 적용한다. 결과에는 원래 점검 결과와
+새 점검 결과를 나란히 기록한다. 다시 채점해도 모델 답변의 의미가 참인지 새로 증명하지는 않는다.
 
 **점검 유형**
 
 | 유형 | 통과 조건 |
 |---|---|
 | `tools_any`, `tools_all`, `tools_none` | 지정한 도구를 하나라도, 모두, 하나도 호출하지 않음. 전문 에이전트 안의 호출도 포함한다. |
-| `ui_any` | 지정한 UI 함수 중 하나 이상이 성공. 실제 상태는 `state_equals`로 별도 검증 |
+| `ui_any` | 지정한 UI 함수 중 하나 이상이 성공. 성공한 오버레이 도구의 결과가 최종 UI 상태에도 남아야 한다. `ui_clear`를 기대한 턴은 이 생존 검사를 건너뛴다. |
+| `ui_overlays` | 최종 상태에 지정한 오버레이가 비어 있지 않음 |
 | `specialists_any` | 지정한 전문 에이전트 중 하나 이상과 상담 |
 | `answer_any`, `answer_all`, `answer_none` | 답변에 지정 문구가 하나라도, 모두, 하나도 나오지 않음 |
+| `answer_not`, `answer_forbidden_patterns` | 답변이 금지 정규식과 일치하지 않음 |
+| `answer_positive_any` | 지정한 정규식 중 하나가 부정문이 아닌 문맥에서 답변에 나타남 |
 | `consult_not_regex` | 지정한 전문 에이전트에 넘긴 요청이 정규식(예: 내부 매출 금액)과 일치하지 않음 |
+| `egress_not_regex` | 시장 조사자 상담과 웹·Bing 검색 등 외부 전송 도구의 최종 인자에 금지 패턴이 없음. 중첩 호출도 포함한다. |
 | `answer_patterns` | 정규식 목록을 **모두** 충족. 한 패턴 안의 `|`는 표현 대안 |
-| `answer_forbidden_patterns` | 답변이 금지 정규식 중 어느 것과도 일치하지 않음 |
+| `answer_numbers_from` | 지정한 성공 도구 출력의 숫자와 답변에서 정규식으로 추출한 숫자가 허용 오차 안에서 일치 |
+| `answer_entities_from` | 지정한 성공 도구 출력의 엔터티가 답변에 있고, 필요하면 출력 순서와 일치 |
 | `state_equals` | 최종 UI 상태의 JSON Pointer 경로별 값이 기대값과 같음 |
-| `tool_args`, `tool_values` | 성공한 도구 호출의 인자 또는 원본 출력에서 지정 경로의 값 검증. `equals`, `contains`, `approx`와 절대 오차 `tolerance` 지원 |
+| `tool_args`, `tool_values` | 성공한 도구 호출의 인자 또는 원본 출력에서 지정 경로의 값 검증. 둘 다 같은 도구를 가리키면 한 호출이 두 조건을 모두 만족해야 한다. |
+| `tool_calls` | 한 성공 호출의 인자와 출력에 대한 여러 조건을 함께 검증 |
+
+`answer_numbers_from`와 `answer_entities_from`은 `tool`, `path`로 근거 출력 위치를 지정한다.
+숫자·엔터티를 추출할 정규식은 `answer_pattern`에 쓴다. 캡처 그룹 이름을 숫자는 `value`,
+엔터티는 `entity`로 지정하면 주변 문구를 값으로 잘못 읽지 않는다.
 
 `defaults.expect`의 점검은 모든 사례에 적용한다. 사례에 같은 유형이 있으면 사례의 값을 쓴다. 단, `*_none` 목록은 두 목록을 합친다. 기본 점검은 답변에 도구 이름이나 JSON이 나오지 않는지 확인한다. 답변은 사용자가 읽는 대화체여야 하기 때문이다.
 
 실행 중 오류가 나면 그 사례는 실패로 처리한다.
+
+이 평가는 규칙 준수 평가다. 선언한 도구·인자·출력·숫자·엔터티·문구·UI 상태가 기준과 맞는지 확인한다.
+모든 한국어 문장의 의미나 설명의 완전성을 판정하지 않는다. 패턴이 맞아도 답이 맥락에서 틀릴 수 있으므로,
+중요 결과는 사람이 trace와 근거를 함께 검토한다.
 
 **2026-10-21 실행 결과**
 

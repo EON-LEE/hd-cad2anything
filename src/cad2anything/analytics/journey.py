@@ -24,7 +24,7 @@ TIER_LABELS = {"VVIP": "VVIP", "VIP": "VIP", "GOLD": "골드", "MEMBER": "일반
 WEEKDAYS_KO = "월화수목금토일"
 MIN_STOPS = 3
 MAX_STOPS = 12
-CANDIDATE_COLUMNS = ["customer_id", "date", "stops", "floors", "total_krw"]
+CANDIDATE_COLUMNS = ["customer_id", "date", "stops", "receipts", "floors", "total_krw"]
 
 
 def segment_label(customer: Mapping[str, Any] | None) -> str:
@@ -71,12 +71,27 @@ def filter_rows(
 def journey_candidates(
     rows: pd.DataFrame, min_stops: int = MIN_STOPS, max_stops: int = MAX_STOPS
 ) -> pd.DataFrame:
-    """Customer-days ranked for display: more floors, then more stops, then higher spend (deterministic)."""
+    """Customer-days ranked for display: more floors, then more stops, then higher spend (deterministic).
+
+    ``stops`` counts the stops of ``journey_stops``: consecutive receipts in the same unit are one stop.
+    ``receipts`` keeps the number of payments.
+    """
     if rows.empty:
         return pd.DataFrame(columns=CANDIDATE_COLUMNS)
+    ordered = rows.sort_values(["customer_key", "day", "ts"], kind="mergesort")
+    same_day = ordered["customer_key"].eq(ordered["customer_key"].shift()) & ordered["day"].eq(
+        ordered["day"].shift()
+    )
+    new_stop = ~(same_day & ordered["unit_code"].eq(ordered["unit_code"].shift()))
     days = (
-        rows.groupby(["customer_key", "day"], sort=False)
-        .agg(stops=("unit_code", "size"), floors=("floor", "nunique"), total_krw=("amount_krw", "sum"))
+        ordered.assign(_new_stop=new_stop.astype(int))
+        .groupby(["customer_key", "day"], sort=False)
+        .agg(
+            stops=("_new_stop", "sum"),
+            receipts=("unit_code", "size"),
+            floors=("floor", "nunique"),
+            total_krw=("amount_krw", "sum"),
+        )
         .reset_index()
         .rename(columns={"customer_key": "customer_id", "day": "date"})
     )

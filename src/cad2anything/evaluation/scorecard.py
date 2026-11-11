@@ -19,12 +19,21 @@ from pathlib import Path
 from typing import Any
 
 from cad2anything.model import ChangeSet, SpatialModel
-from cad2anything.services.tools import ToolError, Toolkit
+from cad2anything.services.tools import Toolkit
 from cad2anything.workspace import Workspace
 
 LOW_BAND = tuple(f"4F-E0{i}" for i in range(1, 7))
 FOCAL_SEGMENT = {"age_band": "40s", "tier": ["VIP", "VVIP"], "gender": "F"}
 REVISION_CHAIN = (("R0", "R1"), ("R1", "R2"), ("R2", "H1"))
+EXPECTED_REVISIONS = ("R0", "R1", "R2", "H1")
+EXPECTED_BUSINESS_CHECKS = (
+    "low-efficiency-band",
+    "segment-lift",
+    "exposure-trap",
+    "fountain-shower",
+    "md-relayout",
+    "layout-constraints",
+)
 
 
 @dataclass
@@ -41,24 +50,47 @@ def _parse_checks(ws: Workspace, truth_dir: Path | None) -> list[Check]:
     from cad2anything.cadcore.evaluate import compare_with_truth
 
     checks = []
-    for revision in ws.revisions():
-        rev = revision.rev_id
+    available = {revision.rev_id for revision in ws.revisions()}
+    for rev in EXPECTED_REVISIONS:
         truth_path = truth_dir / f"layout_{rev}.json" if truth_dir else None
         title = f"{rev} 도면 파싱 정확도"
         expected = "매장 정밀도·재현율 ≥ 0.98, 브랜드 ID 정확도 ≥ 0.98"
-        if ws.model_meta(rev).get("source") != "parsed" or truth_path is None or not truth_path.exists():
-            checks.append(Check(f"parse-{rev}", title, expected, None, None, "파싱 모델이나 정답이 없음"))
+        check_id = f"parse-{rev}"
+        if rev not in available:
+            checks.append(
+                Check(check_id, title, expected, None, None, "개정 모델을 작업공간에서 찾을 수 없음")
+            )
             continue
-        truth = SpatialModel.from_dict(json.loads(truth_path.read_text(encoding="utf-8")))
-        metrics = compare_with_truth(ws.model(rev), truth)
-        units, brands = metrics["units"], metrics["brands"]
-        observed = {
-            "precision": units["precision"],
-            "recall": units["recall"],
-            "brand_id_accuracy": brands["brand_id_accuracy"],
-        }
-        passed = min(observed.values()) >= 0.98
-        checks.append(Check(f"parse-{rev}", title, expected, observed, passed))
+        if truth_path is None or not truth_path.exists():
+            checks.append(Check(check_id, title, expected, None, None, f"정답 파일 없음: layout_{rev}.json"))
+            continue
+        try:
+            if ws.model_meta(rev).get("source") != "parsed":
+                checks.append(
+                    Check(
+                        check_id,
+                        title,
+                        expected,
+                        None,
+                        None,
+                        "모델 출처가 parsed가 아니므로 파싱 점검을 건너뜀",
+                    )
+                )
+                continue
+            truth = SpatialModel.from_dict(json.loads(truth_path.read_text(encoding="utf-8")))
+            metrics = compare_with_truth(ws.model(rev), truth)
+            units, brands = metrics["units"], metrics["brands"]
+            observed = {
+                "precision": units["precision"],
+                "recall": units["recall"],
+                "brand_id_accuracy": brands["brand_id_accuracy"],
+            }
+            passed = min(observed.values()) >= 0.98
+            checks.append(Check(check_id, title, expected, observed, passed))
+        except Exception as exc:
+            checks.append(
+                Check(check_id, title, expected, None, False, f"계산 오류 ({type(exc).__name__}): {exc}")
+            )
     return checks
 
 
@@ -71,28 +103,67 @@ def _diff_checks(ws: Workspace, truth_dir: Path | None) -> list[Check]:
         check_id = f"diff-{rev_from}-{rev_to}"
         title = f"{rev_from}→{rev_to} 개정 diff 정확도"
         expected = "변경 항목 정밀도·재현율 ≥ 0.95"
-        predicted = ws.change_set(rev_from, rev_to)
-        source = ws.change_meta(rev_from, rev_to).get("source")
-        if predicted is None or source != "diff" or truth_path is None or not truth_path.exists():
-            checks.append(Check(check_id, title, expected, None, None, "diff 결과나 정답이 없음"))
+        change_path = ws.root / "changes" / f"{rev_from}__{rev_to}.json"
+        if not change_path.exists():
+            checks.append(Check(check_id, title, expected, None, None, "diff 결과 파일이 작업공간에 없음"))
             continue
-        truth = ChangeSet.from_dict(json.loads(truth_path.read_text(encoding="utf-8")))
-        overall = evaluate_diff(predicted, truth)["overall"]
-        observed = {k: v for k, v in overall.items() if not isinstance(v, dict | list)}
-        passed = min(overall.get("precision", 0.0), overall.get("recall", 0.0)) >= 0.95
-        checks.append(Check(check_id, title, expected, observed, passed))
+        if truth_path is None or not truth_path.exists():
+            checks.append(
+                Check(
+                    check_id, title, expected, None, None, f"정답 파일 없음: changes_{rev_from}_{rev_to}.json"
+                )
+            )
+            continue
+        try:
+            predicted = ws.change_set(rev_from, rev_to)
+            source = ws.change_meta(rev_from, rev_to).get("source")
+            if predicted is None:
+                checks.append(Check(check_id, title, expected, None, None, "diff 결과를 읽을 수 없음"))
+                continue
+            if source != "diff":
+                checks.append(
+                    Check(check_id, title, expected, None, None, f"diff 출처가 아님: {source or '미기록'}")
+                )
+                continue
+            truth = ChangeSet.from_dict(json.loads(truth_path.read_text(encoding="utf-8")))
+            overall = evaluate_diff(predicted, truth)["overall"]
+            observed = {k: v for k, v in overall.items() if not isinstance(v, dict | list)}
+            passed = min(overall.get("precision", 0.0), overall.get("recall", 0.0)) >= 0.95
+            checks.append(Check(check_id, title, expected, observed, passed))
+        except Exception as exc:
+            checks.append(
+                Check(check_id, title, expected, None, False, f"계산 오류 ({type(exc).__name__}): {exc}")
+            )
     return checks
 
 
 def _business_checks(toolkit: Toolkit) -> list[Check]:
     checks: list[Check] = []
 
-    def add(check_id: str, title: str, expected: str, run: Callable[[], tuple[Any, bool]]) -> None:
+    def add(
+        check_id: str,
+        title: str,
+        expected: str,
+        run: Callable[[], tuple[Any, bool]],
+        revisions: tuple[str, ...] = (),
+        tables: tuple[str, ...] = (),
+    ) -> None:
+        missing = [f"개정 {rev}" for rev in revisions if not toolkit.ws.has_model(rev)]
+        missing.extend(f"업무 표 {table}" for table in tables if not toolkit.ws.has_table(table))
+        if missing:
+            checks.append(
+                Check(
+                    check_id, title, expected, None, None, f"필수 작업공간 fixture 없음: {', '.join(missing)}"
+                )
+            )
+            return
         try:
             observed, passed = run()
             checks.append(Check(check_id, title, expected, observed, passed))
-        except (ToolError, KeyError, ValueError) as exc:
-            checks.append(Check(check_id, title, expected, None, None, f"건너뜀: {exc}"))
+        except Exception as exc:
+            checks.append(
+                Check(check_id, title, expected, None, False, f"계산 오류 ({type(exc).__name__}): {exc}")
+            )
 
     def low_band() -> tuple[Any, bool]:
         result = toolkit.analytics_productivity("R2", floor="4F")
@@ -152,36 +223,46 @@ def _business_checks(toolkit: Toolkit) -> list[Check]:
         "저효율 존(4F 동측) 회수",
         "4F 하위 10% 플래그에 4F-E01~E06 중 3개 이상",
         low_band,
+        revisions=("R2",),
+        tables=("transactions", "pos_terminals"),
     )
     add(
         "segment-lift",
         "세그먼트 교차구매 회수",
         "40대 VIP·VVIP 여성의 화장품↔명품·해외패션 lift ≥ 2.0이고 20대보다 0.5 이상 높음",
         segment_lift,
+        tables=("transactions", "pos_terminals", "customers"),
     )
     add(
         "exposure-trap",
         "노출 함정 판정",
         "아동 매장 근처 효과가 노출 통제 후 줄고 공통 원인 의심으로 판정",
         exposure_trap,
+        revisions=("R2",),
+        tables=("transactions", "pos_terminals"),
     )
     add(
         "fountain-shower",
         "분수·샤워 흐름 회수",
         "B1 구매자의 같은 날 위층 구매 비율 ≥ 0.3, 최상층 구매 다음 구매가 아래층일 확률 ≥ 0.6",
         flows,
+        tables=("transactions", "pos_terminals"),
     )
     add(
         "md-relayout",
         "MD 개편 효과 회수",
         "R1에 에스컬레이터 정면으로 옮긴 브랜드의 전후 변화가 같은 층 비교군보다 큼",
         relayout,
+        revisions=("R1",),
+        tables=("transactions", "pos_terminals"),
     )
     add(
         "layout-constraints",
         "레이아웃 대안 제약 충족",
         "4F 대안이 모든 제약을 지키고 기대 매출이 증가",
         layout,
+        revisions=("R2",),
+        tables=("transactions", "pos_terminals", "brands"),
     )
     return checks
 
@@ -189,9 +270,22 @@ def _business_checks(toolkit: Toolkit) -> list[Check]:
 def run_scorecard(root: Path, truth_dir: Path | None = None) -> list[Check]:
     workspace = Workspace(root)
     toolkit = Toolkit(workspace, use_postgis=False)
-    return (
+    checks = (
         _parse_checks(workspace, truth_dir) + _diff_checks(workspace, truth_dir) + _business_checks(toolkit)
     )
+    expected = expected_check_inventory()
+    observed = [check.check_id for check in checks]
+    if observed != expected:
+        raise RuntimeError(f"scorecard inventory mismatch: expected {expected}, observed {observed}")
+    return checks
+
+
+def expected_check_inventory() -> list[str]:
+    return [
+        *(f"parse-{rev}" for rev in EXPECTED_REVISIONS),
+        *(f"diff-{rev_from}-{rev_to}" for rev_from, rev_to in REVISION_CHAIN),
+        *EXPECTED_BUSINESS_CHECKS,
+    ]
 
 
 def to_markdown(checks: list[Check]) -> str:
@@ -202,7 +296,17 @@ def to_markdown(checks: list[Check]) -> str:
             json.dumps(check.observed, ensure_ascii=False) if check.observed is not None else check.note
         )
         lines.append(f"| {status} | {check.title} | {check.expected} | {observed} |")
+    passed = sum(check.passed is True for check in checks)
+    failed = sum(check.passed is False for check in checks)
+    skipped = sum(check.passed is None for check in checks)
+    lines.extend(["", f"예상 점검 {len(checks)}개: 통과 {passed}, 실패 {failed}, 건너뜀 {skipped}"])
     return "\n".join(lines)
+
+
+def exit_code(checks: list[Check], allow_skips: bool = False) -> int:
+    failed = any(check.passed is False for check in checks)
+    skipped = any(check.passed is None for check in checks)
+    return 1 if failed or (skipped and not allow_skips) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("data/workspace"))
     parser.add_argument("--truth", type=Path, default=Path("data/generated/truth"))
     parser.add_argument("--json", type=Path, help="also write the checks as JSON")
+    parser.add_argument(
+        "--allow-skips",
+        action="store_true",
+        help="allow skipped checks when required fixtures or truth files are unavailable",
+    )
     args = parser.parse_args(argv)
     checks = run_scorecard(args.root, args.truth if args.truth.exists() else None)
     print(to_markdown(checks))
@@ -219,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         payload = [asdict(c) for c in checks]
         args.json.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    return 1 if any(c.passed is False for c in checks) else 0
+    return exit_code(checks, allow_skips=args.allow_skips)
 
 
 if __name__ == "__main__":

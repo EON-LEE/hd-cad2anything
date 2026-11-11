@@ -76,15 +76,21 @@ WARNING_COLOR = "#e53935"
 POPUP_BAND = re.compile(r"^[^-]+-P\d", re.IGNORECASE)
 HOURS_TEXT = re.compile(r"^\s*(\d{1,2})(?::00)?\s*시?\s*(?:[-~–]\s*(\d{1,2})(?::00)?\s*시?)?\s*$")
 TRAFFIC_LEGEND_NOTE = "결제 순서를 통로망 최단 경로로 이어 모은 값"
+PASS_UNIT = "회(추정 통과)"
+TRAFFIC_BASIS = f"반경 {SPOT_REACH_M:g}m 안에서 가림 없이 보이는 통로의 최대 추정 통과 수"
 TRAFFIC_CAVEAT = (
     "결제 순서를 통로망 최단 경로로 이은 추정이에요. 실제로 걸은 길이 아니에요. "
     "같은 날 같은 고객(가명 회원)의 연속 결제만 이었고, 표본 가중치를 곱해 전체 규모로 환산했어요. "
-    "구매 없이 지나간 고객과 비회원 결제는 빠져 있고, 층을 오가는 이동은 에스컬레이터로 가정했어요."
+    f"값은 사람 수가 아니라 지나간 횟수({PASS_UNIT})예요. 한 사람이 같은 곳을 여러 번 지나가면 여러 번 세고, "
+    "한 번 이동이 여러 통로를 지나면 통로마다 셉니다. customer_days는 같은 날 서로 다른 매장에서 두 번 이상 "
+    "결제해 이동이 생긴 회원 고객-일 수예요. 구매 없이 지나간 고객과 비회원 결제는 빠져 있고, 층을 오가는 "
+    "이동은 에스컬레이터로 가정했어요."
 )
 POPUP_CAVEAT = (
     "추정 유동으로 고른 검토용 후보예요. 피난 통로, 임대 조건, 시설·소방 기준은 따로 확인해야 해요. "
     "통로 위 후보는 부스 둘레에 2.4m 이상 지나갈 공간이 남고 에스컬레이터 승강장·계단·출입구에서 5m 넘게 "
-    "떨어진 곳만 골랐어요."
+    f"떨어진 곳만 골랐어요. passers는 사람 수가 아니라 지나간 횟수({PASS_UNIT})이고, 공실·팝업 매장과 통로 위 "
+    f"후보 모두 같은 기준({TRAFFIC_BASIS})으로 쟀어요."
 )
 EGRESS_CAVEATS = [
     "법규 인증이 아니라 검토용 기준이에요. 기준값은 바꿀 수 있어요.",
@@ -536,8 +542,10 @@ class FlowTools:
             )
         notes = self._flow_notes(query, state)
         notes.append(
-            "value는 기간 합계, per_day는 해당 요일 영업일 하루 평균이에요. share_of_floor는 그 층을 걸은 "
-            "이동 중 그 통로를 지난 비율이에요. walks는 층별 이동 수예요(층을 오가는 이동은 두 층에 셉니다)."
+            f"value는 기간 합계, per_day는 해당 요일 영업일 하루 평균이에요(단위는 사람 수가 아니라 {PASS_UNIT}). "
+            "share_of_floor는 그 층을 걸은 이동 중 그 통로를 지난 비율이에요. walks는 층별 이동 수예요"
+            "(층을 오가는 이동은 두 층에 셉니다). customer_days는 같은 날 서로 다른 매장에서 두 번 이상 결제한 "
+            "회원 고객-일 수예요."
         )
         return _json(
             {
@@ -545,6 +553,7 @@ class FlowTools:
                 "period": {"start": query.start, "end": query.end, "days": state.days},
                 "query": {**query.echo(), "segment_label": segment_text(query.segment)},
                 "label": "추정치",
+                "value_unit": PASS_UNIT,
                 "customer_days": int(round(state.customer_days)),
                 "trips": int(round(state.trips)),
                 "sample": {"customer_days": state.sample_customer_days, "trips": state.sample_trips},
@@ -593,11 +602,18 @@ class FlowTools:
     def _popup_candidates(
         self, query: FlowQuery, state: FlowState, side: float, area_min: float
     ) -> list[dict[str, Any]]:
-        """Vacant and popup units plus open corridor spots with the traffic passing them."""
+        """Vacant and popup units plus open corridor spots with the traffic passing them.
+
+        Both kinds are measured on the same basis (``TRAFFIC_BASIS``): the busiest corridor cell within
+        ``SPOT_REACH_M`` in clear sight of the candidate point, so that a corridor spot and a store front
+        can be compared and ranked together.
+        """
         spots_by_floor = self._booth_spots(query.rev, side)
         candidates: list[dict[str, Any]] = []
         for floor in [query.floor] if query.floor else list(state.router.graphs):
             graph = state.router.graphs[floor]
+            cell_flow = graph.cell_flow(state.flows.edge_flow[floor])
+            found: list[dict[str, Any]] = []
             for unit in graph.units:
                 code = _unit_code(unit)
                 attrs = unit.attributes
@@ -609,7 +625,7 @@ class FlowTools:
                 x, y = (
                     graph.node_xy[nodes[0]] if nodes else (unit.geometry.centroid.x, unit.geometry.centroid.y)
                 )
-                candidates.append(
+                found.append(
                     {
                         "kind": "unit",
                         "floor": floor,
@@ -620,15 +636,23 @@ class FlowTools:
                         "vacant": vacant,
                         "popup_unit": popup,
                         "brand_name": None if vacant else attrs.get("brand_name"),
-                        "passers": state.pass_by.get(code, 0.0),
+                        "traffic_basis": TRAFFIC_BASIS,
+                        "entrance_passes": float(state.pass_by.get(code, 0.0)),
                         "entity_id": unit.entity_id,
                     }
                 )
+            if found:
+                reach = graph.nearby_max(
+                    np.array([[c["x"], c["y"]] for c in found], dtype=float), cell_flow, SPOT_REACH_M
+                )
+                for candidate, value in zip(found, reach, strict=True):
+                    candidate["passers"] = float(value)
+                candidates.extend(found)
             spots = spots_by_floor.get(floor)
             if spots is None or spots.empty:
                 continue
             xy = spots[["x", "y"]].to_numpy(dtype=float)
-            passers = graph.nearby_max(xy, graph.cell_flow(state.flows.edge_flow[floor]), SPOT_REACH_M)
+            passers = graph.nearby_max(xy, cell_flow, SPOT_REACH_M)
             chosen: list[int] = []
             for k in sorted(range(len(xy)), key=lambda k: (-passers[k], xy[k, 0], xy[k, 1])):
                 if passers[k] <= 0 or len(chosen) >= SPOTS_PER_FLOOR:
@@ -645,6 +669,7 @@ class FlowTools:
                         "y": float(xy[k, 1]),
                         "clear_width_m": round(float(spots["open_m"].iloc[k]), 1),
                         "booth_m2": round(side * side, 1),
+                        "traffic_basis": TRAFFIC_BASIS,
                         "passers": float(passers[k]),
                     }
                 )
@@ -715,8 +740,8 @@ class FlowTools:
             per_day = state.per_day(c["passers"])
             amount = f"{per_day:,.0f}" if per_day >= 10 else f"{per_day:.1f}"
             reasons = [
-                f"{window + ' ' if window else ''}하루 평균 약 {amount}명(추정)이 앞을 지나요"
-                f"(후보 중 유동 {traffic_rank[id(c)]}위)."
+                f"{window + ' ' if window else ''}하루 평균 약 {amount}회 앞을 지나가요"
+                f"(추정 통과, 후보 중 유동 {traffic_rank[id(c)]}위)."
                 if c["passers"] > 0
                 else "이 조건에서는 앞을 지나는 추정 유동이 없어요."
             ]
@@ -754,23 +779,34 @@ class FlowTools:
             if c["kind"] == "spot":
                 item.update(clear_width_m=c["clear_width_m"], booth_m2=c["booth_m2"])
             else:
-                item.update(area_m2=c["area_m2"], vacant=c["vacant"], brand_name=c["brand_name"])
+                item.update(
+                    area_m2=c["area_m2"],
+                    vacant=c["vacant"],
+                    brand_name=c["brand_name"],
+                    entrance_passes=int(round(c["entrance_passes"])),
+                )
             item.update(
                 passers=int(round(c["passers"])),
                 passers_per_day=round(per_day, 1),
+                passers_unit=PASS_UNIT,
+                traffic_basis=c["traffic_basis"],
                 score=round(c["score"], 3),
                 reasons=reasons,
             )
             ranked.append(item)
+        basis = (
+            f"유동은 공실·팝업 매장과 통로 위 후보 모두 같은 기준({TRAFFIC_BASIS})으로 재서 한 줄로 "
+            f"비교했어요. 단위는 사람 수가 아니라 {PASS_UNIT}예요."
+        )
         if focal:
             scoring = (
                 "점수(0~1) = 추정 유동(후보 중 최댓값=1) × (0.7 + 0.2 × 에스컬레이터 승강장에서 보이는 정도 "
-                "+ 0.1 × 주변 카테고리 궁합)이에요. 유동이 없으면 0점이에요."
+                f"+ 0.1 × 주변 카테고리 궁합)이에요. 유동이 없으면 0점이에요. {basis}"
             )
         else:
             scoring = (
                 "점수(0~1) = 추정 유동(후보 중 최댓값=1) × (0.75 + 0.25 × 에스컬레이터 승강장에서 보이는 정도)"
-                "예요. 유동이 없으면 0점이에요."
+                f"예요. 유동이 없으면 0점이에요. {basis}"
             )
         if focal and not lifts:
             notes.append(f"{focal_name}의 교차구매 lift를 계산할 수 없어 카테고리 궁합은 넣지 않았어요.")
@@ -1154,7 +1190,7 @@ class FlowTools:
                 "query": echo,
                 "floors": layers,
                 "markers": markers,
-                "legend": {"low": "적음", "high": "많음", "unit": "명(추정)", "note": note},
+                "legend": {"low": "적음", "high": "많음", "unit": PASS_UNIT, "note": note},
                 "summary": summary,
                 "caveat": caveat,
             }

@@ -8,13 +8,22 @@ Files are compared by SHA-256, so only changed files are transferred.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import threading
+import time
 from collections.abc import Callable
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from cad2anything.store.blob import DEFAULT_PREFIXES
+from cad2anything.store.postgis import TOKEN_REFRESH_MARGIN_S
+from cad2anything.workspace import atomic_write_bytes
+
+LOCK_TIMEOUT_S = 40
+logger = logging.getLogger("cad2anything.store.pgmirror")
 
 TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS workspace_file (
@@ -44,6 +53,8 @@ def _local_digest(path: Path) -> str | None:
 
 
 class PgMirror:
+    backend = "postgres"
+
     def __init__(self, connect: Callable[[], Any] | None = None):
         if connect is None:
             from cad2anything.store.postgis import connect as pg_connect
@@ -52,7 +63,12 @@ class PgMirror:
         self._connect = connect
         self._conn: Any | None = None
         self._lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._schema_ready = False
+        self._available = False
+        self.error_count = 0
+        self.last_error: str | None = None
+        self.last_error_at: str | None = None
 
     @classmethod
     def from_env(cls) -> PgMirror | None:
@@ -60,12 +76,63 @@ class PgMirror:
             return None
         return cls()
 
+    def _usable_connection(self) -> bool:
+        conn = self._conn
+        if conn is None or conn.closed:
+            return False
+        expires_at = getattr(conn, "_cad2anything_token_expires_at", None)
+        return expires_at is None or time.time() < expires_at - TOKEN_REFRESH_MARGIN_S
+
+    def _drop_connection(self) -> None:
+        conn, self._conn = self._conn, None
+        self._schema_ready = False
+        if conn is not None:
+            with suppress(Exception):
+                conn.close()
+
+    def _record_error(self, exc: Exception) -> None:
+        with self._status_lock:
+            self.error_count += 1
+            self.last_error = type(exc).__name__
+            self.last_error_at = datetime.now(UTC).isoformat()
+            self._available = False
+        logger.warning("workspace PostgreSQL mirror failed error_type=%s", type(exc).__name__)
+
+    def health(self) -> dict[str, Any]:
+        """Return cached status without making readiness depend on a live database query."""
+        with self._status_lock:
+            available = self._available
+            errors = self.error_count
+            last_error = self.last_error
+            last_error_at = self.last_error_at
+        return {
+            "db": "ok" if available and self._usable_connection() else "down",
+            "mirror_errors": errors,
+            "last_mirror_error": last_error,
+            "last_mirror_error_at": last_error_at,
+        }
+
+    def healthcheck(self) -> bool:
+        """Refresh cached availability independently of the HTTP readiness probe."""
+        try:
+            self._execute("SELECT 1")
+        except Exception:
+            return False
+        return True
+
     def _execute(self, sql: str, params: tuple[Any, ...] | None = None, fetch: bool = False) -> list[Any]:
-        """Run one autocommit statement, reconnecting once if the connection dropped."""
-        with self._lock:
-            for attempt in (1, 2):
+        """Run one autocommit statement; reconnect once on a broken or expiring connection."""
+        import psycopg
+
+        if not self._lock.acquire(timeout=LOCK_TIMEOUT_S):
+            exc = TimeoutError("workspace mirror lock timed out")
+            self._record_error(exc)
+            raise exc
+        try:
+            for attempt in range(2):
                 try:
-                    if self._conn is None or self._conn.closed:
+                    if not self._usable_connection():
+                        self._drop_connection()
                         self._conn = self._connect()
                         self._conn.autocommit = True
                     if not self._schema_ready:
@@ -74,12 +141,22 @@ class PgMirror:
                         self._schema_ready = True
                     with self._conn.cursor() as cur:
                         cur.execute(sql, params)
-                        return cur.fetchall() if fetch else []
-                except Exception:
-                    if attempt == 2 or self._conn is None or not self._conn.closed:
-                        raise
-                    self._conn = None
-        return []
+                        rows = cur.fetchall() if fetch else []
+                    with self._status_lock:
+                        self._available = True
+                    return rows
+                except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
+                    self._drop_connection()
+                    self._record_error(exc)
+                    if attempt == 0:
+                        continue
+                    raise
+                except Exception as exc:
+                    self._record_error(exc)
+                    raise
+        finally:
+            self._lock.release()
+        raise AssertionError("unreachable")
 
     def remote_index(self) -> dict[str, str]:
         return {
@@ -102,7 +179,11 @@ class PgMirror:
     def push_tree(self, root: Path, prefixes: tuple[str, ...] = DEFAULT_PREFIXES) -> int:
         remote = self.remote_index()
         count = 0
-        for path in sorted(p for p in Path(root).rglob("*") if p.is_file()):
+        for path in sorted(
+            p
+            for p in Path(root).rglob("*")
+            if p.is_file() and not (p.name.startswith(".") and p.suffix == ".tmp")
+        ):
             name = path.relative_to(root).as_posix()
             if not name.startswith(prefixes):
                 continue
@@ -121,8 +202,7 @@ class PgMirror:
             target = Path(root) / name
             if _local_digest(target) == sha:
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(self.fetch(name))
+            atomic_write_bytes(target, self.fetch(name))
             count += 1
         return count
 

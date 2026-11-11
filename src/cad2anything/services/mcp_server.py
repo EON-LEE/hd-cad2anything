@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import hmac
 import inspect
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -12,7 +13,10 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+from cad2anything.services.errors import DecisionExistsError
 from cad2anything.services.tools import ToolError, Toolkit
+
+logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "백화점 도면에서 만든 버전별 공간관계 모델, 개정 변경, 생성기, 분석, 레이아웃 도구입니다. "
@@ -46,8 +50,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "analytics_adjacency_effect": "특정 카테고리 매장 근처(neighborhood=near: 경계 사이 radius_m 이내, 통로 건너편 포함. wall: 벽 공유) 매장의 ㎡당 매출 차이를 단순 비교와 노출 통제 추정으로 함께 보여주고, 공통 원인(노출) 의심 여부를 판정한다(추정치).",
     "analytics_before_after": "변경일 전후 같은 기간의 일평균 매출을 대상 매장(또는 key=brand_id로 브랜드)과 같은 층 비교군으로 비교한다. 인과 효과가 아니다.",
     "analytics_time_patterns": "시간대(hour), 요일(weekday), 날짜, 월과 카테고리·층 조합별 매출과 비중을 반환한다. category에는 카테고리 코드나 이름, 또는 식음료 전체를 뜻하는 'F&B'를 쓸 수 있다.",
-    "layout_generate_alternatives": "실제 개정을 기준으로 제약(층, 앵커 유지, 면적 허용 오차, 최대 이동 수, 이동 가능 카테고리)을 지키며 기대 매출을 높이는 배치 대안을 만들고 가상 개정으로 저장한다. 이동별 기여도, 층별 변화 범위, 제약 충족표를 반환한다(추정치).",
-    "whatif_score_moves": "브랜드 이동안(moves: brand_id 또는 브랜드명, to_unit)의 연간 기대 매출 변화와 범위, 층별 영향, 제약 충족 여부를 추정한다. 가상 개정은 만들지 않는다.",
+    "layout_generate_alternatives": "실제 개정을 기준으로 제약(층, 앵커 유지, 면적 허용 오차, 최대 이동 수, 이동 가능 카테고리)을 지키며 기대 매출을 높이는 배치 대안을 만들고 가상 개정으로 저장한다. 이동별 기여도, 층별 변화 범위, 제약 충족표와 search_status를 반환한다(추정치). optimal은 첫 대안에서 CP-SAT 해를 실제 채택하고 100원 단위로 반올림한 모델과 제약 안에서 증명했을 때만 쓴다. 두 번째 이후 대안의 제한된 문제 최적성은 optimal_diverse다.",
+    "whatif_score_moves": "브랜드 이동안(moves: brand_id 또는 브랜드명, to_unit)의 연간 기대 매출 변화와 범위, 층별 영향, 제약 충족 여부를 추정한다. 이웃 변화로 인접 효과가 달라진 기존 매장도 불확실성을 반영한다. 범위는 가정에 따른 추정 범위이며 통계적 신뢰구간이 아니다. 가상 개정은 만들지 않는다.",
     "analytics_customer_journey": "가명 고객 한 명의 하루 결제 순서(시각, 층, 매장, 금액, 이전 결제 후 경과 시간)를 반환한다. customer_id·date를 주거나, segment(age_band, gender, tier)와 rank로 조건에 맞는 고객 하루를 고른다. 결제 순서이며 실제 이동 경로가 아니다.",
     "analytics_store_compare": (
         "우리 점포와 다른 점포를 비교한다. level=store(점포 전체), floor(층별), category(카테고리별)로 metric(sales_per_m2 ㎡당 매출, "
@@ -113,17 +117,22 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "relayout_diagnose": (
         "브리프 기준 진단: 카테고리 시즌 지수(1보다 크면 그 시즌에 강함), 대상 층의 ㎡당 매출과 1년 전 같은 시즌 대비 증감, "
-        "계약 만료·저효율 후보 매장, 공실, 입점 브랜드별로 들어갈 수 있는 매장 수, 퇴점 브랜드 실적을 반환하고 프로젝트에 저장한다."
+        "계약 만료·저효율 후보 매장, 공실, 입점 브랜드별로 들어갈 수 있는 매장 수, 퇴점 브랜드 실적을 반환하고 프로젝트에 저장한다. "
+        "as_of(기본: 브리프 data_cutoff 또는 적용일 전날) 이후 거래는 제외한다. lease_cutoff는 적용일이며 계약 종료일이 그보다 앞서야 만료로 본다."
     ),
     "relayout_plan": (
         "브리프로 개편 대안을 만든다. 퇴점을 빼고 입점 브랜드를 빈 매장에 넣은 기준안(ALT-0)과, 계약 만료 브랜드(movable=all이면 전체)를 "
-        "옮겨 시즌 가중 목표(objective=commission이면 수수료 수익, sales면 매출)에서 이전 공사 손실(downtime_weeks)을 뺀 순효과를 "
-        "높이는 대안(ALT-1~)을 반환한다. 대안마다 변경 목록(입점·퇴점·이전), 기준안 대비 순효과·목표 변화·이전 비용·매출 변화, 지금 "
+        "옮겨 시즌 가중 목표(objective=commission이면 수수료 수익, sales면 매출)의 기존 비교 지표를 "
+        "높이는 대안(ALT-1~)을 반환한다. 입점 배정은 입점 수를 먼저 최대화하고 다음에 점수를 높인다. "
+        "대안마다 변경 목록(입점·퇴점·이전), 연간 증가 효과·1회성 공사 손실·첫 시즌 기준 순효과·매출 변화, 지금 "
         "대비 매출 변화, 제약 충족표가 있고 가상 개정(rev_id)으로 저장된다. extra_exits·extra_entries로 퇴점·입점을 더 가정할 수 있다. "
-        "모든 금액은 연 단위 추정치다."
+        "as_of 이후 거래는 제외하고, 공사비·투자 회수 기간은 포함하지 않는다. "
+        "선택·도면 대조·공사 순서가 있으면 같은 조건은 reused=true로 재사용한다. 조건이 다르면 오류를 반환한다. "
+        "사용자의 명시적 확인 없이 replace_decision=true로 다시 호출하지 않는다."
     ),
     "relayout_select": (
-        "사람이 고른 개편 대안(alt_id)과 결정자(decided_by)를 기록한다. 사용자가 이 대안으로 하겠다고 분명히 말했을 때만 쓴다."
+        "사람이 고른 개편 대안(alt_id)과 결정자(decided_by), 결정 시점 KPI 스냅숏과 추가 전용 이력을 기록한다. "
+        "사용자가 이 대안으로 하겠다고 분명히 말했을 때만 쓴다. decision_source는 확인 가능한 chat 또는 api만 기록한다."
     ),
     "relayout_check_drawing": (
         "CAD팀이 그려 올린 실제 개정(rev)을 선택된 개편 대안과 대조한다. 계획한 입점·퇴점·이전마다 일치, 다른 매장, 도면에 없음, "
@@ -134,29 +143,37 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "relayout_entry_options": (
         "신규 브랜드를 어디에 넣으면 좋은지 추천한다. brand(카탈로그 브랜드 ID·이름) 또는 category(그 카테고리의 평균 브랜드)를 주면 "
-        "면적·선호 층에 맞는 공실과 6개월 안에 계약이 끝나는 매장을 기대 매출(추정, 범위 포함) 순으로 반환한다. 각 후보에 현재 브랜드, "
-        "계약 만료일, 에스컬레이터 정면·코너·메인 동선 여부가 붙는다. season(SS·FW)을 주면 시즌 지수를 곱한다."
+        "면적·선호 층·인접 조건에 맞는 공실과 lease_cutoff 전에 계약이 끝나는 매장을 기대 매출(추정, 범위 포함) 순으로 반환한다. "
+        "lease_cutoff 기본값은 as_of(데이터 기준일)에서 183일 뒤다. 각 후보에 현재 브랜드, "
+        "계약 만료일, 에스컬레이터 정면·코너·메인 동선 여부가 붙는다. season(SS·FW)을 주면 시즌 지수를 곱하고 as_of 이후 거래는 제외한다."
     ),
     "relayout_unit_options": (
         "매장 하나(공실이나 곧 나갈 매장, unit_code)에 무엇을 넣으면 좋은지 추천한다. 면적·층·옆 매장과 맞는 카테고리를 그 카테고리 "
         "평균 브랜드의 기대 매출(objective=commission이면 수수료 수익) 순으로 반환하고, 카테고리마다 아직 입점하지 않은 카탈로그 "
         "브랜드 상위 3개, 지금 브랜드 대비 비율, 제외한 카테고리와 이유를 준다. season(SS·FW)을 주면 시즌 지수를 곱한다. "
-        "'○○가 나가면 그 자리에 뭘 넣을까', '공실 5F-W03 채우기' 질문에 쓴다(추정치)."
+        "as_of 이후 거래는 제외한다. '○○가 나가면 그 자리에 뭘 넣을까', '공실 5F-W03 채우기' 질문에 쓴다(추정치)."
     ),
     "relayout_phasing": (
         "개편 대안의 공사 순서를 짠다. 공사는 빈 매장에서만 시작하고, 옮기는 브랜드는 새 매장 공사가 끝날 때까지 기존 매장에서 "
         "영업한다고 본다. 서로 자리를 바꾸는 순환은 한 브랜드를 임시 매장(계획에 안 쓰는 공실)으로 옮기거나 휴점해서 푼다. "
         "crews(동시 공사 수, 기본 2), fitout_weeks(매장당 공사 주, 기본 브리프 값), temporary_sales_ratio(임시 매장 매출 비율, 기본 0.6)를 "
         "받아 주차별 단계(waits_for: 먼저 끝나야 하는 단계), 총 기간, 휴점 손실(lost_krw), 모두 휴점 가정 손실(naive_lost_krw), "
-        "입점 지연 기회 손실(entry_delay_krw), 입점 개장 주차를 반환하고 프로젝트에 저장한다. alt_id를 생략하면 선택한 대안을 쓴다."
+        "입점 지연 기회 손실(entry_delay_krw), 입점 개장 주차를 반환하고 프로젝트에 저장한다. alt_id를 생략하면 선택한 대안을 쓴다. "
+        "선택 전이면 기존 비교 지표가 가장 큰 대안을 임시로 쓰고 basis=best_net_fallback과 basis_note로 알린다. 결정된 대안이라고 설명하지 않는다."
     ),
     "upload_list_jobs": (
         "사람이 올린 도면의 처리 작업을 확인한다. job_id가 없으면 최근 작업 목록(개정, 상태, 올린 층, 단계 요약)을, 있으면 그 작업의 "
-        "단계별 상태, 파싱 이슈 수, 레이어 검토 큐, 변경 요약, 계약 정보 대조, 개편안 대조, 오류를 반환한다. 파일은 올릴 수 없다."
+        "단계별 상태, 레이어 검토 큐, 변경 요약, 계약·개편안 대조, 후속 단계 오류(stage_errors), 모델 가용성(revision_available), "
+        "대체 작업(superseded_by)을 반환한다. needs_review는 레이어 검토, partial은 모델 저장 뒤 후속 단계 실패이며 개정 승인이 아니다. "
+        "파일은 올릴 수 없다."
     ),
     "revision_check_metadata": (
         "실제 개정의 도면을 적용일에 유효한 계약 정보(leases)와 대조한다. 계약 매장이 도면에 없음, 도면 브랜드와 계약 브랜드 불일치, "
         "계약 면적과 도면 면적의 3% 넘는 차이, 계약 없는 매장을 유형별 건수와 함께 반환한다. floors로 층을 좁힐 수 있다."
+    ),
+    "data_provenance": (
+        "도면·거래·고객·메타데이터의 현재 출처를 조회한다. 기본 데이터는 실제 자료를 익명화한 것이 아니라 허구로 만든 합성 시연 "
+        "데이터이며, 업로드 자료는 파일명·시각·해시와 함께 구분한다. 기록 없는 파일을 직접 교체했는지와 업로드 자료가 실제 자료인지는 판단하지 않는다."
     ),
 }
 
@@ -167,18 +184,54 @@ def _require(name: str) -> str:
     return TOOL_DESCRIPTIONS[name]
 
 
-def recoverable(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Return argument and data errors as a normal result so the model can correct its call.
+TOOL_HINT = "인자를 고쳐 다시 호출하세요."
+DECISION_EXISTS_HINT = (
+    "이미 결정한 대안이 있어요. 무엇이 바뀌는지 사용자에게 설명하고 새로 만들지 물어보세요. "
+    "사용자가 이 대화에서 분명히 바꾸겠다고 하기 전에는 replace_decision=true로 다시 호출하지 마세요."
+)
+INTERNAL_ERROR_HINT = (
+    "같은 인자로 다시 호출하지 마세요. 이미 받은 결과로 답하거나 다른 도구로 확인하고, "
+    "이 단계를 하지 못했다고 사용자에게 알리세요."
+)
 
-    Foundry Agent Service fails the whole response (HTTP 400) when an MCP tool reports an error.
+
+def recoverable(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return tool failures as a normal ``{ok: false, tool, error, hint}`` result the model can act on.
+
+    Foundry Agent Service fails the whole response (HTTP 400) when an MCP tool reports an error, so no
+    exception may escape: argument and data errors (``ToolError``) ask the model to fix its call, a
+    relayout decision that would be replaced asks it to confirm with the user first, and unexpected
+    exceptions are logged here and reported without their message (it may contain internal details).
     """
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
+        except DecisionExistsError as exc:
+            return {
+                "ok": False,
+                "tool": name,
+                "code": "decision_exists",
+                "error": str(exc),
+                "hint": DECISION_EXISTS_HINT,
+            }
         except ToolError as exc:
-            return {"ok": False, "tool": name, "error": str(exc), "hint": "인자를 고쳐 다시 호출하세요."}
+            return {
+                "ok": False,
+                "tool": name,
+                "error": str(exc),
+                "hint": getattr(exc, "hint", None) or TOOL_HINT,
+            }
+        except Exception as exc:
+            logger.exception("MCP tool %s failed", name)
+            return {
+                "ok": False,
+                "tool": name,
+                "code": "internal_error",
+                "error": f"도구 내부 오류({type(exc).__name__})가 났어요.",
+                "hint": INTERNAL_ERROR_HINT,
+            }
 
     wrapper.__signature__ = inspect.signature(fn, eval_str=True)  # type: ignore[attr-defined]
     return wrapper

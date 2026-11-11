@@ -11,6 +11,7 @@ import {
   normalizeMetadataStatus,
   normalizeProfiles,
   normalizeUploadJob,
+  normalizeUploadRules,
 } from '../lib/uploads'
 import type {
   AgUiEvent,
@@ -49,6 +50,7 @@ import type {
   UploadJob,
   UploadJobCreated,
   UploadJobSummary,
+  UploadRules,
 } from '../types/api'
 
 export interface AtlasDataSource {
@@ -95,6 +97,8 @@ export interface AtlasDataSource {
   listDrawingProfiles(): Promise<DrawingProfile[]>
   uploadMetadata(kind: MetadataKind, file: File): Promise<MetadataUploadResult>
   getMetadataStatus(): Promise<MetadataStatus[]>
+  /** GET /api/uploads/rules: the revision id rules the server applies; rejects (404) on backends that predate it. */
+  getUploadRules(): Promise<UploadRules>
 }
 
 export class ApiError extends Error {
@@ -322,6 +326,11 @@ export function createHttpSource(baseUrl = ''): AtlasDataSource {
       return normalizeMetadataResult(await post<unknown>('/api/uploads/metadata', form))
     },
     getMetadataStatus: async () => normalizeMetadataStatus(await request<unknown>('/api/uploads/metadata')),
+    async getUploadRules() {
+      const rules = normalizeUploadRules(await request<unknown>('/api/uploads/rules'))
+      if (!rules) throw new ApiError(500, '업로드 규칙 응답 형식이 계약과 다릅니다.')
+      return rules
+    },
   }
 }
 
@@ -338,6 +347,7 @@ export function normalizeMeta(raw: unknown): Meta {
   return {
     facility: (raw.facility as Meta['facility']) ?? '',
     ...(typeof raw.data_through === 'string' && raw.data_through ? { data_through: raw.data_through } : {}),
+    ...(typeof raw.writes_available === 'boolean' ? { writes_available: raw.writes_available } : {}),
     revisions: raw.revisions
       .filter(isRecord)
       .map((r) => ({

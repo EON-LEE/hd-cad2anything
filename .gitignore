@@ -37,6 +37,9 @@ data/local/*
 # Evaluation run outputs (model answers); summaries go to docs when needed
 eval/results/
 
+# Local validation workspaces and generated test artifacts
+.test-artifacts*/
+
 # Real-brand mappings must never be committed
 **/real_brand_mapping*.*
 

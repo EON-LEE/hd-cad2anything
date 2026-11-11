@@ -149,6 +149,9 @@ function normalizeSummary(value: unknown, stops: readonly JourneyStop[]): Journe
     total_krw: finite(raw.total_krw) ?? (amounts.length ? amounts.reduce((acc, a) => acc + a, 0) : null),
     duration_min: finite(raw.duration_min) ?? (first && last ? minutesBetween(first.time, last.time) : null),
     walk_m: finite(raw.walk_m),
+    // I10: surface fallback leg counts only when the backend reported them.
+    ...(finite(raw.skipped_legs) !== null ? { skipped_legs: finite(raw.skipped_legs) } : {}),
+    ...(finite(raw.straight_legs) !== null ? { straight_legs: finite(raw.straight_legs) } : {}),
   }
 }
 
@@ -267,7 +270,7 @@ export function gapText(gapMin: number | null | undefined): string {
   return gapMin === null || gapMin === undefined || !Number.isFinite(gapMin) ? '' : `${formatMinutes(gapMin)} 후`
 }
 
-/** Summary chips: "결제 4회", "3개 층", "총 51만원", "3시간 5분", "추정 이동 640m". */
+/** Summary chips: "결제 4회", "3개 층", "총 51만원", "3시간 5분", "추정 이동 640m" (+ straight/skipped notes, I10). */
 export function journeySummaryChips(journey: Journey): string[] {
   const s = journey.summary
   const chips = [`결제 ${s.stops}회`]
@@ -275,6 +278,8 @@ export function journeySummaryChips(journey: Journey): string[] {
   if (s.total_krw !== null) chips.push(`총 ${formatManwon(s.total_krw)}`)
   if (s.duration_min !== null && s.duration_min > 0) chips.push(formatMinutes(s.duration_min))
   if (s.walk_m !== null) chips.push(`추정 이동 ${formatWalk(s.walk_m)}`)
+  if (s.straight_legs) chips.push(`직선 추정 ${s.straight_legs}구간`)
+  if (s.skipped_legs) chips.push(`거리 계산 불가 ${s.skipped_legs}구간`)
   return chips
 }
 

@@ -46,16 +46,17 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 | analytics | `analytics_store_compare` | `level?`(`store`·`floor`·`category`), `metric?`(`sales_per_m2`·`sales_per_pyeong`·`sales_krw`·`area_m2`·`growth_pct`), `floor?`, `category?`, `start?`, `end?`, `top?` | 점포별 값, 다른 점포 중앙값, 순위, 중앙값 대비 차이(`gap_pct`), 한국어 요약. 대상 점포는 거래와 그달의 도면, 다른 점포는 `store_kpis` 메타데이터에서 계산한다. 기본 기간은 최근 12개월이다. |
 | analytics | `analytics_relayout_review` | `rev`, `window_days?` | 개정의 바뀐 매장마다 적용일 앞뒤 같은 기간의 일평균 매출 변화와 같은 층 비교군 대비 차이, 변경 유형별·층별·전체 합계, 보고서 링크. 인과 아님 |
 | relayout | `relayout_list_briefs` | — | 사람이 올린 개편 브리프와 프로젝트 진행 상태(`draft`·`diagnosed`·`planned`·`selected`·`checked`), 선택된 대안 |
-| relayout | `relayout_diagnose` | `brief_id` | 카테고리 시즌 지수, 대상 층의 ㎡당 매출과 1년 전 같은 시즌 대비 증감, 계약 만료·저효율 후보, 공실, 입점 브랜드별 들어갈 수 있는 매장 수 |
-| relayout | `relayout_plan` | `brief_id`, `objective?`, `n_alternatives?`, `max_moves?`, `downtime_weeks?`, `movable?`, `extra_exits?`, `extra_entries?` | 기준안(ALT-0)과 대안(ALT-1~)별 변경(입점·퇴점·이전), 순효과·목표 변화·이전 비용·기대 매출 변화(추정치), 제약 충족표, 가상 개정 ID(`{brief_id}-A{n}`) |
-| relayout | `relayout_select` | `brief_id`, `alt_id`, `decided_by?` | 사람이 고른 대안을 기록한 프로젝트 |
+| relayout | `relayout_diagnose` | `brief_id`, `as_of?` | 기준일까지의 카테고리 시즌 지수, 대상 층의 ㎡당 매출과 1년 전 같은 시즌 대비 증감, 계약 만료·저효율 후보, 공실, 입점 가능 매장 수, `as_of`·`lease_cutoff` |
+| relayout | `relayout_plan` | `brief_id`, `objective?`, `n_alternatives?`, `max_moves?`, `downtime_weeks?`, `movable?`, `extra_exits?`, `extra_entries?`, `replace_decision?`, `as_of?` | 기준안(ALT-0)과 대안(ALT-1~)별 변경, 연간 증가 효과·1회성 공사 손실·첫 시즌 기준 순효과(추정치), 기존 비교 지표, 제약 충족표, 최적성 상태, 가상 개정 ID(`{brief_id}-A{n}`), 서버 선택 상태. 보존된 동일 조건은 `reused: true` |
+| relayout | `relayout_select` | `brief_id`, `alt_id`, `decided_by?`, `decision_source?` | 사람이 고른 대안, 결정 시점 KPI 스냅숏과 추가 전용 이력을 기록한 프로젝트 |
 | relayout | `relayout_check_drawing` | `brief_id`, `rev`, `alt_id?` | 계획한 변경마다 일치·다른 매장·도면에 없음·퇴점 안 됨, 일치율, 계획에 없는 변경, 3% 넘는 면적 변화 |
 | relayout | `relayout_report` | `brief_id` | 개편 제안서(HTML) 링크와 포함한 절 |
-| relayout | `relayout_entry_options` | `brand?`, `category?`, `rev?`, `floors?`, `season?`, `include_expiring?`, `top?` | 신규 브랜드를 넣을 공실·계약 만료 예정 매장 후보와 기대 매출 범위(추정치), 매장 특징 |
-| relayout | `relayout_unit_options` | `unit_code`, `rev?`, `season?`, `objective?`, `include_other_floors?`, `top?` | 매장 하나(공실·퇴점 예정)에 맞는 카테고리 순위(평균 브랜드의 기대 매출·수수료 수익, 범위, 지금 브랜드 대비 비율), 카테고리별 미입점 브랜드 후보, 제외한 카테고리와 이유(추정치) |
-| relayout | `relayout_phasing` | `brief_id`, `alt_id?`, `crews?`, `fitout_weeks?`, `temporary_sales_ratio?`, `use_temporary?` | 대안의 공사 순서: 주차별 단계(퇴점, 이전 공사, 입점 공사, 임시 매장, 휴점)와 선행 단계, 총 기간, 휴점 손실, 모두 휴점 가정 손실, 입점 지연 기회 손실, 입점 개장 주차, 순환 해소 방법. 프로젝트에 저장한다. |
-| upload | `upload_list_jobs` | `job_id?`, `limit?` | 최근 도면 업로드 작업 목록, 또는 작업 하나의 단계·검토 큐·변경·계약 정보 대조·개편안 대조 요약 |
+| relayout | `relayout_entry_options` | `brand?`, `category?`, `rev?`, `floors?`, `season?`, `include_expiring?`, `top?`, `lease_cutoff?`, `as_of?` | 면적·층·인접 조건에 맞는 신규 브랜드 입점 후보와 기대 매출 범위(추정치), 매장 특징, `as_of`·`lease_cutoff`·기준일 설명 |
+| relayout | `relayout_unit_options` | `unit_code`, `rev?`, `season?`, `objective?`, `include_other_floors?`, `top?`, `as_of?` | 매장 하나에 맞는 카테고리 순위(평균 브랜드의 기대 매출·수수료 수익, 범위, 지금 브랜드 대비 비율), 카테고리별 미입점 브랜드 후보, 제외 이유, 데이터 기준일(추정치) |
+| relayout | `relayout_phasing` | `brief_id`, `alt_id?`, `crews?`, `fitout_weeks?`, `temporary_sales_ratio?`, `use_temporary?` | 주차별 단계와 선행 단계, 총 기간, 휴점 손실, 모두 휴점 가정 손실, 입점 지연 기회 손실, 입점 개장 주차, 순환 해소 방법. `basis`·`basis_note`로 선택안 또는 임시 기준임을 알리고 프로젝트에 저장한다. |
+| upload | `upload_list_jobs` | `job_id?`, `limit?` | 최근 도면 업로드 작업 또는 한 작업의 단계·레이어 검토 큐·변경·계약·개편안 대조 요약. `partial`의 `stage_errors`, `revision_available`, `superseded_by`를 제공한다. 작업 상태는 개정 승인이 아니다. |
 | upload | `revision_check_metadata` | `rev`, `floors?` | 도면과 계약 정보(`leases`)의 차이: 계약 매장이 도면에 없음, 브랜드 불일치, 면적 3% 초과 차이, 계약 없는 매장 |
+| upload | `data_provenance` | — | `{ok, default_dataset, domains, note}`. 도면 개정별 출처와 거래·고객·메타데이터의 합성 시연·업로드 출처를 구분한다. 업로드 파일명·시각·SHA-256과 행 수를 제공한다. 기본 데이터는 실제 자료를 익명화한 것이 아니다. |
 
 금액은 합성 표본 거래에 표본 가중치를 곱한 전체 규모 값이다. 실적 지표는 개정 적용 기간의 합계를 연 단위로 환산한다. 실제 개정의 분석 기간은 그 개정의 적용일부터 다음 실제 개정 적용일 전날까지다. 적용일이 거래 데이터의 마지막 날 뒤인 실제 개정(예: 다음 시즌용으로 올린 도면)은 실적이 없다. 이 개정에서 `analytics_productivity`는 오류를 돌려주고, `spatial_query`는 가상 개정처럼 기대 매출(`expected_sales_krw`, 추정치)을 쓴다.
 
@@ -98,13 +99,16 @@ Atlas 서비스의 `/mcp` 엔드포인트(Streamable HTTP, stateless JSON 응답
 
 | 값 | 뜻 |
 |---|---|
-| `optimal` | 최적을 증명했다. ALT-1보다 순효과가 큰 배치는 없다. |
-| `feasible` | 제한 시간(결정론적 시간 10, `ATLAS_LAYOUT_EXACT_SECONDS`로 바꿈) 안에 증명을 끝내지 못했다. `net_upper_bound_krw`가 순효과 상한이다. |
-| `heuristic` | 정수계획을 쓰지 않았다(OR-Tools 없음 또는 `ATLAS_LAYOUT_EXACT=0`). 탐색이 찾은 가장 좋은 배치이며 최적을 증명하지 않는다. |
+| `optimal` | 첫 대안에서 다양성 벌점·이전 대안 제외 조건 없이 CP-SAT 해를 실제 채택했고, **100원 단위로 반올림한 모델과 제약 안에서** 최적성을 증명했다. 반올림 전 금액이나 첫 시즌 순효과의 전역 최적을 뜻하지 않는다. |
+| `optimal_diverse` | 두 번째 이후 대안에서 CP-SAT 해를 실제 채택했고, **100원 단위로 반올림한 모델과 앞선 대안과 다르게 만드는 조건 안에서** 최적성을 증명했다. 원래 문제의 최적성은 아니다. |
+| `feasible` | 제한 시간 안에 최적성을 증명하지 못했거나, CP-SAT 해 대신 점수가 더 높은 탐색 배치를 유지했다. 이 배치의 최적성을 주장하지 않는다. |
+| `heuristic` | 전체 이전 문제의 정수계획 결과가 없다(ALT-0, OR-Tools 없음 또는 `ATLAS_LAYOUT_EXACT=0` 등). 전체 배치의 최적성을 증명하지 않는다. |
 
-CP-SAT은 정수 계수만 받으므로 금액을 100원 단위로 반올림한다. 반올림으로 생길 수 있는 오차의 최대치(브랜드 하나에 수백 원)를 상한에 더한다. 따라서 `optimal`은 "이 오차 한도보다 더 좋은 배치는 없다"는 뜻이다. 합성 데이터의 FW2026 브리프와 4층 대안 질문은 모두 `optimal`이고, 상한과 ALT-1의 차이는 10만 원 미만이며, 각각 1초 안팎에 풀린다.
+CP-SAT은 정수 계수만 받으므로 금액 계수를 100원 단위로 반올림한다(`objective_rounding_krw: 100`). 정수계획 결과가 없으면 이 필드는 `null`이다. 기본 제한은 결정론적 시간 10이며 `ATLAS_LAYOUT_EXACT_SECONDS`로 바꾼다. 실행 시간과 증명 여부는 입력에 따라 달라진다.
 
-**입력(사람이 정함):** 개편 브리프(시즌, 적용일, 기준 개정, 대상 층, 목적, 최대 이동 수, 공사 기간, 이동 대상, 입점·퇴점 브랜드), 계약 정보(`leases`), 브랜드 카탈로그(목표 면적, 선호 층, 상충 카테고리).
+대안마다 제공하는 `bound_krw`는 해당 대안의 문제에서 다양성 벌점과 반올림 오차 한도까지 반영한 **기준안 대비 비교 지표 상한**이다. `gap_krw`는 그 상한에서 채택한 배치의 벌점 적용 비교 지표를 뺀 값이다. 반올림 오차 한도를 포함하므로 `optimal`에서도 0일 필요는 없다. 상한을 얻지 못하면 두 필드는 생략한다. 기존 `net_upper_bound_krw`는 첫 문제의 상한으로 유지한다. 후속 대안의 `bound_krw`와 섞어서 비교하지 않는다.
+
+**입력(사람이 정함):** 개편 브리프(시즌, 적용일, 기준 개정, 대상 층, 목적, 최대 이동 수, 공사 기간, 이동 대상, 입점·퇴점 브랜드, 선택적 `data_cutoff`), 계약 정보(`leases`), 브랜드 카탈로그(목표 면적, 선호 층, 상충 카테고리). 입점 브랜드의 `commission_rate`는 유한한 0~1 비율이어야 한다. 20%는 `0.2`로 입력하며 `20`, 음수, NaN, 무한대는 거부한다.
 
 **목적 함수:**
 
@@ -112,18 +116,24 @@ $$\max \sum_{b} w_b \, S(b, u_b) \;-\; \sum_{b \in \text{이전}} w_b \, S(b, u_
 
 - $S(b, u)$: 브랜드 $b$를 매장 $u$에 둘 때의 연 기대 매출. 기존 [what-if 점수 모델](../../src/cad2anything/layout/whatif.py)(면적 탄력성, 에스컬레이터 보행거리, 인접 교차구매 보너스)이다.
 - $w_b$: 브랜드 가중치 = 카테고리 시즌 지수 × (목적이 수수료 수익이면 수수료율, 매출이면 1).
-- 시즌 지수 = 카테고리의 해당 시즌 월 일평균 매출 ÷ 연간 일평균 매출(2년 거래).
-- 둘째 항은 이전 공사 기간에 잃는 매출(가중치 적용)이다. 입점 브랜드에는 붙지 않는다.
+- 시즌 지수 = 데이터 기준일 `as_of`까지의 카테고리 해당 시즌 월 일평균 매출 ÷ 같은 데이터 기간의 전체 일평균 매출이다. 계획·진단의 기본 `as_of`는 브리프 `data_cutoff` 또는 적용일 전날이다. 이후 거래는 시즌 지수·매출·친화도 모델 입력에서 제외한다.
+- 둘째 항은 이전 공사 기간에 잃는 1회성 매출(가중치 적용)이다. 입점 브랜드에는 붙지 않는다.
 
-**제약:** 대상 층만 바꾼다. 앵커는 고정한다. 이동 대상(`movable=expiring`)은 적용일 전에 계약이 끝나는 브랜드다. 이동 수는 `max_moves` 이하다. 옮긴 브랜드와 입점 브랜드는 목표 면적 ±허용 오차와 선호 층을 지킨다. 바뀐 인접 쌍에 상충 카테고리가 없어야 한다.
+기존 순위 목적은 바꾸지 않는다. `annual_uplift_krw`는 기준안 대비 **연간 증가 효과**, `one_off_loss_krw`는 **1회성 공사 손실**이다. 기존 `net_krw`는 둘의 차이인 비교 지표로 유지한다. **첫 시즌 기준 순효과**인 `season_net_krw`는 연간 증가 효과에 `season_horizon.days / 365`를 곱한 뒤 1회성 손실을 뺀 값이다. 시즌 기간은 브리프 적용일과 시즌 시작일 중 늦은 날부터 시즌 말일까지이며, 끝난 시즌이면 0일이다. 공사비·이사비 등 실제 지출과 투자 회수 기간은 포함하지 않는다. 모든 금액을 연간 금액이라고 표시하면 안 된다.
+
+**제약:** 대상 층만 바꾼다. 앵커는 고정한다. 계약 만료 판정은 한 규칙(`lease_end < lease_cutoff`)을 쓴다. 계획·진단의 `lease_cutoff`는 적용일이고 응답에도 기록한다. 입점 후보 조회의 기본값은 `as_of`에서 183일 뒤이며, 계획과 같은 후보를 보려면 같은 기준일을 명시한다. `movable=expiring`에서 계약 정보가 없으면 기존 브랜드를 이동하지 않고 경고한다. 전체 이동은 `movable=all`을 명시해야 한다. 이동 수는 `max_moves` 이하다. 옮긴 브랜드와 입점 브랜드는 목표 면적 ±허용 오차와 선호 층을 지킨다. 기존 인접 충돌은 실제 개편 전 배치에 있던 매장·브랜드 쌍만 예외로 인정한다. 새 입점이 만든 충돌을 기존 충돌로 인정하지 않는다.
 
 **절차:**
 
-1. 퇴점 브랜드를 빼고, 입점 브랜드를 가중 기대 매출이 가장 큰 빈 매장부터 넣는다. 이것이 기준안(ALT-0)이다.
-2. 기준안에서 위 문제를 풀어 대안(ALT-1~)을 만든다. 두 번째 대안부터는 앞 대안과 같은 이동에 벌점을 줘서 서로 다른 안을 낸다. 정수계획은 앞 대안과 이동 조합이 똑같은 배치를 제약으로 뺀다. ALT-1이 최적이면 뒤 대안의 순효과는 ALT-1보다 작고, 요약에 그 차이를 적는다. 입점 브랜드의 위치 조정은 이동 수에 넣지 않는다.
-3. 대안마다 기준안 대비 순효과, 목표 변화, 이전 비용, 기대 매출 변화와 범위, 지금 배치 대비 매출 변화, 제약 충족표를 계산하고 가상 개정으로 저장한다.
+1. 퇴점 브랜드를 빼고, 공실·퇴점 매장 전체에 대한 정확 배정으로 **입점 수를 먼저 최대화하고 다음에 가중 위치 점수(원 단위)를 최대화**한다. 기존 이웃 및 입점 브랜드 간 인접 충돌도 제한한다. 이것이 기준안(ALT-0)이며 `search_status`는 `heuristic`이다. 이 상태는 입점 배정의 증명을 전체 이전 문제의 증명으로 확대하지 않으려는 구분이다. `entry_assignment`에 방법·배정 수·요청 수·점수 반올림 단위·범위를 기록한다.
+2. 기준안에서 위 문제를 풀어 대안(ALT-1~)을 만든다. 두 번째 대안부터는 앞 대안과 같은 이동에 벌점을 주고, 앞 대안과 같은 이동 조합은 제외한다. 입점 브랜드의 위치 조정은 이동 수에 넣지 않는다. 기존 브랜드를 먼저 옮겨야만 생기는 자리는 최초 입점 배정에 넣지 않는다. 미배정 브랜드의 `reason`, `requires_incumbent_relocation`, `relocation_unit_codes`로 이 제약을 알린다.
+3. 대안마다 연간 증가 효과, 1회성 손실, 첫 시즌 기준 순효과, 기존 비교 지표와 매출 변화·범위, 제약 충족표를 계산하고 가상 개정으로 저장한다. 제약 미충족 대안을 충족한 대안으로 설명하거나 선택할 수 없다.
 
 사람은 대안 하나를 고른다(`relayout_select`). CAD팀이 그 대안대로 도면을 그려 올리면 `relayout_check_drawing`이 계획과 도면을 대조한다.
+
+**결정 보존:** 선택·도면 대조·공사 순서 중 하나라도 있으면 동일한 계획 조건은 저장된 계획을 변경하지 않고 `reused: true`로 반환한다. 다른 조건은 `DecisionExistsError`(REST 409)로 막는다. 사용자의 명시적 확인 후에만 `replace_decision=true`로 다시 호출한다. 선택할 때 `decision_snapshot`(선택 시점의 KPI·조건)을 저장하고 `decision_history`에 추가한다. 교체할 때도 이전 결정의 `alt_id`, `decided_by`, `decided_at`, `plan_params`, `kpi_snapshot`, `replaced_at`을 추가하며 앞 이력은 수정하지 않는다. 결정 출처가 확인되면 `decision_source: chat|api`를 기록하고, 알 수 없으면 생략한다.
+
+**what-if 범위:** 기준 위치에 그대로 있는 브랜드도 이웃이 바뀌어 친화도 효과가 달라지면 그 로그 변화량을 불확실성에 더한다. 이는 가정에 따른 범위이며 통계적 신뢰구간이 아니다. 에스컬레이터 직선거리 대체값(`escalator_fallback=true`)은 관측 보행거리로 취급하지 않고, 누락 거리와 같이 신뢰 가능한 층 중앙값·매장 전체 중앙값 순으로 대체한다(`walk_imputed=true`).
 
 ### 5.1 빈 자리 채우기(`relayout_unit_options`)
 
@@ -132,6 +142,8 @@ $$\max \sum_{b} w_b \, S(b, u_b) \;-\; \sum_{b \in \text{이전}} w_b \, S(b, u_
 ### 5.2 공사 순서(`relayout_phasing`)
 
 공사 순서도 LLM이 정하지 않는다. 대안의 이전·입점 변경마다 대상 매장의 공사 작업 하나를 만들고 아래 규칙으로 일정을 짠다.
+
+`basis=selected`는 선택한 대안 또는 요청에서 명시한 `alt_id`를 사용한 경우다. `basis_note`가 둘을 구분하며, 명시한 대안으로 계산해도 프로젝트의 결정은 바꾸지 않는다. 둘 다 없으면 기존 비교 지표(`net_krw`)가 가장 큰 대안을 임시로 쓰고 `basis=best_net_fallback`과 한국어 설명을 반환한다. 이 결과를 사람이 결정한 대안으로 설명하면 안 된다.
 
 1. **선행 관계:** 대상 매장에 지금 있는 브랜드가 함께 옮기는 브랜드이면, 그 브랜드의 새 매장 공사가 끝나야 공사를 시작할 수 있다. 공실과 퇴점 매장은 0주차부터 비어 있다. 매장마다 선행 작업이 최대 하나라서 선행 관계는 사슬과 순환으로만 이루어진다.
 2. **순환 풀기:** 서로의 자리로 옮기는 순환에서는 주 매출이 가장 적은 브랜드가 먼저 자리를 비운다. 그 자리의 공사가 시작될 때 나가서, 자기 새 매장 공사가 끝날 때 다시 연다. 그동안 그 기간에 공사하지 않는 공실·퇴점 매장을 임시 매장으로 쓰면 평소 매출의 `temporary_sales_ratio`로 영업하고, 없으면 휴점한다.

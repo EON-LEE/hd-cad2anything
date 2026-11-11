@@ -58,6 +58,7 @@ TOOL_METHODS: dict[str, str] = {
     "relayout_phasing": "빈 매장부터 공사하고 공사팀 수에 맞춰 순서와 영업 손실을 계산해요",
     "upload_list_jobs": "올린 도면의 처리 단계와 결과를 확인해요",
     "revision_check_metadata": "도면과 계약 정보를 매장별로 대조해요",
+    "data_provenance": "기본 데모 데이터와 사람이 올린 자료의 출처를 영역별로 확인해요",
     "ui_set_floor": "도면을 해당 층으로 옮겨요",
     "ui_show_heatmap": "지표 값으로 매장을 색칠해요",
     "ui_highlight_units": "근거가 되는 매장을 강조해요",
@@ -280,27 +281,51 @@ def _query(data: dict[str, Any], args: dict[str, Any]) -> str | None:
 
 
 def _route(data: dict[str, Any], args: dict[str, Any]) -> str | None:
-    walk = _num(data.get("walk_m"))
-    if walk is None:
-        return None
     hop = _first(data.get("transitions"))
     floors = _count(hop.get("floors"))
-    return _join(f"걷는 거리 약 {walk:,.0f}m", f"{floors}개 층 이동" if floors else None)
+    moved = f"{floors}개 층 이동" if floors else None
+    walk = _num(data.get("walk_m"))
+    if walk is None:
+        # `walk_m: null` means the walkways do not connect the two points: the distance is unknown.
+        return _join("걷는 거리 알 수 없음", moved) if "walk_m" in data else None
+    distance = f"직선 추정 약 {walk:,.0f}m" if data.get("straight") else f"걷는 거리 약 {walk:,.0f}m"
+    return _join(distance, moved)
 
 
 def _optimal(data: dict[str, Any]) -> str | None:
-    search = data.get("search")
-    return "ALT-1 최적해 확인" if isinstance(search, dict) and search.get("status") == "optimal" else None
+    """Proven optimality of an alternative, scoped to the rounded scoring model and the constraints."""
+    alternatives = [a for a in data.get("alternatives") or [] if isinstance(a, dict)]
+    search = data.get("search") if isinstance(data.get("search"), dict) else {}
+    labelled = any("search_status" in a for a in alternatives)
+    best = next((a for a in alternatives if a.get("search_status") == "optimal"), None)
+    if best is None and not labelled and search.get("status") == "optimal":
+        best = {"alt_id": "ALT-1"}  # older results carry the status of ALT-1 only in `search`
+    if best is not None:
+        rounding = (
+            _num(best.get("objective_rounding_krw")) or _num(search.get("objective_rounding_krw")) or 100
+        )
+        alt = best.get("alt_id") or "ALT-1"
+        return f"{alt}: {rounding:,.0f}원 단위로 반올림한 모델·제약 범위에서 최적"
+    diverse = next((a for a in alternatives if a.get("search_status") == "optimal_diverse"), None)
+    if diverse is not None:
+        return f"{diverse.get('alt_id')}: 앞 대안과 다르게 만드는 조건에서 최적"
+    return None
 
 
 def _plan(data: dict[str, Any], args: dict[str, Any]) -> str | None:
     alternatives = [a for a in data.get("alternatives") or [] if isinstance(a, dict)]
+    reused = "저장된 대안 재사용" if data.get("reused") else None
     scored = [a for a in alternatives if _num((a.get("kpi") or {}).get("net_krw")) is not None]
     if not scored:
-        return f"대안 {len(alternatives)}개" if alternatives else None
+        return _join(reused, f"대안 {len(alternatives)}개" if alternatives else None)
     best = max(scored, key=lambda a: float(a["kpi"]["net_krw"]))
+    kpi = best["kpi"]
+    # net_krw ranks annual uplift minus a one-off loss, so it is not an annual amount: show the parts.
+    uplift, loss = _krw(kpi.get("annual_uplift_krw")), _krw(kpi.get("one_off_loss_krw"))
+    value = f"연간 증가 {uplift}, 1회성 손실 {loss}" if uplift and loss else _krw(kpi["net_krw"])
     return _join(
-        f"대안 {len(alternatives)}개 · 순효과 최고 {best.get('alt_id')}(연 {_krw(best['kpi']['net_krw'])})",
+        reused,
+        f"대안 {len(alternatives)}개 · 순효과 최고 {best.get('alt_id')}({value})",
         _optimal(data),
     )
 
@@ -312,7 +337,9 @@ def _layout(data: dict[str, Any], args: dict[str, Any]) -> str | None:
 
 def _phasing(data: dict[str, Any], args: dict[str, Any]) -> str | None:
     weeks = _num(data.get("total_weeks"))
+    fallback = data.get("basis") == "best_net_fallback"
     return _join(
+        f"선택안이 없어 {data.get('alt_id') or '순효과 최고안'} 기준" if fallback else None,
         f"총 {weeks:g}주" if weeks is not None else None,
         f"예상 영업 손실 {_krw(data.get('lost_krw'))}" if _num(data.get("lost_krw")) is not None else None,
     )
@@ -354,7 +381,7 @@ def _flow_map(data: dict[str, Any], args: dict[str, Any]) -> str | None:
     per_day = _num(top.get("per_day"))
     if not top.get("label"):
         return None
-    return f"가장 많이 지나는 곳: {top['label']}" + (f"(하루 약 {per_day:,.0f}명)" if per_day else "")
+    return f"가장 많이 지나는 곳: {top['label']}" + (f"(하루 약 {per_day:,.0f}회 통행)" if per_day else "")
 
 
 def _popup(data: dict[str, Any], args: dict[str, Any]) -> str | None:
@@ -364,7 +391,9 @@ def _popup(data: dict[str, Any], args: dict[str, Any]) -> str | None:
     top = candidates[0]
     where = top.get("near") or top.get("unit_code")
     per_day = _num(top.get("passers_per_day"))
-    return f"후보 {len(candidates)}곳 · 1순위 {where}" + (f"(하루 약 {per_day:,.0f}명)" if per_day else "")
+    return f"후보 {len(candidates)}곳 · 1순위 {where}" + (
+        f"(하루 약 {per_day:,.0f}회 통행)" if per_day else ""
+    )
 
 
 def _egress(data: dict[str, Any], args: dict[str, Any]) -> str | None:
@@ -455,13 +484,27 @@ def _ui_flow(data: dict[str, Any], args: dict[str, Any]) -> str | None:
         top = markers[0]
         where = re.sub(r"^후보 \d+ · ", "", str(top.get("title") or top.get("unit_code") or ""))
         per_day = _num(top.get("per_day"))
-        return f"후보 {len(markers)}곳 · 1순위 {where}" + (f"(하루 약 {per_day:,.0f}명)" if per_day else "")
+        return f"후보 {len(markers)}곳 · 1순위 {where}" + (
+            f"(하루 약 {per_day:,.0f}회 통행)" if per_day else ""
+        )
     return _flow_map({"top_corridors": summary.get("top_corridors")}, args)
 
 
 def _ui_panel(data: dict[str, Any], args: dict[str, Any]) -> str | None:
     rows = _count(data.get("rows"))
     return f"표 {rows}행" if data.get("panel") == "table" and rows else None
+
+
+def _ui_heatmap(data: dict[str, Any], args: dict[str, Any]) -> str | None:
+    switched = f"{data.get('rev')} 개정으로 전환" if data.get("rev_switched") else None
+    return _join(switched, "실적이 없어 모델 추정치로 색칠" if data.get("estimated") else None)
+
+
+def _provenance(data: dict[str, Any], args: dict[str, Any]) -> str | None:
+    domains = [d for d in data.get("domains") or [] if isinstance(d, dict)]
+    uploaded = [d for d in domains if d.get("source") in ("uploaded", "mixed")]
+    base = "기본 데이터는 가상 합성 데모" if data.get("default_dataset") == "synthetic_demo" else None
+    return _join(base, f"올린 자료가 있는 영역 {len(uploaded)}개" if uploaded else "올린 자료 없음")
 
 
 RESULTS: dict[str, Callable[[dict[str, Any], dict[str, Any]], str | None]] = {
@@ -495,6 +538,8 @@ RESULTS: dict[str, Callable[[dict[str, Any], dict[str, Any]], str | None]] = {
     "relayout_check_drawing": _check_drawing,
     "relayout_phasing": _phasing,
     "upload_list_jobs": _jobs,
+    "data_provenance": _provenance,
+    "ui_show_heatmap": _ui_heatmap,
     "ui_show_route": _route,
     "ui_show_journey": _journey,
     "ui_show_flow": _ui_flow,
@@ -503,12 +548,16 @@ RESULTS: dict[str, Callable[[dict[str, Any], dict[str, Any]], str | None]] = {
 # UI actions whose label already says everything ("4층으로 이동", "매장 5곳 강조").
 SILENT = {
     "ui_set_floor",
-    "ui_show_heatmap",
     "ui_highlight_units",
     "ui_draw_edges",
     "ui_focus",
     "ui_compare",
     "ui_clear",
+}
+# Failed calls that are not argument errors (codes set by the MCP server and the relayout tools).
+FAILURE_RESULTS = {
+    "decision_exists": "기존 결정이 있어 사용자 확인이 필요해요",
+    "internal_error": "도구 내부 오류로 이 단계를 하지 못했어요",
 }
 
 
@@ -534,7 +583,8 @@ def tool_result(name: str | None, args: dict[str, Any] | None, output: Any) -> s
     """What a finished tool call found, in one short Korean line (None when there is nothing to say).
 
     ``output`` is the tool's JSON text (or an already parsed dict). Failed calls (``ok: false``) say that
-    the agent retries; other outputs use a per-tool reading, then the first sentence of a Korean ``summary``.
+    the agent retries, or why it cannot (``FAILURE_RESULTS`` by ``code``); other outputs use a per-tool
+    reading, then the first sentence of a Korean ``summary``.
     """
     name = name or ""
     args = args if isinstance(args, dict) else {}
@@ -542,7 +592,7 @@ def tool_result(name: str | None, args: dict[str, Any] | None, output: Any) -> s
     if not isinstance(data, dict):
         return None
     if data.get("ok") is False:
-        return "조건을 고쳐 다시 시도해요"
+        return FAILURE_RESULTS.get(str(data.get("code")), "조건을 고쳐 다시 시도해요")
     if name in SILENT:
         return None
     reader = RESULTS.get(name)

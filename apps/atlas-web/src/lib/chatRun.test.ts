@@ -9,6 +9,8 @@ import {
   finishRun,
   foldRunEvent,
   formatElapsed,
+  isMutatingTool,
+  isRunActive,
   runStatusText,
   stepDisplayLabel,
   stepResultText,
@@ -345,9 +347,29 @@ describe('chat run fold: errors and endings', () => {
     expect(stopped.steps[0]).toMatchObject({ status: 'error', error: '중지됨' })
     expect(finishRun(stopped, 'done', 6000)).toBe(stopped)
 
-    expect(closeRun(running, 7000)).toMatchObject({ status: 'error', error: expect.stringContaining('RUN_FINISHED') })
+    // A stream that ends without RUN_FINISHED/RUN_ERROR is incomplete, with or without text: never a finished answer.
+    expect(closeRun(running, 7000)).toMatchObject({ status: 'incomplete', error: expect.stringContaining('RUN_FINISHED'), endedAt: 7000 })
+    expect(closeRun(running, 7000).steps[0]).toMatchObject({ status: 'error', error: '실행이 끝나지 않음' })
     const answered = fold([{ type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '답변' }])
-    expect(closeRun(answered, 7000)).toMatchObject({ status: 'done', endedAt: 7000 })
+    const cut = closeRun(answered, 7000, '연결이 끊겼습니다')
+    expect(cut).toMatchObject({ status: 'incomplete', answer: '답변', error: '연결이 끊겼습니다', endedAt: 7000 })
+    expect(isRunActive(cut)).toBe(false)
+    expect(runStatusText(cut)).toBeNull()
+    // Later events and another close change nothing; a finished run is not turned into an incomplete one.
+    expect(foldRunEvent(cut, { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: ' (늦게 도착)' }, { at: 9000 })).toBe(cut)
+    expect(closeRun(cut, 8000)).toBe(cut)
+    const finished = fold([{ type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '답변' }, { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r' }])
+    expect(closeRun(finished, 8000)).toBe(finished)
+
+    const incomplete = fold([
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '작업 결과가 없어요.' },
+      { type: 'RUN_FINISHED', thread_id: 't', run_id: 'r', outcome: 'no_answer', incomplete: true },
+    ])
+    expect(incomplete).toMatchObject({
+      status: 'incomplete',
+      error: '응답이 완료되지 않았습니다 (no_answer).',
+      answer: '작업 결과가 없어요.',
+    })
   })
 
   it('formats the elapsed time of a run', () => {
@@ -508,6 +530,66 @@ describe('chat run fold: progress notes, methods and results', () => {
       ['answering', '먼저 결과를 정리하면'],
       ['working', '먼저 결과를 정리하면'],
       ['working', '먼저 결과를 정리하면'],
+    ])
+  })
+})
+
+describe('tools that change server data', () => {
+  it('knows the tools that make revisions, artifacts, relayout projects and uploads', () => {
+    for (const name of [
+      'relayout_plan',
+      'relayout_select',
+      'relayout_phasing',
+      'relayout_check_drawing',
+      'relayout_diagnose',
+      'revision_create_hypothetical',
+      'revision_process',
+      'registry_run',
+      'layout_generate_alternatives',
+      'upload_drawings',
+      'upload_metadata',
+    ]) {
+      expect(isMutatingTool(name), name).toBe(true)
+    }
+  })
+
+  it('leaves reading tools and UI tools out', () => {
+    for (const name of [
+      'analytics_productivity',
+      'spatial_find_units',
+      'relayout_list_briefs',
+      'relayout_report',
+      'upload_list_jobs',
+      'revision_check_metadata',
+      'registry_validate',
+      'whatif_score_moves',
+      'ui_show_panel',
+      'consult_specialist',
+      '',
+    ]) {
+      expect(isMutatingTool(name), name).toBe(false)
+    }
+    expect(isMutatingTool(null)).toBe(false)
+    expect(isMutatingTool(undefined)).toBe(false)
+  })
+
+  it('reads server-qualified and dotted spellings like the labels do', () => {
+    expect(isMutatingTool('atlas_relayout_plan')).toBe(true)
+    expect(isMutatingTool('Relayout.Phasing')).toBe(true)
+    expect(isMutatingTool('atlas-registry-run')).toBe(true)
+    expect(isMutatingTool('atlas_analytics_productivity')).toBe(false)
+  })
+
+  it('sees them inside a specialist agent too (they are steps of the same run)', () => {
+    const run = fold([
+      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'consult_specialist', agent: 'layout_planner' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'n1', tool_name: 'relayout_plan', parent_tool_call_id: 'c1', agent: 'layout_planner' },
+      { type: 'TOOL_CALL_END', tool_call_id: 'n1', ok: true },
+      { type: 'TOOL_CALL_END', tool_call_id: 'c1', ok: true },
+    ])
+    expect(toolSteps(run).map((s) => [s.toolName, isMutatingTool(s.toolName), s.parentId])).toEqual([
+      ['consult_specialist', false, null],
+      ['relayout_plan', true, 'c1'],
     ])
   })
 })

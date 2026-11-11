@@ -56,6 +56,8 @@ class AdjacencyEffect:
     caveat: str
     table: pd.DataFrame
     label: str = ESTIMATE_LABEL
+    walk_estimated_units: int = 0  # sample units whose escalator walk is a straight-line estimate
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +75,8 @@ class AdjacencyEffect:
             "confounding_suspected": self.confounding_suspected,
             "reasons": self.reasons,
             "controls": self.controls,
+            "walk_estimated_units": self.walk_estimated_units,
+            "notes": self.notes,
             "caveat": self.caveat,
         }
 
@@ -100,7 +104,9 @@ def adjacency_effect(
     category itself are excluded by default). The naive estimate is the difference in mean
     log(sales per m2); the controlled estimate is the treatment coefficient of an OLS that adds
     log(walk_to_escalator_m + 1), frontage_m, log(area_m2) and floor/category dummies when the sample
-    allows. ``confounding_suspected`` is True when exposure is imbalanced (|SMD| >= 0.5), when controls
+    allows. Units whose escalator walk is a straight-line estimate (``escalator_fallback``) add a
+    ``walk_estimated`` indicator to the controls and are counted in ``walk_estimated_units``.
+    ``confounding_suspected`` is True when exposure is imbalanced (|SMD| >= 0.5), when controls
     remove at least half of a non-trivial naive effect, or when the sign flips.
     """
     is_flagged, flag_list = _category_predicate(neighbor_category_flag)
@@ -120,6 +126,8 @@ def adjacency_effect(
     data["unit_code"] = data["unit_code"].astype(str)
     columns = ["walk_to_escalator_m", "frontage_m", "area_m2"]
     data = data.join(feats[columns], on="unit_code")
+    if "escalator_fallback" in feats:
+        data = data.join(feats[["escalator_fallback"]], on="unit_code")
     valid = (data["sales_per_m2"] > 0) & data[columns].notna().all(axis=1) & (data["area_m2"] > 0)
     if exclude_flag_category:
         valid &= ~data["category"].map(is_flagged).astype(bool)
@@ -127,6 +135,11 @@ def adjacency_effect(
     sample["treated"] = sample["unit_code"].isin(treated)
     sample["log_sales_per_m2"] = np.log(sample["sales_per_m2"].astype(float))
     sample["log_walk"] = np.log1p(sample["walk_to_escalator_m"].astype(float))
+    if "escalator_fallback" in sample:
+        sample["walk_estimated"] = sample["escalator_fallback"].fillna(False).astype(bool)
+    else:
+        sample["walk_estimated"] = False
+    n_estimated = int(sample["walk_estimated"].sum())
     n_treated, n_control = int(sample["treated"].sum()), int((~sample["treated"]).sum())
     names = flag_list or ["(사용자 정의 조건)"]
     if n_treated < 2 or n_control < 2:
@@ -146,6 +159,7 @@ def adjacency_effect(
             controls=[],
             caveat=ADJACENCY_CAVEAT,
             table=sample,
+            walk_estimated_units=n_estimated,
         )
     y = sample["log_sales_per_m2"].to_numpy()
     t = sample["treated"].to_numpy(dtype=float)
@@ -155,6 +169,9 @@ def adjacency_effect(
         "frontage_m": sample["frontage_m"].to_numpy(dtype=float),
         "log_area": np.log(sample["area_m2"].to_numpy(dtype=float)),
     }
+    # Units without a walkway path to an escalator carry a straight-line distance: control for that.
+    if 0 < n_estimated < len(sample):
+        base["walk_estimated"] = sample["walk_estimated"].to_numpy(dtype=float)
     dummy_sets: list[dict[str, np.ndarray]] = []
     for column, prefix in (("floor", "floor"), ("category", "cat")):
         levels = sorted(sample[column].dropna().astype(str).unique())
@@ -184,11 +201,23 @@ def adjacency_effect(
         )
     if abs(naive) >= MIN_EFFECT_LOG and np.sign(naive) != np.sign(coef):
         reasons.append("통제 후 효과의 방향이 단순 비교와 반대입니다.")
+    notes: list[str] = []
+    if n_estimated:
+        where = (
+            "통제 변수(walk_estimated)에 넣었습니다"
+            if 0 < n_estimated < len(sample)
+            else "표본 전체가 추정값이라 통제하지 못했습니다"
+        )
+        notes.append(
+            f"표본 {len(sample)}개 중 {n_estimated}개 매장은 통로로 에스컬레이터에 이어지지 않아 "
+            f"보행거리가 직선거리 추정값입니다. 이 차이를 {where}."
+        )
     flagged_ko = ", ".join(category_name(c) for c in flag_list) or "지정 조건"
     caveat = (
         f"[{ESTIMATE_LABEL}] {flagged_ko} 인접 매장의 면적당 매출 차이: 단순 비교 {_pct(naive):+.1f}%, "
         f"노출도 통제 후 {_pct(coef):+.1f}%(95% 구간 {_pct(coef - 1.96 * se):+.1f}%~{_pct(coef + 1.96 * se):+.1f}%). "
         + ("교란 가능성이 있습니다. " + " ".join(reasons) + " " if reasons else "")
+        + (" ".join(notes) + " " if notes else "")
         + ADJACENCY_CAVEAT
     )
     return AdjacencyEffect(
@@ -207,6 +236,8 @@ def adjacency_effect(
         controls=terms[2:],
         caveat=caveat,
         table=sample,
+        walk_estimated_units=n_estimated,
+        notes=notes,
     )
 
 

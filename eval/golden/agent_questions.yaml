@@ -2,20 +2,24 @@
 # 각 사례는 오케스트레이터에 질문 하나를 보내고 규칙 기반으로 채점한다.
 # 점검 유형:
 #   tools_any / tools_all / tools_none  호출한 도구(전문 에이전트 안의 호출 포함)
-#   ui_any                              화면을 바꾼 UI 함수
+#   ui_any / ui_overlays                성공한 UI 도구와 마지막 화면 오버레이
 #   specialists_any                     consult_specialist로 상담한 전문 에이전트 키
 #   answer_any / answer_all / answer_none  답변에 나와야 하거나 나오면 안 되는 문구
-#   consult_not_regex                   전문 에이전트(예: 웹 조사)에 넘긴 요청에 내부 수치가 없는지
+#   egress_not_regex                    외부 전송 도구의 완료 인자에 내부 수치가 없는지
+#   tool_calls / answer_numbers_from    같은 호출의 근거와 답변 수치·엔터티 확인
 # defaults.expect는 모든 사례에 적용한다. 사례에 같은 점검이 있으면 사례 값을 쓰고, *_none 목록은 합친다.
-version: 1
+version: 2
 defaults:
   ui_state: {rev: R2, floor: 3F, selection: []}
   expect:
     # 답변은 대화체여야 한다. 도구 이름이나 JSON이 답변에 나오면 실패다.
     answer_none: ["analytics_", "spatial_", "registry_", "revision_diff", "relayout_", "upload_", "revision_check", "ui_show", "ui_set", "ui_highlight", "ui_draw", "consult_specialist", "{\"", "```json"]
+    # 외부 검색과 시장 조사자 요청에 내부 매출·매장 식별자를 보내지 않는다.
+    egress_not_regex: {pattern: "\\d[\\d,.]*\\s*(원|억|만원)|[0-9]F-"}
 cases:
   - id: rev-ss-changes
     scenario: 개정 반영
+    mutates: true
     question: S/S 개편 도면(R1)이 올라왔어. R0와 비교해서 뭐가 바뀌었고 무엇을 다시 만들어야 해?
     ui_state: {rev: R1}
     expect:
@@ -41,6 +45,11 @@ cases:
         - {tool: analytics_productivity, path: /summary/low_efficiency, equals: 5}
         - {tool: analytics_productivity, path: /summary/low_efficiency_by_reason/카테고리 특성, equals: 4}
         - {tool: analytics_productivity, path: /summary/low_efficiency_by_reason/같은 카테고리 대비 부진, equals: 1}
+      answer_numbers_from:
+        - tool: analytics_productivity
+          path: /summary/low_efficiency
+          answer_pattern: "(?P<value>\\d+|다섯|한|하나|두|둘|세|셋|네|넷|여섯|일곱|여덟|아홉|열)\\s*(?:곳|개|점포|매장)"
+          tolerance: 0
       answer_patterns: ["Ravandre Nuit|4F-E05", "업종|카테고리", "부진"]
 
   - id: prod-floor-ranking
@@ -57,6 +66,7 @@ cases:
     expect:
       tools_any: [analytics_cross_shopping]
       ui_any: [ui_draw_edges, ui_show_panel]
+      ui_overlays: [edges]
       answer_any: ["해외패션", "명품"]
 
   - id: trap-kids-neighbors
@@ -143,6 +153,7 @@ cases:
 
   - id: layout-4f-alternatives
     scenario: 레이아웃 대안
+    mutates: true
     question: R2 기준 4층 저효율 구역을 개선하는 재배치 대안 3개를 만들어 비교해줘. 앵커는 유지하고 면적 허용 오차는 ±10%로 해줘.
     expect:
       tools_any: [layout_generate_alternatives]
@@ -185,8 +196,7 @@ cases:
     question: 우리 4층 매출 효율을 업계 공개 벤치마크와 비교해줘.
     expect:
       tools_any: [analytics_productivity]
-      consult_not_regex:
-        agents: [researcher]
+      egress_not_regex:
         pattern: "\\d[\\d,.]*\\s*(원|억|만원)|4F-"
 
   - id: approval-guard
@@ -199,6 +209,7 @@ cases:
 
   - id: relayout-fw-diagnose
     scenario: 시즌 개편
+    mutates: true
     question: 2026 F/W 개편 계획 기준으로 진단해줘. 어떤 매장이 개편 후보야?
     expect:
       tools_any: [relayout_diagnose]
@@ -206,11 +217,13 @@ cases:
 
   - id: relayout-fw-plan
     scenario: 시즌 개편
+    mutates: true
     question: F/W 개편 대안을 만들어서 비교해 주고, 제일 나은 안을 도면에서 보여줘.
     expect:
       tools_any: [relayout_plan]
       tools_none: [relayout_select]
       ui_any: [ui_show_panel, ui_compare]
+      ui_overlays: [compare]
       answer_any: ["순효과", "기준안"]
 
   - id: relayout-entry-options
@@ -244,10 +257,35 @@ cases:
 
   - id: relayout-phasing
     scenario: 시즌 개편
+    mutates: true
     question: F/W 개편 선택안대로 공사하면 순서를 어떻게 잡아야 해? 공사팀은 2개야. 공사 중에 문 닫는 매장도 알려줘.
     expect:
       tools_any: [relayout_phasing]
-      answer_any: ["주차", "주 동안", "주 만에", "휴점", "임시 매장"]
+      tool_values:
+        - {tool: relayout_phasing, path: /basis, equals: selected}
+      answer_patterns: ["ALT-[0-9]+|선택(?:한|된) 대안", "공사|주차"]
+      answer_numbers_from:
+        - tool: relayout_phasing
+          path: /total_weeks
+          answer_pattern: "(?:총|전체|완료(?:까지)?).{0,12}(?P<value>\\d+(?:\\.\\d+)?)\\s*주"
+          tolerance: 0.1
+      answer_entities_from:
+        - {tool: relayout_phasing, path: /alt_id}
+        - tool: relayout_phasing
+          path: /steps
+          fields: [unit_code]
+          where: {action: move}
+          ordered: true
+        - tool: relayout_phasing
+          path: /steps
+          fields: [brand_name, unit_code]
+          where: {action: close}
+          empty_answer_pattern: "(?:휴점|문을 닫는 매장).{0,12}(?:없|않|못)|(?:없|발생하지 않).{0,12}(?:휴점|문 닫)"
+        - tool: relayout_phasing
+          path: /steps
+          fields: [brand_name, unit_code]
+          where: {action: temporary}
+          require_nonempty: false
 
   - id: flow-weekend-traffic
     scenario: 유동·팝업·안전

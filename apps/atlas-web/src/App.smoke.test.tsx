@@ -110,6 +110,7 @@ async function renderWithStream(streamChat: AtlasDataSource['streamChat']) {
 describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }, () => {
   beforeAll(() => {
     setMockSpeed(0)
+    window.history.replaceState(null, '', '/?mock=1')
     // Give the canvas a size so the view state (and the deck probe) is created.
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 1000 })
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 700 })
@@ -121,6 +122,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
 
   afterAll(() => {
     vi.unstubAllGlobals()
+    window.history.replaceState(null, '', '/')
     setMockSpeed(1)
   })
 
@@ -130,7 +132,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     // Shell and fallback to mock mode.
     expect(await screen.findByRole('heading', { name: 'CAD2Anything Atlas' })).toBeTruthy()
     expect(screen.getByText('모의 데이터')).toBeTruthy()
-    expect(screen.getByRole('status').textContent).toContain('/api/meta')
+    expect(screen.getByRole('status').textContent).toContain('?mock=1')
 
     // Revision selector, floor tabs from the mock meta (2 floors), canvas with the base layers.
     const floorTabs = within(screen.getByRole('tablist', { name: '층' })).getAllByRole('tab')
@@ -368,7 +370,7 @@ describe('Atlas smoke test (mock mode, jsdom)', { timeout: SCREEN_TEST_TIMEOUT }
     expect(floorTab('3F').textContent).toContain('(팝업 후보 3곳)')
     const legend = screen.getByRole('complementary', { name: '범례' })
     expect(within(legend).getByRole('heading', { name: '팝업 후보' })).toBeTruthy()
-    for (const text of ['적음', '많음', '통로 위 후보 공간', '공실·팝업 매장', '단위 명(추정)']) expect(legend.textContent).toContain(text)
+    for (const text of ['적음', '많음', '통로 위 후보 공간', '공실·팝업 매장', '단위 회(추정 통과)']) expect(legend.textContent).toContain(text)
 
     // A candidate on another floor moves the map there.
     fireEvent.click(candidates[4])
@@ -625,8 +627,8 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
       expect(within(cards[2]).queryByRole('button', { name: 'ALT-2 도면에서 보기' })).toBeNull()
       const alt1 = cards[1]
       const kpi = (card: HTMLElement, label: string) => within(card).getByText(label).nextElementSibling!.textContent!
-      for (const label of ['순효과', '목표 변화', '이전 비용']) expect(within(alt1).getByText(label)).toBeTruthy()
-      expect(kpi(alt1, '목표 변화')).toContain('(매출)')
+      for (const label of ['첫 시즌 기준 순효과', '연간 증가 효과', '1회성 공사 손실']) expect(within(alt1).getByText(label)).toBeTruthy()
+      expect(kpi(alt1, '연간 증가 효과')).toContain('(매출)')
       expect(kpi(alt1, '기준안 대비 매출 변화')).toMatch(/^\+6\.2억 원 \(범위 \+3\.4억 원 ~ \+8\.8억 원\)$/)
       expect(kpi(alt1, '지금 대비 매출 변화')).not.toContain('범위')
       expect(['입점', '퇴점', '이전'].map((label) => within(alt1).getByText(label).tagName)).toEqual(['SPAN', 'SPAN', 'SPAN'])
@@ -726,7 +728,7 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
         return ctx
       })
       const block = (await screen.findByRole('heading', { name: '공사 순서' })).closest('section')!
-      expect(block.textContent).toContain('아직 결정한 대안이 없어 순효과가 가장 큰 ALT-1의 공사 순서를 정합니다.')
+      expect(block.textContent).toContain('아직 결정한 대안이 없어 임시로 ALT-1(비교 지표가 가장 큰 대안)의 공사 순서를 정합니다.')
       const options = within(block).getByText('계산 조건').closest('details')!
       expect(options.open).toBe(false)
       expect(options.textContent).toContain('동시 공사 2곳 · 공사 2주 · 임시 매장 사용')
@@ -1033,7 +1035,7 @@ describe('season relayout and upload screens (mock mode, jsdom)', { timeout: SCR
       const card = (await screen.findByRole('heading', { name: 'A' })).closest('article')!
       expect(within(card).getByText('제약 검사 미확인')).toBeTruthy()
       expect(within(card).queryByText('검사한 제약 충족')).toBeNull()
-      expect(within(card).getByText('이 대안의 모델·제약 범위에서 최적해 확인')).toBeTruthy()
+      expect(within(card).getByText('100원 단위로 반올림한 모델·제약 범위에서 최적해 확인')).toBeTruthy()
       expect(card.querySelector('details')?.open).toBe(false)
       const compare = screen.getByRole('table', { name: '대안 한눈에 비교 · 예상 연매출 변화' })
       fireEvent.click(within(compare).getByRole('button', { name: 'A 도면에서 보기' }))

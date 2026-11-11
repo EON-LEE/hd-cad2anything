@@ -16,10 +16,10 @@ The model mirrors ``engine._Search`` term for term, so its optimum is directly c
 - ``exclude`` lists relocation sets of earlier alternatives; a no-good cut removes each exact set, so every
   solve returns a layout that differs from them.
 
-Coefficients are integers in units of ``UNIT_KRW`` (CP-SAT is an integer solver). The rounding changes any
-layout's objective by at most a few units per brand; that allowance is added to the reported bound, so
-"optimal" means no feasible layout is better by more than the allowance (well under 1,000,000 KRW for a
-store). A single worker with the full LP relaxation (``linearization_level`` 2) proves the store-scale
+Coefficients are integers in units of ``UNIT_KRW`` (CP-SAT is an integer solver). Optimality applies only
+to that rounded model and its current constraints, not to the unrounded financial estimate. A rounding
+allowance is added to the bound of the unrounded objective. A single worker with the full LP relaxation
+(``linearization_level`` 2) proves the store-scale
 problems in about a second and is deterministic; the limit is CP-SAT's deterministic time, so results do not
 depend on machine speed.
 
@@ -36,6 +36,8 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from cad2anything.services.errors import ToolError
+
 if TYPE_CHECKING:
     from cad2anything.layout.engine import _Search
 
@@ -51,10 +53,82 @@ class ExactResult:
     state: list[int]
     """Brand index per scope unit (-1 = vacant), as in ``_Search``."""
     optimal: bool
-    """True when the solver proved that no feasible layout is better (beyond the rounding allowance)."""
+    """True when the solver proved optimality of the rounded model under this solve's constraints."""
     bound: float
     """Upper bound of the objective in KRW (absolute, including the penalty term and the allowance)."""
     seconds: float
+    objective_rounding_krw: float = UNIT_KRW
+    rounded_objective_krw: float = math.nan
+    rounded_bound_krw: float = math.nan
+
+
+def assign_entries(
+    values: Mapping[tuple[str, str], float],
+    conflicts: Collection[tuple[tuple[str, str], tuple[str, str]]] = (),
+) -> dict[str, str]:
+    """Maximize placed entrants first, then their location score (whole KRW), deterministically."""
+    if not values:
+        return {}
+    keys = sorted(values)
+    by_brand: dict[str, list[tuple[str, str]]] = {}
+    by_unit: dict[str, list[tuple[str, str]]] = {}
+    for key in keys:
+        by_brand.setdefault(key[0], []).append(key)
+        by_unit.setdefault(key[1], []).append(key)
+    try:
+        from ortools.sat.python import cp_model
+    except ImportError:
+        # Exact fallback for small briefs; never fall back to the cardinality-losing greedy strategy.
+        blocked: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        for a, b in conflicts:
+            blocked.setdefault(a, set()).add(b)
+            blocked.setdefault(b, set()).add(a)
+        brands = sorted(by_brand, key=lambda b: (len(by_brand[b]), b))
+        best: tuple[int, float] = (-1, -math.inf)
+        chosen: dict[str, str] = {}
+
+        def visit(index: int, selected: set[tuple[str, str]], used: set[str], score: float) -> None:
+            nonlocal best, chosen
+            if len(selected) + len(brands) - index < best[0]:
+                return
+            if index == len(brands):
+                result = (len(selected), score)
+                if result > best:
+                    best, chosen = result, dict(sorted(selected))
+                return
+            for key in by_brand[brands[index]]:
+                if key[1] not in used and not (blocked.get(key, set()) & selected):
+                    visit(
+                        index + 1,
+                        selected | {key},
+                        used | {key[1]},
+                        score + round(values[key]),
+                    )
+            visit(index + 1, selected, used, score)
+
+        visit(0, set(), set(), 0.0)
+        return chosen
+    model = cp_model.CpModel()
+    x = {key: model.NewBoolVar(f"entry_{index}") for index, key in enumerate(keys)}
+    for group in (*by_brand.values(), *by_unit.values()):
+        model.AddAtMostOne([x[key] for key in group])
+    for a, b in conflicts:
+        if a in x and b in x:
+            model.AddBoolOr([x[a].Not(), x[b].Not()])
+    count = sum(x.values())
+    model.Maximize(count)
+    solver = cp_model.CpSolver()
+    solver.parameters.num_workers = 1
+    solver.parameters.max_time_in_seconds = 5.0
+    status = solver.Solve(model)
+    if status != cp_model.OPTIMAL:
+        raise ToolError("입점 배정의 최대 매장 수를 정해진 시간 안에 증명하지 못했습니다.")
+    model.Add(count == round(solver.ObjectiveValue()))
+    model.Maximize(sum(round(values[key]) * x[key] for key in keys))
+    status = solver.Solve(model)
+    if status != cp_model.OPTIMAL:
+        raise ToolError("입점 배정의 최적 점수를 정해진 시간 안에 증명하지 못했습니다.")
+    return {brand: unit for (brand, unit), var in x.items() if solver.BooleanValue(var)}
 
 
 def enabled() -> bool:
@@ -88,6 +162,8 @@ def solve(
     x: dict[tuple[int, int], Any] = {}
     for b in range(len(search.bids)):
         units = search.dest_all[b] if search.movable[b] else [search.base_pos[b]]
+        if not units:
+            return None
         for u in units:
             x[b, u] = model.NewBoolVar(f"x_{b}_{u}")
     by_brand: dict[int, list[int]] = {}
@@ -121,7 +197,7 @@ def solve(
                     for other in by_unit.get(v, []):
                         if b == other or not search.conflict(b, other):
                             continue
-                        if search.base[u] == b and search.base[v] == other:
+                        if search.grandfathered(u, b, v, other):
                             continue
                         model.AddBoolOr([x[b, u].Not(), x[other, v].Not()])
 
@@ -180,5 +256,11 @@ def solve(
     # Per brand: value (0.5), cost and penalty (0.5 each) rounded; the bonus floors (1 + one per neighbor).
     allowance = (len(by_brand) * (2.5 + widest) + 1.0) * unit
     return ExactResult(
-        state, status == cp_model.OPTIMAL, solver.BestObjectiveBound() * unit + allowance, seconds
+        state,
+        status == cp_model.OPTIMAL,
+        solver.BestObjectiveBound() * unit + allowance,
+        seconds,
+        objective_rounding_krw=unit,
+        rounded_objective_krw=solver.ObjectiveValue() * unit,
+        rounded_bound_krw=solver.BestObjectiveBound() * unit,
     )

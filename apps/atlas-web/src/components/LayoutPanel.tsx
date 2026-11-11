@@ -3,12 +3,13 @@ import { useData } from '../api/source'
 import { CHANGE_COLORS } from '../lib/colors'
 import { formatKrw } from '../lib/format'
 import { floorOfUnitCode } from '../lib/geometry'
-import { formatObjective, normalizeAlternatives } from '../lib/layout'
-import { replaceOp } from '../state/reducer'
+import { formatObjective, normalizeAlternatives, optimalityGapNote, optimalityNote } from '../lib/layout'
+import { replaceOp, type PanelRequest } from '../state/reducer'
 import { useAppState, usePatchUi } from '../state/store'
-import { panelPayloadString, sortedFloors } from '../state/uiState'
+import { payloadString, sortedFloors } from '../state/uiState'
 import type { GraphEdge, Highlight, LayoutAlternative, UiState } from '../types/api'
 import { RelayoutSection, type RelayoutRequest } from './RelayoutSection'
+import { WritesNotice } from './WritesNotice'
 
 const DEPARTURE_COLOR = '#757575'
 
@@ -19,12 +20,41 @@ const VIEWS: { id: LayoutView; label: string }[] = [
   { id: 'whatif', label: '배치 대안' },
 ]
 
-/** View a `layout` panel request opens: `{brief_id}` → 시즌 개편, `{alternatives}`/`{floors}` → 배치 대안. */
+/**
+ * View a `layout` payload opens: alternatives, floors or a revision → 배치 대안; a brief id → 시즌 개편. A request that
+ * names nothing (the tool does not require a payload) opens 시즌 개편 with the first brief.
+ */
+export function layoutViewForPayload(payload: Record<string, unknown> | null | undefined): LayoutView {
+  if (payloadString(payload, 'brief_id')) return 'season'
+  if (Array.isArray(payload?.alternatives) || Array.isArray(payload?.floors) || payloadString(payload, 'rev')) return 'whatif'
+  return 'season'
+}
+
+/** View a `layout` panel request opens; null when the panel is not a layout request. */
 export function layoutViewFor(panel: UiState['panel']): LayoutView | null {
-  if (panel?.type !== 'layout') return null
-  if (panelPayloadString(panel, 'layout', 'brief_id')) return 'season'
-  if (Array.isArray(panel.payload.alternatives) || Array.isArray(panel.payload.floors)) return 'whatif'
-  return null
+  return panel?.type === 'layout' ? layoutViewForPayload(panel.payload) : null
+}
+
+interface LayoutResult {
+  alternatives: LayoutAlternative[]
+  origin: 'agent' | 'request'
+  /** The revision the alternatives were calculated for. */
+  rev: string
+}
+
+/** Alternatives an agent request carries; their revision is the payload's `rev`, else the screen's when it was asked. */
+function agentResult(request: PanelRequest | undefined): LayoutResult | null {
+  if (!request || !Array.isArray(request.payload.alternatives)) return null
+  return { alternatives: normalizeAlternatives(request.payload.alternatives), origin: 'agent', rev: payloadString(request.payload, 'rev') ?? request.rev }
+}
+
+function requestedFloors(request: PanelRequest | undefined): string[] | null {
+  return request && Array.isArray(request.payload.floors) ? request.payload.floors.map(String) : null
+}
+
+function seasonRequestOf(request: PanelRequest | undefined): RelayoutRequest | null {
+  if (!request || layoutViewForPayload(request.payload) !== 'season') return null
+  return { briefId: payloadString(request.payload, 'brief_id'), seq: request.seq }
 }
 
 /** Highlights (arrival wins over departure) and from->to edges for previewing an alternative. */
@@ -56,48 +86,62 @@ function RangeBar({ low, mid, high, min, max }: { low: number; mid: number; high
 
 export function LayoutPanel() {
   const { source, meta } = useData()
-  const { ui, panelSeq } = useAppState()
+  const { ui, panels } = useAppState()
+  // The agent's latest layout request lives in the store, so alternatives it prepared while this tab was not open
+  // (or after a later panel such as a journey replaced `ui.panel`) are still here when the tab opens.
+  const request = panels.layout
   const patchUi = usePatchUi()
   const floors = sortedFloors(meta)
-  const [view, setView] = useState<LayoutView>(() => layoutViewFor(ui.panel) ?? 'season')
+  const [view, setView] = useState<LayoutView>(() => (request ? layoutViewForPayload(request.payload) : 'season'))
   const [seasonVisited, setSeasonVisited] = useState(view === 'season')
-  const [seasonRequest, setSeasonRequest] = useState<RelayoutRequest | null>(() => {
-    const briefId = panelPayloadString(ui.panel, 'layout', 'brief_id')
-    return briefId ? { briefId, seq: panelSeq } : null
-  })
+  const [seasonRequest, setSeasonRequest] = useState<RelayoutRequest | null>(() => seasonRequestOf(request))
   const viewRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const [selectedFloors, setSelectedFloors] = useState<string[]>([ui.floor])
+  const [selectedFloors, setSelectedFloors] = useState<string[]>(() => requestedFloors(request) ?? [ui.floor])
   const [maxMoves, setMaxMoves] = useState('3')
   const movesValid = Number.isInteger(Number(maxMoves)) && Number(maxMoves) >= 1 && Number(maxMoves) <= 10
   const [keepAnchor, setKeepAnchor] = useState(true)
-  const [result, setResult] = useState<{ alternatives: LayoutAlternative[]; origin: 'agent' | 'request'; rev: string } | null>(null)
+  const [result, setResult] = useState<LayoutResult | null>(() => agentResult(request))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [previewId, setPreviewId] = useState<string | null>(null)
+  // The initial state above already shows the request the panel was mounted with; later ones are applied once each.
+  const appliedSeq = useRef(request?.seq ?? 0)
+  // Only the newest calculation may fill the panel: an older answer arriving late (or after unmount) is dropped.
+  const requestId = useRef(0)
+  // Alternatives are calculated for one revision: after the screen moved to another one they no longer fit it.
+  const stale = !!result && result.rev !== ui.rev
 
   useEffect(() => {
     if (view === 'season') setSeasonVisited(true)
   }, [view])
 
-  // Panel requests from the agent: `{brief_id}` opens 시즌 개편; `{rev, floors, alternatives}` the what-if view.
+  useEffect(
+    () => () => {
+      requestId.current += 1
+    },
+    [],
+  )
+
+  // A new layout request from the agent: `{brief_id}` (or nothing) opens 시즌 개편; `{rev, floors, alternatives}` the what-if view.
   useEffect(() => {
-    if (ui.panel?.type !== 'layout') return
-    const payload = ui.panel.payload
-    const target = layoutViewFor(ui.panel)
-    if (target) setView(target)
-    const briefId = panelPayloadString(ui.panel, 'layout', 'brief_id')
-    if (briefId) setSeasonRequest((prev) => (prev?.briefId === briefId && prev.seq === panelSeq ? prev : { briefId, seq: panelSeq }))
-    if (Array.isArray(payload.alternatives)) {
-      setResult({
-        alternatives: normalizeAlternatives(payload.alternatives),
-        origin: 'agent',
-        rev: typeof payload.rev === 'string' ? payload.rev : ui.rev,
-      })
+    if (!request || request.seq === appliedSeq.current) return
+    appliedSeq.current = request.seq
+    setView(layoutViewForPayload(request.payload))
+    const season = seasonRequestOf(request)
+    if (season) setSeasonRequest(season)
+    const agent = agentResult(request)
+    if (agent) {
+      // The agent's alternatives replace whatever was being calculated here.
+      requestId.current += 1
+      setLoading(false)
+      setError(null)
+      setResult(agent)
       setPreviewId(null)
     }
-    if (Array.isArray(payload.floors)) setSelectedFloors(payload.floors.map(String))
-    // Intentionally keyed on panelSeq only: react to new panel requests, not to every UI change.
-  }, [panelSeq])
+    const planned = requestedFloors(request)
+    if (planned) setSelectedFloors(planned)
+    // Intentionally keyed on the request's seq only: react to new requests, not to every UI change.
+  }, [request?.seq])
 
   const onViewKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     let next = index
@@ -112,25 +156,30 @@ export function LayoutPanel() {
   }
 
   const generate = async () => {
+    const id = (requestId.current += 1)
+    const rev = ui.rev
     setLoading(true)
     setError(null)
     setResult(null)
+    setPreviewId(null)
     try {
       const response = await source.getLayoutAlternatives({
-        rev: ui.rev,
+        rev,
         floors: selectedFloors,
         constraints: { max_moves: Number(maxMoves), keep_anchors: keepAnchor },
       })
-      setResult({ alternatives: normalizeAlternatives(response.alternatives), origin: 'request', rev: ui.rev })
-      setPreviewId(null)
+      if (id !== requestId.current) return
+      setResult({ alternatives: normalizeAlternatives(response.alternatives), origin: 'request', rev })
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if (id === requestId.current) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      if (id === requestId.current) setLoading(false)
     }
   }
 
   const preview = (alt: LayoutAlternative) => {
+    // Moves of another revision's alternatives do not fit the units on this screen.
+    if (stale || !result?.alternatives.some((a) => a.id === alt.id)) return
     const { highlights, edges, codes, floor } = previewPatch(alt)
     patchUi([
       ...(floor ? [replaceOp('/floor', floor)] : []),
@@ -140,6 +189,11 @@ export function LayoutPanel() {
       replaceOp('/focus', { unit_codes: codes }),
     ])
     setPreviewId(alt.id)
+  }
+
+  const backToResultRev = () => {
+    if (!result) return
+    patchUi([replaceOp('/rev', result.rev), ...(ui.compareRev === result.rev ? [replaceOp('/compareRev', null)] : [])])
   }
 
   const bounds = useMemo(() => {
@@ -184,6 +238,7 @@ export function LayoutPanel() {
       </div>
       <div role="tabpanel" id="layout-view-panel-whatif" aria-labelledby="layout-view-whatif" className="layout-view" hidden={view !== 'whatif'}>
         <p className="muted">브랜드를 어느 매장으로 옮길지 비교해요. 예상 매출은 모델 계산값이며, 실제 매출 증가를 보장하지 않아요.</p>
+        <WritesNotice />
         <form
           className="layout-form"
           onSubmit={(e) => {
@@ -239,6 +294,19 @@ export function LayoutPanel() {
             {result.origin === 'agent' ? '에이전트가 제시한' : '요청한'} 대안 {result.alternatives.length}개 · 기준 개정 {result.rev}
           </p>
         )}
+        {result && stale && (
+          <div id="layout-stale-note" className="notice warn layout-stale" role="status">
+            <p>
+              이 대안은 {result.rev} 개정으로 계산했어요. 지금 화면의 개정은 {ui.rev}라서 이동할 매장이 맞지 않아 도면 미리보기를 쓸 수 없어요.
+            </p>
+            <div className="form-actions">
+              <button type="button" onClick={backToResultRev}>
+                {result.rev} 개정으로 돌아가기
+              </button>
+              <span className="muted">또는 위에서 {ui.rev} 기준으로 다시 생성해 주세요.</span>
+            </div>
+          </div>
+        )}
         {loading && <p className="muted" role="status">이동 조건을 확인하고 배치 대안을 계산하고 있어요…</p>}
         {result?.alternatives.length === 0 && (
           <div className="layout-empty" role="status">
@@ -264,29 +332,43 @@ export function LayoutPanel() {
                     </th>
                     <td>{alt.moves.length}곳</td>
                     <td>{formatKrw(alt.kpi_delta.sales_krw, true)}</td>
-                    <td><button type="button" aria-label={`${alt.id} 도면에서 보기`} aria-pressed={previewId === alt.id} onClick={() => preview(alt)}>보기</button></td>
+                    <td>
+                      <button
+                        type="button"
+                        aria-label={`${alt.id} 도면에서 보기`}
+                        aria-pressed={previewId === alt.id}
+                        disabled={stale}
+                        aria-describedby={stale ? 'layout-stale-note' : undefined}
+                        onClick={() => preview(alt)}
+                      >
+                        보기
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-        {result?.alternatives.map((alt) => {
+        {result?.alternatives.map((alt, index) => {
           const failed = alt.constraints.filter((c) => !c.ok)
           const active = previewId === alt.id
+          const searchNote = optimalityNote(alt.search_status, { first: index === 0, roundingKrw: alt.objective_rounding_krw })
+          const gapNote = searchNote ? optimalityGapNote(alt.gap_krw) : null
           return (
             <article key={alt.id} className={`alt-card${active ? ' active' : ''}`} aria-labelledby={`alt-${alt.id}`}>
               <header>
                 <h3 id={`alt-${alt.id}`}>{alt.id}</h3>
                 <span className={`badge ${failed.length ? 'danger' : alt.constraints.length ? 'ok' : ''}`}>{failed.length ? `제약 위반 ${failed.length}` : alt.constraints.length ? '검사한 제약 충족' : '제약 검사 미확인'}</span>
-                <button type="button" aria-pressed={active} onClick={() => preview(alt)}>
+                <button type="button" aria-pressed={active} disabled={stale} aria-describedby={stale ? 'layout-stale-note' : undefined} onClick={() => preview(alt)}>
                   {active ? '미리보는 중' : '미리보기'}
                 </button>
               </header>
               <p className="alt-kpi"><strong>예상 연매출 {formatKrw(alt.kpi_delta.sales_krw, true)}</strong></p>
-              {alt.search_status && (
+              {searchNote && (
                 <p className="muted">
-                  {alt.search_status === 'optimal' ? '이 대안의 모델·제약 범위에서 최적해 확인' : alt.search_status === 'feasible' ? '실행 가능한 해 · 최적성 미확인' : '휴리스틱 탐색 · 최적성 미확인'}
+                  {searchNote}
+                  {gapNote ? ` · ${gapNote}` : ''}
                 </p>
               )}
               <details className="alt-details">

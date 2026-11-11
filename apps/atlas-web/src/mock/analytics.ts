@@ -379,6 +379,16 @@ const LAYOUT_PLANS: Record<string, LayoutPlan[]> = {
   ],
 }
 
+/**
+ * How the alternatives of a floor were found (backend semantics): "A" is proven optimal, "B" optimal under the
+ * condition to differ from "A", "C" only feasible (a gap to the solver's bound is left).
+ */
+const SEARCH_BY_SUFFIX: Record<string, Pick<LayoutAlternative, 'search_status' | 'objective_rounding_krw' | 'gap_krw'>> = {
+  A: { search_status: 'optimal', objective_rounding_krw: 100 },
+  B: { search_status: 'optimal_diverse', objective_rounding_krw: 100 },
+  C: { search_status: 'feasible', objective_rounding_krw: 100, gap_krw: 35_000_000 },
+}
+
 export function mockLayoutAlternatives(world: MockWorld, request: LayoutRequest): LayoutAlternative[] {
   const revision = world.revisions.get(request.rev)
   if (!revision) return []
@@ -410,6 +420,7 @@ export function mockLayoutAlternatives(world: MockWorld, request: LayoutRequest)
           kpi_delta: { sales_krw: plan.delta[0], low: plan.delta[1], high: plan.delta[2] },
           constraints,
           explanations: plan.explain(name),
+          ...SEARCH_BY_SUFFIX[plan.id.slice(-1)],
         },
       ]
     })

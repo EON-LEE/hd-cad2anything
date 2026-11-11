@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,9 @@ from cad2anything.model import (
 )
 
 TOKEN_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
+CONNECT_TIMEOUT_S = 8
+STATEMENT_TIMEOUT_MS = 30_000
+TOKEN_REFRESH_MARGIN_S = 300
 
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS postgis;
@@ -88,16 +92,23 @@ def connection_settings() -> dict[str, str]:
     }
 
 
-def entra_token() -> str:
+@lru_cache(maxsize=2)
+def _credential(client_id: str | None) -> Any:
     from azure.identity import DefaultAzureCredential
 
-    client_id = os.environ.get("AZURE_CLIENT_ID")
-    credential = (
+    return (
         DefaultAzureCredential(managed_identity_client_id=client_id)
         if client_id
         else DefaultAzureCredential()
     )
-    return credential.get_token(TOKEN_SCOPE).token
+
+
+def _entra_access_token() -> Any:
+    return _credential(os.environ.get("AZURE_CLIENT_ID")).get_token(TOKEN_SCOPE)
+
+
+def entra_token() -> str:
+    return _entra_access_token().token
 
 
 def connect(**overrides: Any) -> Any:
@@ -106,8 +117,25 @@ def connect(**overrides: Any) -> Any:
     settings = connection_settings() | overrides
     if not settings.get("user"):
         raise RuntimeError("POSTGRES_USER is not set")
-    password = os.environ.get("PGPASSWORD") or entra_token()
-    return psycopg.connect(**settings, password=password, sslmode="require", connect_timeout=15)
+    token = None
+    password = os.environ.get("PGPASSWORD")
+    if not password:
+        token = _entra_access_token()
+        password = token.token
+    conn = psycopg.connect(
+        **settings,
+        password=password,
+        sslmode="require",
+        connect_timeout=CONNECT_TIMEOUT_S,
+        options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
+    if token is not None:
+        conn._cad2anything_token_expires_at = token.expires_on
+    return conn
 
 
 def ensure_schema(conn: Any) -> None:

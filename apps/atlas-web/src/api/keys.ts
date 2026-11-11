@@ -6,6 +6,7 @@ export const cacheKeys = {
   productivity: (mode: string, rev: string, floor: string) => `${mode}:prod:${rev}:${floor}`,
   relayoutBriefs: (mode: string) => `${mode}:relayout:briefs`,
   uploadProfiles: (mode: string) => `${mode}:uploads:profiles`,
+  uploadRules: (mode: string) => `${mode}:uploads:rules`,
 }
 
 /** Cached resources built from one revision's model (dropped after that revision is uploaded again). */

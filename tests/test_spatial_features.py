@@ -313,3 +313,22 @@ def test_full_store_runs_in_seconds():
     assert not features["escalator_fallback"].any()
     assert sum(r.type == RelationType.CONNECTED_TO for r in relations) == 8 * 6
     assert elapsed < 20.0
+
+
+def test_walk_to_escalator_marks_straight_line_estimates(model: SpatialModel, features):
+    """2F-P01 sits on a walkway piece of its own, so its escalator walk is a straight line."""
+    row = features.loc["2F-P01"]
+    network = build_floor_network(model, "2F")
+    origin = network.access_points["U-2F-P01"]
+    landing = min(
+        (origin.distance(point) for point in network.all_access_points["V-2F-ESC-A"]),
+        default=math.inf,
+    )
+
+    assert bool(row["escalator_fallback"]) is True
+    assert row["walk_to_escalator_m"] == pytest.approx(landing, abs=0.01)
+    assert math.isnan(network.walk_distance("U-2F-P01", "V-2F-ESC-A"))
+    # Units on the main walkway are measured along the corridors, not as the crow flies.
+    others = features.loc[["2F-S01", "2F-S02"]]
+    assert not others["escalator_fallback"].any()
+    assert features["escalator_fallback"].sum() == 1

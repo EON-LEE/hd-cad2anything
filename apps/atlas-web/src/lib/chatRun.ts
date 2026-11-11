@@ -7,8 +7,11 @@ import { flowModeLabel } from './flow'
 import { floorLabel, withEuro } from './format'
 import { parsePointer, touchedKeys, type PatchOperation } from './jsonPatch'
 
-/** thinking -> working -> answering -> done | error (stopped = cancelled by the user). */
-export type RunStatus = 'thinking' | 'working' | 'answering' | 'done' | 'error' | 'stopped'
+/**
+ * thinking -> working -> answering -> done | error. `stopped` = cancelled by the user; `incomplete` = the stream
+ * ended without RUN_FINISHED or RUN_ERROR (the text received so far is kept).
+ */
+export type RunStatus = 'thinking' | 'working' | 'answering' | 'done' | 'error' | 'stopped' | 'incomplete'
 export type StepStatus = 'running' | 'done' | 'error'
 /** tool = a tool call or a UI change; note = the agent's progress note (its plan, or why it changes approach). */
 export type StepKind = 'tool' | 'note'
@@ -65,6 +68,9 @@ export interface FoldContext {
 export const THINKING_LABEL = '생각하는 중…'
 export const UNKNOWN_TOOL_LABEL = '작업 중'
 export const ERROR_MESSAGE = '답변을 만드는 중 문제가 생겼어요. 잠시 후 다시 시도해 주세요.'
+export const INCOMPLETE_MESSAGE = '응답이 중간에 끊겼어요.'
+/** Technical reason kept on an incomplete run (shown with the developer details). */
+export const INCOMPLETE_DETAIL = '응답 스트림이 RUN_FINISHED 없이 끝났습니다.'
 
 // --- labels ------------------------------------------------------------------------------------
 
@@ -148,6 +154,35 @@ export function toolLabel(name: string | null | undefined): string {
   if (known) return TOOL_LABELS[known]
   const key = normalizeToolName(name)
   return PREFIX_LABELS.find(([prefix]) => key.startsWith(prefix))?.[1] ?? UNKNOWN_TOOL_LABEL
+}
+
+/**
+ * Tools that change what the server holds (new revisions, artifacts, relayout projects, uploads). After one of
+ * them ran, the revision list and the data the panels loaded earlier are out of date.
+ */
+export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  'revision_process',
+  'revision_create_hypothetical',
+  'registry_run',
+  // Saves one hypothetical revision per alternative unless told not to.
+  'layout_generate_alternatives',
+  'relayout_diagnose',
+  'relayout_plan',
+  'relayout_select',
+  'relayout_phasing',
+  'relayout_check_drawing',
+  'upload_drawings',
+  'upload_metadata',
+  'upload_layer_mapping',
+])
+
+/** True when a tool call (also "atlas_relayout_plan" or "relayout.plan"-style spellings, nested or not) changes server data. */
+export function isMutatingTool(name: string | null | undefined): boolean {
+  const key = normalizeToolName(name)
+  if (!key) return false
+  if (MUTATING_TOOLS.has(key)) return true
+  for (const tool of MUTATING_TOOLS) if (key.endsWith(`_${tool}`)) return true
+  return false
 }
 
 // UI tools whose generic label can be made specific from the patch they produced.
@@ -478,29 +513,24 @@ function withMessage(run: ChatRun, messageId: string): ChatRun {
   return { ...run, messageIds: [...run.messageIds, messageId], answer }
 }
 
-/** End a run (RUN_FINISHED, RUN_ERROR or user abort); steps still running are closed. */
-export function finishRun(run: ChatRun, outcome: 'done' | 'error' | 'stopped', at: number, message?: string): ChatRun {
+/** End a run (RUN_FINISHED, RUN_ERROR, user abort or a stream that ended early); steps still running are closed. */
+export function finishRun(run: ChatRun, outcome: 'done' | 'error' | 'stopped' | 'incomplete', at: number, message?: string): ChatRun {
   if (!isRunActive(run)) return run
   const steps = run.steps.map((s): RunStep => {
     if (s.status !== 'running') return s
     if (outcome === 'done') return { ...s, status: 'done', endedAt: at }
     return { ...s, status: 'error', error: outcome === 'stopped' ? '중지됨' : (s.error ?? '실행이 끝나지 않음'), endedAt: at }
   })
-  return {
-    ...run,
-    steps,
-    status: outcome,
-    error: outcome === 'error' ? (message || '알 수 없는 오류') : run.error,
-    endedAt: at,
-  }
+  const error = outcome === 'error' ? message || '알 수 없는 오류' : outcome === 'incomplete' ? message || INCOMPLETE_DETAIL : run.error
+  return { ...run, steps, status: outcome, error, endedAt: at }
 }
 
-/** The stream closed without RUN_FINISHED/RUN_ERROR. */
-export function closeRun(run: ChatRun, at: number): ChatRun {
-  if (!isRunActive(run)) return run
-  return run.answer.trim()
-    ? finishRun(run, 'done', at)
-    : finishRun(run, 'error', at, '응답 스트림이 RUN_FINISHED 없이 끝났습니다.')
+/**
+ * The stream closed without RUN_FINISHED or RUN_ERROR (dropped connection, server stop). Whatever text arrived is
+ * kept, but the answer is marked incomplete: it is never taken for a finished one.
+ */
+export function closeRun(run: ChatRun, at: number, detail?: string): ChatRun {
+  return finishRun(run, 'incomplete', at, detail)
 }
 
 /** Fold one AG-UI event into the run. Events after the run ended are ignored. */
@@ -531,7 +561,14 @@ export function foldRunEvent(run: ChatRun, event: AgUiEvent, ctx: FoldContext): 
     case 'STATE_DELTA':
       return stateDelta(run, event.delta, ctx)
     case 'RUN_FINISHED':
-      return finishRun(run, 'done', ctx.at)
+      return event.incomplete || (event.outcome !== undefined && event.outcome !== 'answered')
+        ? finishRun(
+            run,
+            'incomplete',
+            ctx.at,
+            event.outcome ? `응답이 완료되지 않았습니다 (${event.outcome}).` : undefined,
+          )
+        : finishRun(run, 'done', ctx.at)
     case 'RUN_ERROR':
       return finishRun(run, 'error', ctx.at, event.message)
     default:

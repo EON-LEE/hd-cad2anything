@@ -7,6 +7,7 @@ import { invalidateCache, useCachedResource } from '../hooks/useCachedResource'
 import { JOB_POLL_MS, useUploadJob } from '../hooks/useUploadJob'
 import { formatDateTime } from '../lib/format'
 import { JOB_STATUS_LABELS, JOB_STATUS_TONE, jobHasRevision } from '../lib/uploads'
+import { useAppDispatch } from '../state/store'
 import type { UploadJob, UploadJobSummary } from '../types/api'
 import { DrawingUploadForm } from './DrawingUploadForm'
 import { MetadataUploads } from './MetadataUploads'
@@ -27,6 +28,7 @@ const TABS: { id: UploadTab; label: string }[] = [
 
 function DrawingUploads({ request, pollMs }: { request: UploadRequest | null; pollMs: number }) {
   const { source, refreshMeta } = useData()
+  const dispatch = useAppDispatch()
   const profiles = useCachedResource(cacheKeys.uploadProfiles(source.mode), () => source.listDrawingProfiles())
   const [jobs, setJobs] = useState<{ data: UploadJobSummary[] | null; error: string | null }>({ data: null, error: null })
   const [jobsSeq, setJobsSeq] = useState(0)
@@ -56,10 +58,12 @@ function DrawingUploads({ request, pollMs }: { request: UploadRequest | null; po
         refreshMeta?.().catch(() => {
           // keep the current revision list; the job detail still offers the revision
         })
+        // Panels that already showed this revision's changes and artifacts load them again.
+        dispatch({ type: 'data/changed' })
       }
       if (job.relayout_check) invalidateCache(cacheKeys.relayoutBriefs(source.mode))
     },
-    [refreshMeta, source],
+    [dispatch, refreshMeta, source],
   )
 
   const tracked = useUploadJob(selectedJobId, pollMs, onSettled)
@@ -101,6 +105,7 @@ function DrawingUploads({ request, pollMs }: { request: UploadRequest | null; po
                   >
                     <strong>{j.rev_id ?? '–'}</strong>
                     <span className={`badge ${JOB_STATUS_TONE[status] ?? ''}`}>{JOB_STATUS_LABELS[status] ?? status}</span>
+                    {j.superseded_by && <span className="badge">대체됨</span>}
                     <span className="muted small">
                       {' '}
                       {j.job_id} · {formatDateTime(j.created_at)}
@@ -119,7 +124,7 @@ function DrawingUploads({ request, pollMs }: { request: UploadRequest | null; po
           작업 상태를 불러오지 못했습니다: {tracked.error}
         </p>
       )}
-      {tracked.job && <UploadJobDetail job={tracked.job} error={tracked.error} onResumed={tracked.resume} />}
+      {tracked.job && <UploadJobDetail job={tracked.job} error={tracked.error} onResumed={tracked.resume} onOpenJob={setSelectedJobId} />}
     </div>
   )
 }

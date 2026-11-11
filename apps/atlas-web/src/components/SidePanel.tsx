@@ -5,6 +5,7 @@ import { ChatPanel } from './ChatPanel'
 import { GraphPanel } from './GraphPanel'
 import { LayoutPanel } from './LayoutPanel'
 import { ReviewPanel } from './ReviewPanel'
+import './chatState.css'
 
 type TabId = 'chat' | 'review' | 'layout' | 'graph'
 
@@ -21,7 +22,8 @@ export function SidePanel() {
   // Panels mount on first visit (avoids eager requests) and then stay mounted to keep their state.
   const [visited, setVisited] = useState<ReadonlySet<TabId>>(() => new Set<TabId>(['chat']))
   const [unread, setUnread] = useState(false)
-  const [pending, setPending] = useState<TabId | null>(null)
+  // Tabs with a prepared result the user has not opened yet (a later result for another tab does not replace it).
+  const [pending, setPending] = useState<readonly TabId[]>([])
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
   const wasRunning = useRef(chat.running)
 
@@ -33,11 +35,14 @@ export function SidePanel() {
   useEffect(() => {
     if (panelSeq === 0) return
     const tab = panelTab(ui.panel)
-    if (!tab) setPending(null)
-    if (tab && deferPanel) setPending(tab)
+    if (tab && deferPanel) setPending((prev) => (prev.includes(tab) ? prev : [...prev, tab]))
     else if (tab) {
       setActive(tab)
-      setPending(null)
+      setPending((prev) => prev.filter((id) => id !== tab))
+    } else if (ui.panel?.type === 'none') {
+      // The panel was closed: nothing is left to announce. A journey or table opens elsewhere (map, table
+      // panel) and leaves the prepared tabs alone.
+      setPending([])
     }
     // Intentionally keyed on panelSeq only.
   }, [panelSeq])
@@ -58,7 +63,7 @@ export function SidePanel() {
   const select = (id: TabId) => {
     setActive(id)
     if (id === 'chat') setUnread(false)
-    if (id === pending) setPending(null)
+    setPending((prev) => (prev.includes(id) ? prev.filter((tab) => tab !== id) : prev))
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -99,24 +104,26 @@ export function SidePanel() {
               {badge && (
                 <span className="dot" role="img" aria-label={chat.running ? '응답 중' : '새 메시지'} />
               )}
-              {pending === tab.id && !selected && <span className="result-mark" aria-hidden="true">새 결과</span>}
+              {pending.includes(tab.id) && !selected && <span className="result-mark" aria-hidden="true">새 결과</span>}
             </button>
           )
         })}
       </div>
-      {active === 'chat' && pending && (
+      {active === 'chat' && pending.length > 0 && (
         <div className="result-notice">
           <span role="status">결과 화면을 준비했어요. 채팅을 이어 읽거나 지금 열어볼 수 있어요.</span>
-          <button
-            type="button"
-            onClick={() => {
-              const target = pending
-              select(target)
-              tabRefs.current[TABS.findIndex((tab) => tab.id === target)]?.focus()
-            }}
-          >
-            {TABS.find((tab) => tab.id === pending)?.label} 보기
-          </button>
+          {pending.map((target) => (
+            <button
+              key={target}
+              type="button"
+              onClick={() => {
+                select(target)
+                tabRefs.current[TABS.findIndex((tab) => tab.id === target)]?.focus()
+              }}
+            >
+              {TABS.find((tab) => tab.id === target)?.label} 보기
+            </button>
+          ))}
         </div>
       )}
       {TABS.map((tab) => (
@@ -128,7 +135,7 @@ export function SidePanel() {
           className={`tab-panel tab-panel-${tab.id}`}
           hidden={active !== tab.id}
         >
-          {(visited.has(tab.id) || active === tab.id) && tab.id === 'chat' && <ChatPanel />}
+          {(visited.has(tab.id) || active === tab.id) && tab.id === 'chat' && <ChatPanel active={active === 'chat'} />}
           {(visited.has(tab.id) || active === tab.id) && tab.id === 'review' && <ReviewPanel />}
           {(visited.has(tab.id) || active === tab.id) && tab.id === 'layout' && <LayoutPanel />}
           {(visited.has(tab.id) || active === tab.id) && tab.id === 'graph' && <GraphPanel />}

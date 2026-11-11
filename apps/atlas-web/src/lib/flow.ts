@@ -302,7 +302,7 @@ export function flowMarkerName(marker: Pick<FlowMarker, 'title' | 'kind' | 'unit
 
 const countText = (value: number) => formatNumber(value)
 
-/** Tooltip value of a segment: "1,234명(추정)" for traffic, "폭 2.4m" for egress widths. */
+/** Tooltip value of a segment: "1,234회(추정 통과)" for traffic (unit from the backend legend), "폭 2.4m" for egress widths. */
 export function flowValueText(flow: Pick<Flow, 'mode' | 'legend'>, value: number | null): string {
   if (value === null) return ''
   const unit = flow.legend?.unit ?? ''

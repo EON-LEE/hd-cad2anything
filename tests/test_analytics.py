@@ -1,4 +1,5 @@
 import math
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -510,6 +511,76 @@ def test_adjacency_effect_balanced_design_is_not_flagged():
     assert effect.controlled_uplift_pct == pytest.approx(20.0, abs=2.0)
     assert not effect.confounding_suspected
     assert "인과 효과가 아닙니다" in effect.caveat
+
+
+def test_adjacency_effect_controls_for_straight_line_walk_estimates():
+    productivity, pairs, features = _adjacency_case(lambda i: i % 4 in (1, 2), true_effect=1.2)
+    estimated = features["unit_code"].isin({"1F-R03", "1F-R07", "1F-R11"})
+
+    plain = adjacency_effect(productivity, pairs, features.assign(escalator_fallback=False), "CAFE")
+    flagged = adjacency_effect(productivity, pairs, features.assign(escalator_fallback=estimated), "CAFE")
+
+    assert plain.walk_estimated_units == 0 and plain.notes == []
+    assert "walk_estimated" not in plain.controls
+    assert flagged.walk_estimated_units == 3
+    assert "walk_estimated" in flagged.controls
+    assert any("직선거리 추정값" in note for note in flagged.notes)
+    assert "직선거리 추정값" in flagged.caveat
+    assert flagged.confounding_suspected == plain.confounding_suspected  # a data note, not a confounder
+    assert flagged.to_dict()["walk_estimated_units"] == 3
+
+
+def test_driver_decomposition_labels_straight_line_walk_estimates():
+    productivity, _, features = _adjacency_case(lambda i: False, true_effect=1.0)
+    productivity = productivity.assign(
+        low_efficiency=productivity["sales_per_m2"] <= productivity["sales_per_m2"].min()
+    )
+    features = features.assign(escalator_fallback=features["unit_code"].eq("1F-R27"))
+
+    result = driver_decomposition(productivity, features)
+
+    assert any("직선거리 추정값" in note for note in result.notes)
+    assert "직선거리 추정" in result.explanations["1F-R27"]
+
+
+# --- seasonality ----------------------------------------------------------------------------------------
+
+
+def test_monthly_index_measures_observed_seasonality():
+    from cad2anything.analytics import (
+        monthly_sales_index,
+        observed_months,
+        season_weighted_days,
+        seasonal_factor,
+    )
+
+    days = pd.date_range("2024-01-01", "2024-12-31")
+    daily = pd.Series([2.0 if day.month == 12 else 1.0 for day in days], index=days)
+
+    index = monthly_sales_index(daily)
+
+    assert observed_months(daily) == 12
+    assert index[12] == pytest.approx(2.0 * index[1])
+    assert sum(index[d.month] for d in days) / len(days) == pytest.approx(1.0, abs=0.01)
+    # December is a peak, so a December window annualizes to less than calendar days suggest.
+    december = seasonal_factor(date(2024, 12, 1), date(2024, 12, 31), index)
+    assert december < 365.0 / 31
+    assert season_weighted_days(date(2024, 12, 1), date(2024, 12, 31), index) > 31
+
+
+def test_monthly_index_keeps_unobserved_months_neutral():
+    from cad2anything.analytics import monthly_sales_index, observed_months
+
+    days = pd.date_range("2024-01-01", "2024-03-31")
+    daily = pd.Series(1.0, index=days)
+
+    index = monthly_sales_index(daily)
+
+    assert observed_months(daily) == 3
+    assert set(index) == set(range(1, 13))
+    assert all(value == pytest.approx(1.0) for value in index.values())
+    assert monthly_sales_index(pd.Series(dtype=float)) == dict.fromkeys(range(1, 13), 1.0)
+    assert monthly_sales_index(daily, through=date(2024, 1, 10))[1] == pytest.approx(1.0)
 
 
 def test_before_after_with_comparison_group():

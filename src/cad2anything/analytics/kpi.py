@@ -393,7 +393,8 @@ class DriverDecomposition:
 
 def _driver_detail(component: str, row: pd.Series, means: dict[str, float]) -> str:
     if component == "exposure":
-        return f"보행거리 {row['walk_to_escalator_m']:.0f}m, 표본 평균 {means['walk']:.0f}m"
+        estimated = " · 통로 미연결로 직선거리 추정" if bool(row.get("escalator_fallback")) else ""
+        return f"보행거리 {row['walk_to_escalator_m']:.0f}m{estimated}, 표본 평균 {means['walk']:.0f}m"
     if component == "frontage":
         return f"접면 {row['frontage_m']:.1f}m, 표본 평균 {means['frontage']:.1f}m"
     if component == "area":
@@ -417,6 +418,8 @@ def driver_decomposition(
     needed = ["walk_to_escalator_m", "frontage_m", "area_m2"]
     if unit_features is not None:
         extra = [c for c in needed if c not in data or data[c].isna().all()]
+        if "escalator_fallback" in unit_features and "escalator_fallback" not in data:
+            extra = [*extra, "escalator_fallback"]
         if extra:
             data = data.drop(columns=[c for c in extra if c in data]).merge(
                 unit_features[["unit_code", *extra]].drop_duplicates("unit_code"), on="unit_code", how="left"
@@ -508,6 +511,13 @@ def driver_decomposition(
     contrib["explanation"] = texts
     if fit.n_obs < 3 * len(terms):
         notes.append("관측치가 계수 수에 비해 적어 계수가 불안정할 수 있습니다.")
+    if "escalator_fallback" in sample:
+        estimated = int(sample["escalator_fallback"].fillna(False).astype(bool).sum())
+        if estimated:
+            notes.append(
+                f"{estimated}개 매장은 통로로 에스컬레이터에 이어지지 않아 보행거리가 직선거리 추정값입니다"
+                "(노출 요인 해석에 주의하세요)."
+            )
     return DriverDecomposition(
         coefficients=fit.table(labels),
         r2=fit.r2,

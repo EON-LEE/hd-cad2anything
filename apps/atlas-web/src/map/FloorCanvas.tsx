@@ -10,6 +10,7 @@ import { LayerToolbar } from '../components/LayerToolbar'
 import { RouteCard } from '../components/RouteCard'
 import { TablePanel } from '../components/TablePanel'
 import { UnitDetailsCard } from '../components/UnitDetailsCard'
+import { UnitList, type UnitOption } from '../components/UnitList'
 import { useCachedResource } from '../hooks/useCachedResource'
 import { useElementSize } from '../hooks/useElementSize'
 import { CHANGE_LABELS } from '../lib/colors'
@@ -228,6 +229,15 @@ export function FloorCanvas() {
   )
 
   const categoryNames = useMemo(() => new Map(meta.categories.map((c) => [c.code, c.name_ko])), [meta.categories])
+  // Keyboard/screen-reader entry point: units of the current floor, searchable by name or code (R3).
+  const unitOptions = useMemo<UnitOption[]>(
+    () =>
+      [...model.units.values()]
+        .map((u) => ({ code: u.code, name: unitDisplayName(u), category: categoryNames.get(String(u.props.category)) ?? '' }))
+        .sort((a, b) => a.code.localeCompare(b.code)),
+    [model.units, categoryNames],
+  )
+  const selectUnit = useCallback((code: string) => dispatch({ type: 'selection/set', unitCodes: [code] }), [dispatch])
   const getTooltip = useCallback(
     (info: PickingInfo) => {
       const object = info.object as Record<string, unknown> | null
@@ -278,6 +288,22 @@ export function FloorCanvas() {
   )
 
   const floorName = floors.find((f) => f.code === ui.floor)?.name ?? ''
+  // Announce only meaningful changes (floor, revision, which overlay is shown), debounced, so a screen
+  // reader is not flooded by the long summary on every zoom, hover or selection (R4).
+  const liveSummary = useMemo(() => {
+    const parts = [`${ui.floor} ${floorName} 도면`.trim(), `개정 ${ui.rev}`]
+    if (compareRev) parts.push(`${compareRev} 대비 비교 중`)
+    if (heatValues) parts.push(`${ui.heatmap?.label ?? 'heatmap'} 표시 중`)
+    if (ui.journey) parts.push('고객 동선 표시 중')
+    if (ui.route) parts.push('길 찾기 경로 표시 중')
+    if (ui.flow) parts.push(`${flowModeLabel(ui.flow.mode)} 표시 중`)
+    return parts.join(', ')
+  }, [ui.floor, floorName, ui.rev, compareRev, heatValues, ui.heatmap?.label, ui.journey, ui.route, ui.flow])
+  const [announced, setAnnounced] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => setAnnounced(liveSummary), 400)
+    return () => clearTimeout(timer)
+  }, [liveSummary])
   const selectedUnit = selectedUnits[0] ?? null
   const loadingError = base.error
   const [deckError, setDeckError] = useState<string | null>(null)
@@ -287,8 +313,9 @@ export function FloorCanvas() {
   }, [])
 
   return (
-    <section className="canvas-wrap" id="floor-canvas" aria-label={`도면 캔버스: ${ui.floor} ${floorName}, 개정 ${ui.rev}`}>
+    <section className="canvas-wrap" id="floor-canvas" role="tabpanel" aria-labelledby={`floor-tab-${ui.floor}`}>
       <LayerToolbar onZoomIn={() => zoomBy(0.5)} onZoomOut={() => zoomBy(-0.5)} onFit={fitAll} />
+      <UnitList options={unitOptions} selectedCode={selection[0] ?? null} onSelect={selectUnit} floorName={ui.floor} />
       <div className="canvas-stage">
         <div className="canvas" ref={containerRef}>
           {viewState && (
@@ -314,7 +341,7 @@ export function FloorCanvas() {
           </div>
         )}
         <p className="visually-hidden" aria-live="polite">
-          {`${ui.floor} 도면: 매장 ${model.units.size}개, 강조 ${highlights.length}개, 연결선 ${edges.length}개${heatValues ? ', heatmap 표시 중' : ''}${compareRev ? `, ${compareRev} 대비 비교 중` : ''}${ui.journey ? `, 고객 동선 표시 중(이 층 결제 ${journey.stops.length}곳)` : ''}${ui.route ? `, 길 찾기 경로 표시 중${route.places.length ? `(이 층: ${route.places.map((p) => `${p.text} ${p.label}`).join(', ')})` : ''}` : ''}${ui.flow ? `, ${flowModeLabel(ui.flow.mode)} 표시 중(이 층: 통로 ${flow.paths.length}구간, 표시 지점 ${flow.markers.length}곳)` : ''}`}
+          {announced}
         </p>
         {badges.map((badge) => (
           <button

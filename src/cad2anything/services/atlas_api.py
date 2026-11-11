@@ -2,27 +2,42 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import logging
+import math
 import os
-from collections.abc import Callable, Iterator
+import re
+import threading
+import time
+from bisect import bisect_left
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from shapely.geometry import mapping
-from starlette.concurrency import iterate_in_threadpool
 
 from cad2anything.catalog import CATEGORIES, FACILITY_CODE, FACILITY_NAME
 from cad2anything.generators import approve, load_specs, plan_impact, reject
 from cad2anything.generators.spatial import _category_color
 from cad2anything.model import EntityKind
+from cad2anything.services import errors as tool_errors
 from cad2anything.services import metrics
 from cad2anything.services.errors import NotFoundToolError
 from cad2anything.services.tools import ToolError, Toolkit
+
+logger = logging.getLogger("cad2anything.services.atlas_api")
+CHAT_KEEPALIVE_S = 15.0
+DEFAULT_CHAT_TURN_DEADLINE_S = 230.0
+CHAT_DEADLINE_MESSAGE = "응답 시간이 너무 길어 이번 요청을 중단했어요. 질문을 나눠서 다시 시도해 주세요."
+CHAT_ERROR_MESSAGE = "응답 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요."
 
 FEATURE_KINDS = (
     EntityKind.EXTERIOR,
@@ -77,6 +92,8 @@ class RelayoutPlanRequest(BaseModel):
     max_moves: int | None = Field(default=None, ge=0, le=30)
     downtime_weeks: float | None = Field(default=None, ge=0, le=26)
     movable: str | None = Field(default=None, pattern="^(expiring|all)$")
+    as_of: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    replace_decision: bool = False
     extra_exits: list[str] = Field(default_factory=list, max_length=10)
     extra_entries: list[str] = Field(default_factory=list, max_length=10)
 
@@ -120,9 +137,47 @@ def _round_coords(geometry: dict[str, Any]) -> dict[str, Any]:
     return {"type": geometry["type"], "coordinates": walk(geometry["coordinates"])}
 
 
+def _sse_event(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+
 def _sse(events: Iterator[dict[str, Any]]) -> Iterator[str]:
     for event in events:
-        yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+        yield _sse_event(event)
+
+
+class _ChatStreamingResponse(StreamingResponse):
+    def __init__(self, *args: Any, cancel: threading.Event, **kwargs: Any):
+        self._cancel = cancel
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._cancel.set()
+            await self.body_iterator.aclose()
+
+
+def _chat_deadline_s() -> float:
+    try:
+        value = float(os.environ.get("CHAT_TURN_DEADLINE_S", DEFAULT_CHAT_TURN_DEADLINE_S))
+        if math.isfinite(value) and value > 0:
+            return value
+    except ValueError:
+        pass
+    logger.warning("invalid CHAT_TURN_DEADLINE_S; using default")
+    return DEFAULT_CHAT_TURN_DEADLINE_S
+
+
+def _safe_log_id(value: Any) -> str:
+    identifier = str(value) if value is not None else ""
+    return identifier if re.fullmatch(r"[a-zA-Z0-9._:-]{1,128}", identifier) else "none"
+
+
+def _safe_error_type(value: Any) -> str:
+    name = str(value) if value is not None else ""
+    return name if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name) else "RuntimeError"
 
 
 def _tool_error(exc: ToolError) -> HTTPException:
@@ -137,6 +192,9 @@ def _latest_actual_rev(toolkit: Toolkit) -> str:
 
 
 def _relayout_error(exc: ToolError) -> HTTPException:
+    decision_exists = getattr(tool_errors, "DecisionExistsError", None)
+    if decision_exists is not None and isinstance(exc, decision_exists):
+        return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=404 if isinstance(exc, NotFoundToolError) else 400, detail=str(exc))
 
 
@@ -149,6 +207,7 @@ def create_api(
     app = FastAPI(title="CAD2Anything Atlas", version="0.1.0", lifespan=lifespan)
     ws = toolkit.ws
     runtime_holder: dict[str, Any] = {}
+    sales_cache: tuple[tuple[str, int, int], tuple[str, ...]] | None = None
 
     def runtime() -> Any:
         if "runtime" not in runtime_holder:
@@ -157,25 +216,61 @@ def create_api(
             runtime_holder["runtime"] = runtime_factory(toolkit)
         return runtime_holder["runtime"]
 
+    def observed_sales_days() -> tuple[str, ...]:
+        nonlocal sales_cache
+        observed = getattr(toolkit, "_observed_days", None)
+        if callable(observed):
+            return tuple(day.isoformat() for day in observed())
+        path = ws.table_path("transactions")
+        if path is None:
+            return ()
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        if sales_cache is None or sales_cache[0] != key:
+            stamps = pd.to_datetime(pd.read_csv(path, usecols=["ts"])["ts"], errors="coerce")
+            sales_cache = (key, tuple(sorted(set(stamps.dropna().dt.strftime("%Y-%m-%d")))))
+        return sales_cache[1]
+
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
-        return {"ok": True, "revisions": [r.rev_id for r in ws.revisions()]}
+        return {"ok": True, "revisions": sorted(p.stem for p in (ws.root / "models").glob("*.json"))}
+
+    @app.get("/readyz")
+    def readyz() -> JSONResponse:
+        mirror = ws.mirror_status()
+        try:
+            loaded = bool(ws.revisions())
+        except (OSError, ValueError, KeyError) as exc:
+            logger.warning("workspace readiness failed error_type=%s", type(exc).__name__)
+            loaded = False
+        body = {"ok": loaded, "workspace_loaded": loaded, **mirror}
+        return JSONResponse(status_code=200 if loaded else 503, content=body)
 
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
         through = toolkit.data_through()
+        all_revisions = ws.revisions()
+        actual = [r for r in all_revisions if r.kind.value == "actual" and r.effective_date]
+        next_date = {
+            r.rev_id: actual[i + 1].effective_date if i + 1 < len(actual) else None
+            for i, r in enumerate(actual)
+        }
+        sales_days = observed_sales_days()
+
+        def has_sales(rev_id: str, effective_date: str | None) -> bool:
+            if rev_id not in next_date or not effective_date:
+                return False
+            index = bisect_left(sales_days, effective_date)
+            end = next_date[rev_id]
+            return index < len(sales_days) and (end is None or sales_days[index] < end)
+
         revisions = [
             r.to_dict()
             | {
                 "model_source": ws.model_meta(r.rev_id).get("source"),
-                "has_sales": bool(
-                    through is not None
-                    and r.kind.value == "actual"
-                    and r.effective_date
-                    and r.effective_date <= through.isoformat()
-                ),
+                "has_sales": has_sales(r.rev_id, r.effective_date),
             }
-            for r in ws.revisions()
+            for r in all_revisions
         ]
         floors: list[dict[str, Any]] = []
         if revisions:
@@ -187,12 +282,14 @@ def create_api(
             {"code": code, "name_ko": category.name_ko, "color": _category_color(code)}
             for code, category in CATEGORIES.items()
         ]
+        mirror = ws.mirror_status()
         return {
             "facility": {"code": FACILITY_CODE, "name": FACILITY_NAME},
             "data_through": through.isoformat() if through else None,
             "revisions": revisions,
             "floors": floors,
             "categories": categories,
+            **mirror,
         }
 
     @app.get("/api/floors/{rev}/{floor}")
@@ -414,9 +511,104 @@ def create_api(
     def chat(request: ChatRequest) -> StreamingResponse:
         agent_runtime = runtime()
         ui_state = dict(request.ui_state)
-        events = agent_runtime.run(request.message, ui_state, conversation_id=request.thread_id)
-        return StreamingResponse(
-            iterate_in_threadpool(_sse(events)),
+        cancel = threading.Event()
+
+        async def stream() -> AsyncIterator[str]:
+            started = time.monotonic()
+            deadline = started + _chat_deadline_s()
+            last_event_at = started
+            messages: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
+            slots = threading.BoundedSemaphore(64)
+            loop = asyncio.get_running_loop()
+            done = object()
+            outcome = "error"
+            error_type = "IncompleteStream"
+            thread_id = request.thread_id
+
+            def enqueue(item: Any) -> None:
+                while not cancel.is_set():
+                    if not slots.acquire(timeout=0.1):
+                        continue
+                    try:
+                        loop.call_soon_threadsafe(messages.put_nowait, item)
+                    except RuntimeError:
+                        slots.release()
+                    return
+
+            def produce() -> None:
+                try:
+                    kwargs: dict[str, Any] = {"conversation_id": request.thread_id}
+                    try:
+                        parameters = inspect.signature(agent_runtime.run).parameters
+                    except (TypeError, ValueError):
+                        parameters = {}
+                    if "cancel" in parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+                    ):
+                        kwargs["cancel"] = cancel
+                    for event in agent_runtime.run(request.message, ui_state, **kwargs):
+                        if cancel.is_set():
+                            break
+                        enqueue((event, None))
+                except Exception as exc:
+                    enqueue(({"type": "RUN_ERROR", "message": CHAT_ERROR_MESSAGE}, type(exc).__name__))
+                finally:
+                    enqueue(done)
+
+            threading.Thread(target=produce, name="chat-turn", daemon=True).start()
+            try:
+                while True:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        outcome = "deadline"
+                        error_type = "TimeoutError"
+                        yield _sse_event({"type": "RUN_ERROR", "message": CHAT_DEADLINE_MESSAGE})
+                        break
+                    if now - last_event_at >= CHAT_KEEPALIVE_S:
+                        yield ": keepalive\n\n"
+                        last_event_at = time.monotonic()
+                        continue
+                    wait = max(0.001, min(1.0, deadline - now, CHAT_KEEPALIVE_S - (now - last_event_at)))
+                    try:
+                        item = await asyncio.wait_for(messages.get(), timeout=wait)
+                    except TimeoutError:
+                        continue
+                    slots.release()
+                    if item is done:
+                        break
+                    event, worker_error = item
+                    if event.get("type") == "RUN_STARTED":
+                        thread_id = event.get("thread_id") or thread_id
+                    yield _sse_event(event)
+                    last_event_at = time.monotonic()
+                    if event.get("type") == "RUN_FINISHED":
+                        outcome = "finished"
+                        error_type = "none"
+                        break
+                    if event.get("type") == "RUN_ERROR":
+                        outcome = "error"
+                        error_type = _safe_error_type(worker_error or event.get("error_type"))
+                        break
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                error_type = "ClientDisconnect"
+                raise
+            finally:
+                if cancel.is_set() and outcome != "deadline":
+                    outcome = "cancelled"
+                    error_type = "ClientDisconnect"
+                cancel.set()
+                logger.info(
+                    "chat_turn thread_id=%s duration_ms=%d outcome=%s error_type=%s",
+                    _safe_log_id(thread_id),
+                    round((time.monotonic() - started) * 1000),
+                    outcome,
+                    error_type,
+                )
+
+        return _ChatStreamingResponse(
+            stream(),
+            cancel=cancel,
             media_type="text/event-stream",
             headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
         )
@@ -489,14 +681,19 @@ def create_api(
     def relayout_plan(brief_id: str, request: RelayoutPlanRequest | None = None) -> dict[str, Any]:
         body = request or RelayoutPlanRequest()
         try:
-            return toolkit.relayout_plan(brief_id, **body.model_dump())
+            params = body.model_dump()
+            if params["as_of"] is None:
+                params.pop("as_of")
+            return toolkit.relayout_plan(brief_id, **params)
         except ToolError as exc:
             raise _relayout_error(exc) from exc
 
     @app.post("/api/relayout/{brief_id}/select")
     def relayout_select(brief_id: str, request: RelayoutSelectRequest) -> dict[str, Any]:
         try:
-            return toolkit.relayout_select(brief_id, request.alt_id, request.decided_by)
+            return toolkit.relayout_select(
+                brief_id, request.alt_id, request.decided_by, decision_source="api"
+            )
         except ToolError as exc:
             raise _relayout_error(exc) from exc
 

@@ -33,13 +33,43 @@ export function mockRequested(): boolean {
   return false
 }
 
+/**
+ * Whether mock data may take the place of a backend that does not answer: only in mock mode (`vite --mode mock`,
+ * VITE_MOCK=1 or `?mock=1`). A production build never shows made-up data in place of the real data.
+ */
+export function mockFallbackAllowed(): boolean {
+  return import.meta.env.MODE === 'mock' || mockRequested()
+}
+
 export async function createMockContext(reason: string): Promise<DataContextValue> {
   const { createMockSource } = await import('../mock/mockSource')
   const source = createMockSource()
   return { source, meta: normalizeMeta(await source.getMeta()), mockReason: reason }
 }
 
-/** Use the live backend when /api/meta answers; otherwise fall back to the built-in fixtures. */
+/** `/api/meta` could not be loaded and mock data was not asked for: the app cannot start (see <BootError>). */
+export class BackendUnavailableError extends Error {
+  /** Why the request failed, for the "자세히 보기" text. */
+  readonly detail: string
+
+  constructor(detail: string) {
+    super(`서버에 연결하지 못했어요 (${detail})`)
+    this.name = 'BackendUnavailableError'
+    this.detail = detail
+  }
+}
+
+function failureDetail(error: unknown): string {
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return '8초 안에 응답하지 않았어요.'
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Use the live backend when /api/meta answers. When it does not, mock fixtures stand in only in mock mode
+ * (see `mockFallbackAllowed`); otherwise this rejects with a `BackendUnavailableError`.
+ */
 export async function resolveDataSource(): Promise<DataContextValue> {
   if (mockRequested()) return createMockContext('VITE_MOCK=1 또는 ?mock=1 설정으로 내장 모의 데이터를 사용합니다.')
   const http = createHttpSource()
@@ -47,7 +77,8 @@ export async function resolveDataSource(): Promise<DataContextValue> {
     const meta = normalizeMeta(await http.getMeta())
     return { source: http, meta, mockReason: null }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    return createMockContext(`백엔드 /api/meta에 연결하지 못해 내장 모의 데이터를 사용합니다. (${detail})`)
+    const detail = failureDetail(error)
+    if (mockFallbackAllowed()) return createMockContext(`백엔드 /api/meta에 연결하지 못해 내장 모의 데이터를 사용합니다. (${detail})`)
+    throw new BackendUnavailableError(detail)
   }
 }

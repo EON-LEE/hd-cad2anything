@@ -304,6 +304,59 @@ def test_units_and_text_repair() -> None:
     assert repair_text("주얼리·시계") == ("주얼리·시계", None)
 
 
+def test_scale_sanity_check_catches_a_centimetre_drawing() -> None:
+    from cad2anything.cadcore.reader import correct_scale, plausible_span
+
+    assert plausible_span((120_000.0, 80_000.0), 0.001)  # a 120 x 80 m floor drawn in mm
+    assert not plausible_span((12_000.0, 8_000.0), 0.001)  # the same floor drawn in cm
+    assert correct_scale((12_000.0, 8_000.0), 0.001) == (0.01, "cm")
+    assert correct_scale((120_000.0, 80_000.0), 0.001) is None  # already plausible: leave it alone
+    assert correct_scale((120.0, 80.0), 1.0) is None
+    assert correct_scale((0.0, 0.0), 1.0) is None  # nothing measurable
+    assert correct_scale((2.0, 1.0), 1.0) is None  # no unit makes this a floor
+
+
+def _write_dxf(path: Path, width: float, depth: float, insunits: int = 0) -> Path:
+    import ezdxf
+
+    doc = ezdxf.new(setup=False)
+    doc.header["$INSUNITS"] = insunits
+    msp = doc.modelspace()
+    msp.add_lwpolyline(
+        [(0, 0), (width, 0), (width, depth), (0, depth)], close=True, dxfattribs={"layer": "A-WALL"}
+    )
+    doc.saveas(path)
+    return path
+
+
+def test_centimetre_floor_is_rescaled_and_reported(tmp_path: Path) -> None:
+    path = _write_dxf(tmp_path / "flagship_R0_4F.dxf", 12_000.0, 8_000.0)
+
+    drawing = read_floor(path, "4F")
+
+    assert drawing.scale == 0.01 and drawing.unit_source == "heuristic_cm"
+    codes = {issue.code for issue in drawing.issues}
+    assert {"units_corrected", "units_inferred"} <= codes
+    corrected = next(i for i in drawing.issues if i.code == "units_corrected")
+    assert "120×80 m" in corrected.message and "manifest" in corrected.message
+    points = next(p.points for p in drawing.primitives if p.kind == "polyline")
+    assert max(x for x, _ in points) == pytest.approx(120.0)
+
+    # An explicit unit always wins, so a manifest or profile silences the heuristic.
+    declared = read_floor(path, "4F", "cm")
+    assert declared.scale == 0.01 and declared.unit_source == "manifest"
+    assert "units_corrected" not in {issue.code for issue in declared.issues}
+
+
+def test_millimetre_floor_is_left_alone(tmp_path: Path) -> None:
+    path = _write_dxf(tmp_path / "flagship_R0_3F.dxf", 120_000.0, 80_000.0)
+
+    drawing = read_floor(path, "3F")
+
+    assert drawing.scale == 0.001 and drawing.unit_source == "extent"
+    assert "units_corrected" not in {issue.code for issue in drawing.issues}
+
+
 def test_wrong_codepage_is_repaired(tmp_path: Path, root: Path) -> None:
     source = root / "drawings" / "R0" / "messy" / "flagship_R0_B1.dxf"
     target = tmp_path / "flagship_R0_B1.dxf"

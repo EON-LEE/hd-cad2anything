@@ -2,15 +2,20 @@
 
 A brief is human input (``business/relayout_briefs/{brief_id}.yaml``): season, base revision, floors,
 objective, entering and exiting brands. Each brief has a project (``projects/relayout/{brief_id}.json``)
-that stores the diagnosis, the plan, the decision and the drawing check. Money values are annualized KRW;
-everything about future layouts is an estimate of the layout scoring model (``cad2anything.layout``).
+that stores the diagnosis, the plan, the decision and the drawing check. Recurring effects are annualized
+KRW; downtime losses are one-off and season net effects use the explicit season horizon. Future layouts
+are estimates of the layout scoring model (``cad2anything.layout``).
 """
 
 from __future__ import annotations
 
 import calendar
+import copy
 import functools
+import hashlib
 import html
+import inspect
+import json
 import math
 import re
 import threading
@@ -28,7 +33,7 @@ from cad2anything.analytics.prep import as_list, floor_sort_key
 from cad2anything.catalog import CATEGORIES
 from cad2anything.model import EntityKind, RevisionKind
 from cad2anything.services.analytics_tools import _floor_code, _json
-from cad2anything.services.errors import NotFoundToolError, ToolError
+from cad2anything.services.errors import DecisionExistsError, NotFoundToolError, ToolError
 
 SEASON_MONTHS = {"SS": (3, 4, 5, 6, 7, 8), "FW": (9, 10, 11, 12, 1, 2)}
 SEASON_LABELS = {"SS": "S/S(3~8월)", "FW": "F/W(9~2월)"}
@@ -72,8 +77,11 @@ CHECK_LABELS = {
 }
 PLAN_CAVEATS = (
     "기대 매출과 수수료 수익은 현재 배치 실적으로 맞춘 점수 모델의 추정치이고, 실제 결과를 보장하지 않아요.",
-    "시즌 지수는 2년치 카테고리 일평균 매출로 계산했고, 그 사이 배치 변화의 영향이 섞여 있어요.",
-    "이전 비용은 공사 기간 동안 해당 매장 기대 매출(목표 가중치 적용)이 없다고 본 단순 추정이에요.",
+    "시즌 지수는 데이터 기준일(as_of)까지의 카테고리 일평균 매출로 계산했고, 배치 변화의 영향이 섞여 있어요.",
+    "1회성 공사 손실은 공사 기간 동안 해당 매장 기대 매출(목표 가중치 적용)이 없다고 본 단순 추정이에요.",
+    "연간 증가 효과와 1회성 공사 손실을 구분해요. 첫 시즌 기준 순효과에는 적용일부터 시즌 말까지의 증가 효과만 넣어요.",
+    "공사비·이사비 등 실제 지출과 투자 회수 기간은 계산에 포함하지 않았어요.",
+    "대안 순위는 기존 비교 지표(net_krw: 연간 증가 효과−1회성 공사 손실)를 유지해요. 첫 시즌 기준 순효과 순위와는 다를 수 있어요.",
     "신규 입점 브랜드는 실적이 없어 카테고리 평균과 브랜드 매력도로 추정해 범위가 넓어요.",
 )
 
@@ -161,18 +169,28 @@ def _search_note(engine: list[Any]) -> dict[str, Any]:
         return {"status": None, "net_upper_bound_krw": None, "note": None}
     first = engine[0]
     notes = {
-        "optimal": "정수계획(CP-SAT)으로 풀어 ALT-1보다 순효과가 큰 배치가 없음을 확인했어요.",
-        "feasible": (
-            "정수계획(CP-SAT)이 제한 시간 안에 최적 증명을 끝내지 못했어요. 이론상 최대 순효과는 연 "
-            f"{_signed_krw(first.net_upper_bound_krw)}이에요."
+        "optimal": (
+            "정수계획(CP-SAT)으로 100원 단위로 반올림한 모델과 제약 안에서 "
+            "ALT-1의 기존 비교 지표(net_krw) 최적해를 확인했어요. 첫 시즌 순효과의 최적성을 뜻하지는 않아요."
         ),
+        "optimal_diverse": (
+            "100원 단위로 반올림한 모델과 앞선 대안과 다르게 만드는 조건 안에서 "
+            "기존 비교 지표(net_krw)의 최적해를 확인했어요."
+        ),
+        "feasible": "정수계획(CP-SAT)의 최적해를 채택·증명한 결과가 아니에요. 이 배치의 최적성은 확인하지 않았어요.",
         "heuristic": "탐색 알고리즘이 찾은 가장 좋은 배치예요. 최적인지는 증명하지 않았어요.",
     }
-    return {
+    result = {
         "status": first.search_status,
         "net_upper_bound_krw": first.net_upper_bound_krw,
+        "objective_rounding_krw": first.objective_rounding_krw,
         "note": notes.get(first.search_status),
     }
+    for key in ("gap_krw", "bound_krw"):
+        value = getattr(first, key, None)
+        if value is not None and math.isfinite(value):
+            result[key] = value
+    return result
 
 
 def _num(value: Any) -> float | int:
@@ -368,9 +386,15 @@ class RelayoutTools:
         objective = str(data.get("objective") or "sales").strip().lower()
         if objective not in OBJECTIVE_LABELS:
             errors.append("objective는 sales(매출) 또는 commission(수수료 수익)이어야 해요.")
-        movable = str(data.get("movable") or ("expiring" if self.ws.has_table("leases") else "all")).lower()
+        movable = str(data.get("movable") or "expiring").lower()
         if movable not in MOVABLE:
             errors.append("movable은 expiring(계약 만료 매장만) 또는 all(전체)이어야 해요.")
+        data_cutoff = data.get("data_cutoff") or data.get("as_of")
+        if data_cutoff is not None:
+            try:
+                data_cutoff = date.fromisoformat(str(data_cutoff)).isoformat()
+            except ValueError:
+                errors.append("data_cutoff는 YYYY-MM-DD 형식이어야 해요.")
         numbers: dict[str, float] = {}
         for key, default, low, high in (
             ("max_moves", 6, 0, 30),
@@ -455,6 +479,20 @@ class RelayoutTools:
             rate = spec.get("commission_rate")
             if rate is None and category in CATEGORIES:
                 rate = sum(CATEGORIES[category].commission_range) / 2
+            if rate is not None:
+                try:
+                    rate = float(rate)
+                except (TypeError, ValueError):
+                    errors.append(f"입점 {index}: commission_rate는 0~1 사이의 유한한 비율이어야 해요.")
+                    continue
+                if math.isfinite(rate) and 1 < rate <= 100:
+                    errors.append(
+                        f"입점 {index}: commission_rate는 백분율이 아닌 비율로 입력해요. 20%라면 20 대신 0.2를 쓰세요."
+                    )
+                    continue
+                if not math.isfinite(rate) or not 0 <= rate <= 1:
+                    errors.append(f"입점 {index}: commission_rate는 0~1 사이의 유한한 비율이어야 해요.")
+                    continue
             entries.append(
                 {
                     "brand_id": str(record["brand_id"]),
@@ -496,9 +534,12 @@ class RelayoutTools:
             "exits": exits,
             "notes": str(data.get("notes") or ""),
         }
+        if data_cutoff is not None:
+            brief["data_cutoff"] = data_cutoff
         if movable == "expiring" and leases is None:
             warnings.append(
-                "계약 정보(leases)가 없어 계약 만료 매장을 알 수 없어요. 모든 매장을 이동 대상으로 봐요."
+                "계약 정보(leases)가 없어 계약 만료 매장을 알 수 없어요. 기존 브랜드는 이동하지 않아요. "
+                "전체 이동을 허용하려면 movable=all을 명시해야 해요."
             )
         return brief, errors, warnings
 
@@ -509,7 +550,7 @@ class RelayoutTools:
     def _project(self, brief_id: str) -> dict[str, Any]:
         self._brief_path(brief_id)
         stored = self.ws.read_json(self._project_rel(brief_id))
-        return stored or {
+        project = stored or {
             "brief_id": brief_id,
             "status": "draft",
             "diagnosis": None,
@@ -522,11 +563,46 @@ class RelayoutTools:
             "report_url": None,
             "updated_at": None,
         }
+        project.setdefault("decision_history", [])
+        project.setdefault("decision_snapshot", None)
+        return project
 
     def _save_project(self, project: dict[str, Any]) -> dict[str, Any]:
         project["updated_at"] = _now()
         self.ws.write_json(self._project_rel(project["brief_id"]), _json(project))
         return project
+
+    @staticmethod
+    def _plan_response(
+        plan: dict[str, Any], project: dict[str, Any], *, reused: bool = False
+    ) -> dict[str, Any]:
+        return {
+            **copy.deepcopy(plan),
+            **{key: project.get(key) for key in ("selected_alt_id", "decided_by", "decided_at")},
+            **({"reused": True} if reused else {}),
+        }
+
+    @staticmethod
+    def _decision_record(project: dict[str, Any], *, replaced_at: str | None = None) -> dict[str, Any]:
+        plan = project.get("plan") or {}
+        chosen = next(
+            (a for a in plan.get("alternatives", []) if a["alt_id"] == project.get("selected_alt_id")),
+            {},
+        )
+        snapshot = project.get("decision_snapshot") or {}
+        result = {
+            "alt_id": project.get("selected_alt_id"),
+            "decided_by": project.get("decided_by"),
+            "decided_at": project.get("decided_at"),
+            "plan_params": copy.deepcopy(snapshot.get("plan_params", plan.get("params", {}))),
+            "kpi_snapshot": copy.deepcopy(snapshot.get("kpi", chosen.get("kpi", {}))),
+        }
+        source = project.get("decision_source")
+        if source in ("chat", "api"):
+            result["decision_source"] = source
+        if replaced_at is not None:
+            result["replaced_at"] = replaced_at
+        return result
 
     @staticmethod
     def _advance(project: dict[str, Any], status: str) -> None:
@@ -605,6 +681,26 @@ class RelayoutTools:
         }
 
     # Data helpers ------------------------------------------------------------------------------------
+    @staticmethod
+    def _cutoff(value: Any, label: str = "as_of") -> date:
+        try:
+            return date.fromisoformat(str(value))
+        except (TypeError, ValueError) as exc:
+            raise ToolError(f"{label}는 YYYY-MM-DD 형식이어야 해요.") from exc
+
+    def _brief_as_of(self, brief: dict[str, Any], as_of: str | None = None) -> str:
+        value = as_of or brief.get("data_cutoff")
+        return (
+            self._cutoff(value).isoformat()
+            if value is not None
+            else (self._cutoff(brief["effective_date"]) - timedelta(days=1)).isoformat()
+        )
+
+    def _relayout_inputs(self, rev: str, as_of: str) -> dict[str, Any]:
+        if "as_of" in inspect.signature(self._layout_inputs).parameters:
+            return self._layout_inputs(rev, as_of=as_of)
+        return self._layout_inputs(rev)
+
     def _leases(self) -> pd.DataFrame | None:
         if not self.ws.has_table("leases"):
             return None
@@ -614,13 +710,29 @@ class RelayoutTools:
         leases["lease_end"] = leases["lease_end"].astype(str).str[:10]
         return leases
 
-    def _season_factors(self, season: str) -> dict[str, float]:
+    def _expiring_pairs(self, cutoff: str) -> set[tuple[str, str]]:
+        """Only leases ending strictly before the explicit cutoff are eligible."""
+        day = self._cutoff(cutoff, "lease_cutoff")
+        leases = self._leases()
+        if leases is None:
+            return set()
+        ends = pd.to_datetime(leases["lease_end"], errors="coerce")
+        eligible = leases[ends.notna() & (ends < pd.Timestamp(day))]
+        return set(zip(eligible["brand_id"], eligible["unit_code"], strict=True))
+
+    def _season_factors(self, season: str, as_of: str | None = None) -> dict[str, float]:
         """Category average daily sales in the season months divided by the all-year average."""
 
         def compute() -> dict[str, float]:
             frame = self._enriched()
+            if as_of is not None:
+                frame = frame[frame["date"] <= pd.Timestamp(self._cutoff(as_of))]
+            if frame.empty:
+                return {}
+            first, last = frame["date"].min().date(), frame["date"].max().date()
             frame = frame[frame["category"].notna()]
-            first, last = self._data_range()
+            if frame.empty:
+                return {}
             days = pd.date_range(first, last, freq="D")
             in_season = days.month.isin(SEASON_MONTHS[season])
             n_all, n_season = len(days), int(in_season.sum())
@@ -632,7 +744,7 @@ class RelayoutTools:
             factors = (seasonal.reindex(total.index, fill_value=0.0) / n_season) / (total / n_all)
             return {str(k): round(float(v), 3) for k, v in factors.items() if np.isfinite(v) and v > 0}
 
-        return self._memo(("season_factors", season, self._data_key()), compute)
+        return self._memo(("season_factors", season, as_of, self._data_key()), compute)
 
     def _commission_rates(self, rev: str) -> dict[str, float]:
         leases = self._leases()
@@ -668,14 +780,18 @@ class RelayoutTools:
 
     # Diagnosis ---------------------------------------------------------------------------------------
     @_locked
-    def relayout_diagnose(self, brief_id: str) -> dict[str, Any]:
+    def relayout_diagnose(self, brief_id: str, as_of: str | None = None) -> dict[str, Any]:
         """Season, floor trend, renewal candidates, vacancies and entry feasibility for a brief."""
         brief = self._brief(brief_id)
         base_rev = brief["base_rev"]
+        as_of = self._brief_as_of(brief, as_of)
         first, last = self._data_range()
+        last = min(last, self._cutoff(as_of))
         latest, previous = aligned_windows(brief["season"], brief["year"], first, last)
-        factors = self._season_factors(brief["season"])
-        productivity = self.productivity_frame(base_rev, "unit")
+        factors = self._season_factors(brief["season"], as_of)
+        productivity = self.productivity_frame(
+            base_rev, "unit", end=min(self.revision_period(base_rev)[1], as_of)
+        )
         floors = brief["floors"]
         scope = productivity[productivity["floor"].isin(floors)]
         floor_rows = []
@@ -701,13 +817,14 @@ class RelayoutTools:
                 for b, u, e in zip(leases["brand_id"], leases["unit_code"], leases["lease_end"], strict=True)
             }
         effective = brief["effective_date"]
+        expiring_pairs = self._expiring_pairs(effective)
         candidates = []
         for row in scope.itertuples():
             if not isinstance(row.brand_id, str):
                 continue
             end = lease_end.get((row.brand_id, row.unit_code))
             reasons = []
-            if end and end < effective:
+            if (row.brand_id, row.unit_code) in expiring_pairs:
                 reasons.append("계약 만료")
             if bool(row.low_efficiency):
                 reasons.append("저효율")
@@ -801,10 +918,17 @@ class RelayoutTools:
                 notes.append(
                     f"{item['brand_name']}는 면적·선호 층에 맞는 공실이나 퇴점 매장이 없어요. 면적 허용 오차를 넓히거나 퇴점을 추가해 보세요."
                 )
-        notes.append("시즌 지수는 2년치 카테고리 일평균 매출로 계산했고 배치 변화의 영향이 섞여 있어요.")
+        notes.append(
+            f"계약 만료 기준일(lease_cutoff)은 {effective}예요. 계약 종료일이 이 날짜보다 앞선 매장만 계약 만료로 봐요."
+        )
+        notes.append(
+            f"시즌 지수와 매출은 데이터 기준일 {as_of}까지로 제한했어요. 시즌 지수에는 배치 변화의 영향이 섞여 있어요."
+        )
         diagnosis = _json(
             {
                 "brief_id": brief_id,
+                "as_of": as_of,
+                "lease_cutoff": effective,
                 "season": {
                     "code": brief["season"],
                     "label": brief["season_label"],
@@ -832,10 +956,12 @@ class RelayoutTools:
     # Plan --------------------------------------------------------------------------------------------
     def _plan_setup(self, brief: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
         from cad2anything.layout import AssignmentScorer, LayoutConstraints
+        from cad2anything.layout.exact import assign_entries
         from cad2anything.layout.whatif import brand_info
 
         base_rev = brief["base_rev"]
-        inputs = self._layout_inputs(base_rev)
+        as_of = params.get("as_of") or self._brief_as_of(brief)
+        inputs = self._relayout_inputs(base_rev, as_of)
         catalog = self._catalog()
         entries = list(brief["entries"])
         exits = list(brief["exits"])
@@ -901,7 +1027,7 @@ class RelayoutTools:
         scorer = AssignmentScorer(
             inputs["features"], infos, inputs["model"], inputs["affinity"], inputs["adjacency"]
         )
-        factors = self._season_factors(brief["season"])
+        factors = self._season_factors(brief["season"], as_of)
         rates = self._commission_rates(inputs["fit_rev"])
         median_rate = float(np.median(list(rates.values()))) if rates else 0.25
         for entry in entries:
@@ -923,15 +1049,26 @@ class RelayoutTools:
             if start.get(item["unit_code"]) == item["brand_id"]:
                 start[item["unit_code"]] = None
                 exit_units.append(item["unit_code"])
+        leases = self._leases()
+        movable_ids = None
+        caveats = list(PLAN_CAVEATS)
+        cutoff = params.get("lease_cutoff") or brief["effective_date"]
+        if params["movable"] == "expiring":
+            eligible = self._expiring_pairs(cutoff)
+            movable_ids = {b for u, b in current.items() if b and (b, u) in eligible and u in scope_codes}
+            if leases is None:
+                caveats.append(
+                    "계약 정보가 없어 기존 브랜드는 이동하지 않아요. 전체 이동을 허용하려면 movable=all을 명시해야 해요."
+                )
         constraints = LayoutConstraints(
             floors=floors,
+            movable_brands=movable_ids,
             keep_anchors=brief["keep_anchors"],
             area_tolerance=brief["area_tolerance"],
             max_moves=int(params["max_moves"]),
         )
-        free_units = [u for u in scope_codes if start.get(u) is None]
-        pending = [e for e in entries if e["brand_id"] in infos]
-        placed_entries: list[str] = []
+        free_units = sorted(u for u in scope_codes if start.get(u) is None)
+        pending = sorted((e for e in entries if e["brand_id"] in infos), key=lambda e: e["brand_id"])
         unplaced = [
             {
                 "brand_id": e["brand_id"],
@@ -941,47 +1078,100 @@ class RelayoutTools:
             for e in entries
             if e["brand_id"] not in infos
         ]
-        while pending:
-            best: tuple[float, str, str] | None = None
-            for entry in pending:
-                info = infos[entry["brand_id"]]
-                for unit in free_units:
-                    unit_info = scorer.units[unit]
-                    if not (
-                        constraints.area_ok(info, unit_info.area_m2)
-                        and constraints.floor_ok(info, unit_info.floor)
-                    ):
-                        continue
-                    value = weight(entry["brand_id"]) * scorer.location_value(entry["brand_id"], unit)
-                    if best is None or value > best[0]:
-                        best = (value, entry["brand_id"], unit)
-            if best is None:
-                break
-            _, brand_id, unit = best
-            start[unit] = brand_id
-            free_units.remove(unit)
-            placed_entries.append(brand_id)
-            pending = [e for e in pending if e["brand_id"] != brand_id]
+        values: dict[tuple[str, str], float] = {}
+        fits: dict[str, list[str]] = {}
+        blocked: dict[str, list[str]] = {}
         for entry in pending:
-            unplaced.append(
+            brand_id = entry["brand_id"]
+            info = infos[brand_id]
+            fits[brand_id] = []
+            blocked[brand_id] = []
+            for unit in free_units:
+                unit_info = scorer.units[unit]
+                if not (
+                    constraints.area_ok(info, unit_info.area_m2)
+                    and constraints.floor_ok(info, unit_info.floor)
+                ):
+                    continue
+                fits[brand_id].append(unit)
+                if constraints.forbid_conflicts and any(
+                    (other := start.get(v)) in infos and constraints.conflicting(info, infos[other])
+                    for v in scorer.neighbors.get(unit, ())
+                ):
+                    blocked[brand_id].append(unit)
+                    continue
+                values[brand_id, unit] = weight(brand_id) * scorer.location_value(brand_id, unit)
+        conflicts = []
+        keys = sorted(values)
+        for index, (brand_id, unit) in enumerate(keys):
+            for other_id, other_unit in keys[index + 1 :]:
+                if (
+                    other_id != brand_id
+                    and other_unit in scorer.neighbors.get(unit, ())
+                    and constraints.conflicting(infos[brand_id], infos[other_id])
+                ):
+                    conflicts.append(((brand_id, unit), (other_id, other_unit)))
+        assigned = assign_entries(values, conflicts)
+        placed_entries = sorted(assigned)
+        for brand_id, unit in assigned.items():
+            start[unit] = brand_id
+        pending = [entry for entry in pending if entry["brand_id"] not in assigned]
+        for entry in pending:
+            brand_id = entry["brand_id"]
+            info = infos[brand_id]
+            relocation_units = sorted(
+                unit
+                for unit in scope_codes
+                if (occupant := start.get(unit)) in infos
+                and occupant not in placed_entries
+                and constraints.is_movable(infos[occupant])
+                and constraints.area_ok(info, scorer.units[unit].area_m2)
+                and constraints.floor_ok(info, scorer.units[unit].floor)
+            )
+            adjacent_relocations = sorted(
                 {
-                    "brand_id": entry["brand_id"],
-                    "brand_name": entry["brand_name"],
-                    "reason": "면적·선호 층에 맞는 빈 매장이 없어요. 면적 허용 오차를 넓히거나 퇴점을 추가해 보세요.",
+                    neighbor
+                    for unit in fits[brand_id]
+                    for neighbor in scorer.neighbors.get(unit, ())
+                    if neighbor in scope_codes
+                    and (occupant := start.get(neighbor)) in infos
+                    and occupant not in placed_entries
+                    and constraints.is_movable(infos[occupant])
+                    and constraints.conflicting(info, infos[occupant])
                 }
             )
-        leases = self._leases()
-        movable_ids = None
-        caveats = list(PLAN_CAVEATS)
-        if params["movable"] == "expiring":
-            if leases is None:
-                caveats.append("계약 정보가 없어 모든 매장을 이동 대상으로 봤어요.")
+            if not fits[brand_id]:
+                reason = "면적·선호 층에 맞는 공실이나 퇴점 매장이 없어요."
+            elif len(blocked[brand_id]) == len(fits[brand_id]):
+                reason = "면적·층은 맞지만 모든 빈 매장이 기존 이웃 브랜드와 인접 충돌을 일으켜요."
             else:
-                expiring = leases[leases["lease_end"] < brief["effective_date"]]
-                pairs = set(zip(expiring["brand_id"], expiring["unit_code"], strict=True))
-                movable_ids = {b for u, b in current.items() if b and (b, u) in pairs and u in scope_codes}
-                movable_ids |= set(placed_entries)
+                reason = (
+                    "빈 매장 전체를 함께 배정했지만, 매장 중복·입점 브랜드 사이 인접 제약 때문에 "
+                    "다른 입점과 동시에 배치할 수 없어요."
+                )
+            qualifier = "계약 만료" if params["movable"] == "expiring" else "이동 허용"
+            if relocation_units:
+                reason += (
+                    f" 면적·층이 맞는 추가 후보({', '.join(relocation_units)})를 쓰려면 "
+                    f"{qualifier} 기존 브랜드를 먼저 옮겨야 해요. 이번 입점 배정은 공실·퇴점 매장만 사용해요."
+                )
+            if adjacent_relocations:
+                reason += (
+                    f" 인접 충돌을 풀려면 {qualifier} 이웃 매장({', '.join(adjacent_relocations)})의 "
+                    "기존 브랜드를 옮기는 안을 검토해야 해요. 이번 입점 배정에서는 기존 브랜드를 옮기지 않아요."
+                )
+            relocation_units = sorted(set(relocation_units) | set(adjacent_relocations))
+            unplaced.append(
+                {
+                    "brand_id": brand_id,
+                    "brand_name": entry["brand_name"],
+                    "reason": reason,
+                    "requires_incumbent_relocation": bool(relocation_units),
+                    "relocation_unit_codes": relocation_units,
+                }
+            )
         if movable_ids is not None:
+            movable_ids |= set(placed_entries)
             constraints = LayoutConstraints(
                 floors=floors,
                 movable_brands=movable_ids,
@@ -1016,6 +1206,14 @@ class RelayoutTools:
             "caveats": caveats,
             "factors": factors,
             "rates": rates,
+            "lease_cutoff": cutoff,
+            "entry_assignment": {
+                "method": "exact_cardinality_then_score",
+                "placed": len(placed_entries),
+                "requested": len(entries),
+                "objective_rounding_krw": 1,
+                "scope": "vacant_and_exit_units",
+            },
             "movable_count": None if movable_ids is None else len(movable_ids - set(placed_entries)),
         }
 
@@ -1190,6 +1388,8 @@ class RelayoutTools:
         movable: str | None = None,
         extra_exits: list[str] | None = None,
         extra_entries: list[str] | None = None,
+        replace_decision: bool = False,
+        as_of: str | None = None,
     ) -> dict[str, Any]:
         """Alternatives for a brief: exits and entries applied, then expiring brands relocated to raise the
         season-weighted objective net of downtime costs. Each alternative is saved as a hypothetical revision."""
@@ -1203,8 +1403,11 @@ class RelayoutTools:
             "downtime_weeks": brief["downtime_weeks"] if downtime_weeks is None else float(downtime_weeks),
             "movable": str(movable or brief["movable"]).lower(),
             "floors": brief["floors"],
-            "extra_exits": list(extra_exits or []),
-            "extra_entries": list(extra_entries or []),
+            "extra_exits": sorted(set(extra_exits or [])),
+            "extra_entries": sorted(set(extra_entries or [])),
+            "n_alternatives": max(1, min(int(n_alternatives), MAX_ALTERNATIVES)),
+            "as_of": self._brief_as_of(brief, as_of),
+            "lease_cutoff": brief["effective_date"],
         }
         if params["objective"] not in OBJECTIVE_LABELS:
             raise ToolError("objective는 sales 또는 commission이어야 해요.")
@@ -1213,8 +1416,34 @@ class RelayoutTools:
         if not 0 <= params["max_moves"] <= 30 or not 0 <= params["downtime_weeks"] <= 26:
             raise ToolError("max_moves는 0~30, downtime_weeks는 0~26이어야 해요.")
         project = self._project(brief_id)
-        if not project.get("diagnosis"):
-            self.relayout_diagnose(brief_id)
+        fingerprint = hashlib.sha256(
+            json.dumps(_json(brief), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        stored = project.get("plan") or {}
+        protected = bool(project.get("selected_alt_id")) or any(
+            project.get(key) is not None for key in ("check", "phasing")
+        )
+        if protected:
+            old_params = dict(stored.get("params") or {})
+            # Legacy plans did not persist these defaults; preserve existing decisions on default calls.
+            old_params.setdefault("n_alternatives", 3)
+            old_params.setdefault("as_of", self._brief_as_of(brief))
+            old_params.setdefault("lease_cutoff", brief["effective_date"])
+            for key in ("extra_exits", "extra_entries"):
+                old_params[key] = sorted(set(old_params.get(key) or []))
+            same = old_params == params and stored.get("brief_fingerprint", fingerprint) == fingerprint
+            if same:
+                return self._plan_response(stored, project, reused=True)
+            if not replace_decision:
+                raise DecisionExistsError(
+                    f"이미 기록된 대안 {project.get('selected_alt_id') or '선택 없음'}"
+                    f"(결정자: {project.get('decided_by') or '기록 없음'}, "
+                    f"결정 시각: {project.get('decided_at') or '기록 없음'})을 보호하고 있어요. "
+                    "조건을 바꿔 다시 만들면 선택·도면 대조·공사 순서가 초기화돼요. "
+                    "사용자에게 확인한 뒤 replace_decision=true로 다시 호출하세요."
+                )
+        if not project.get("diagnosis") or project["diagnosis"].get("as_of") != params["as_of"]:
+            self.relayout_diagnose(brief_id, as_of=params["as_of"])
             project = self._project(brief_id)
         setup = self._plan_setup(brief, params)
         inputs, scorer, weights = setup["inputs"], setup["scorer"], setup["weights"]
@@ -1230,14 +1459,18 @@ class RelayoutTools:
             inputs["adjacency"],
             inputs["model"],
             setup["constraints"],
-            n_alternatives=max(1, min(int(n_alternatives), MAX_ALTERNATIVES)),
+            n_alternatives=params["n_alternatives"],
             seed=7,
             affinity_pairs=inputs["affinity"],
             weights=weights,
             move_cost=setup["move_cost"],
             free=setup["placed_entries"],
             objective_label=OBJECTIVE_LABELS[params["objective"]],
+            adjacency_reference=setup["current"],
         )
+        season_start, season_end = season_range(brief["season"], brief["year"])
+        horizon_start = max(season_start, self._cutoff(brief["effective_date"]))
+        horizon_days = max(0, (season_end - horizon_start).days + 1)
         results = []
         candidates: list[tuple[str, dict[str, str | None], Any]] = [("ALT-0", setup["start"], None)]
         candidates += [(alt.alt_id, alt.assignment, alt) for alt in engine]
@@ -1258,6 +1491,9 @@ class RelayoutTools:
                 "objective_delta_krw": objective_after - baseline_obj,
                 "move_cost_krw": cost,
                 "net_krw": objective_after - baseline_obj - cost,
+                "annual_uplift_krw": objective_after - baseline_obj,
+                "one_off_loss_krw": cost,
+                "season_net_krw": (objective_after - baseline_obj) * horizon_days / 365.0 - cost,
                 "vs_current_sales_krw": sales_after - current_score.total,
                 "vs_current_objective_krw": objective_after - cost - current_obj,
                 "moves": n_moves,
@@ -1270,7 +1506,9 @@ class RelayoutTools:
                 inputs["adjacency"],
                 setup["constraints"],
                 setup["placed_entries"],
+                adjacency_reference=setup["current"],
             )
+            all_satisfied = bool(checks["satisfied"].all())
             n_entries = sum(1 for c in changes if c["type"] == "entry")
             n_exits = sum(1 for c in changes if c["type"] == "exit")
             if alt is None:
@@ -1281,20 +1519,27 @@ class RelayoutTools:
             else:
                 objective_delta = kpi["objective_delta_krw"]
                 summary = (
-                    f"{alt_id}: 기준안에서 기존 브랜드 {n_moves}곳을 옮겨요. {OBJECTIVE_LABELS[params['objective']]}은 "
-                    f"연 {_krw(abs(objective_delta))} {'늘고' if objective_delta >= 0 else '줄고'}, 이전 공사 손실 "
-                    f"{_krw(cost)}을 빼면 순효과는 연 {_signed_krw(kpi['net_krw'])}이에요. 기대 매출은 기준안보다 "
+                    f"{alt_id}: 기준안에서 기존 브랜드 {n_moves}곳을 옮겨요. "
+                    f"{OBJECTIVE_LABELS[params['objective']]}의 연간 증가 효과는 {_signed_krw(objective_delta)}, 1회성 공사 손실은 "
+                    f"{_krw(cost)}, 첫 시즌 기준 순효과는 {_signed_krw(kpi['season_net_krw'])}이에요. 기대 매출은 기준안보다 "
                     f"{_more_less(kpi['sales_delta_krw'])}, 지금보다 {_more_less(kpi['vs_current_sales_krw'])}."
                 )
                 if best_net is None:
                     best_net = kpi["net_krw"]
-                    if alt.search_status == "optimal":
-                        summary += " 같은 조건에서 순효과가 이보다 큰 배치는 없어요(최적해)."
+                    if alt.search_status == "optimal" and all_satisfied:
+                        summary += (
+                            " 100원 단위로 반올림한 모델과 제약 안에서 기존 비교 지표의 최적해를 확인했어요."
+                        )
                 elif engine[0].search_status == "optimal":
+                    difference = best_net - kpi["net_krw"]
                     summary += (
-                        f" ALT-1과 겹치는 이동을 줄인 대안이라 순효과는 ALT-1보다 연 "
-                        f"{_krw(max(0.0, best_net - kpi['net_krw']))} 작아요."
+                        f" ALT-1과 겹치는 이동을 줄인 대안으로, 기존 비교 지표는 ALT-1보다 "
+                        f"{_krw(abs(difference))} {'작아요' if difference >= 0 else '커요'}."
                     )
+                if alt.search_status == "optimal_diverse" and all_satisfied:
+                    summary += " 100원 단위로 반올림한 모델과 앞선 대안과 다르게 만드는 조건 안에서 최적해를 확인했어요."
+            if not all_satisfied:
+                summary += " 제약을 충족하지 못한 항목이 있어 실행 가능한 대안으로 볼 수 없어요."
             rev_id = f"{brief_id}-A{alt_id.split('-')[-1]}"
             self._save_alternative(brief, alt_id, rev_id, changes)
             keep.add(rev_id)
@@ -1303,7 +1548,18 @@ class RelayoutTools:
                     "alt_id": alt_id,
                     "rev_id": rev_id,
                     "summary": summary,
-                    "search_status": alt.search_status if alt else None,
+                    "search_status": alt.search_status if alt and all_satisfied else "heuristic",
+                    "objective_rounding_krw": alt.objective_rounding_krw if alt else None,
+                    **(
+                        {
+                            key: getattr(alt, key)
+                            for key in ("gap_krw", "bound_krw")
+                            if getattr(alt, key, None) is not None and math.isfinite(getattr(alt, key))
+                        }
+                        if alt
+                        else {}
+                    ),
+                    "all_constraints_satisfied": all_satisfied,
                     "kpi": kpi,
                     "changes": changes,
                     "constraints": [
@@ -1318,13 +1574,27 @@ class RelayoutTools:
         self._remove_stale_alternatives(brief, keep)
         caveats = list(setup["caveats"])
         if not engine:
-            caveats.append("계약 만료 브랜드를 옮겨서 순효과가 커지는 배치를 찾지 못해 기준안만 만들었어요.")
+            caveats.append(
+                "허용된 브랜드를 옮겨 기존 비교 지표를 높이는 배치를 찾지 못해 기준안만 만들었어요."
+            )
         if setup["movable_count"] is not None:
-            caveats.append(f"이동 대상은 적용일 전에 계약이 끝나는 브랜드 {setup['movable_count']}곳이에요.")
+            caveats.append(
+                f"계약 만료 기준일(lease_cutoff)은 {params['lease_cutoff']}이고, "
+                f"그 날짜 전에 계약이 끝나는 기존 브랜드 {setup['movable_count']}곳만 이동 대상이에요."
+            )
         plan = _json(
             {
                 "brief_id": brief_id,
                 "params": params,
+                "as_of": params["as_of"],
+                "lease_cutoff": params["lease_cutoff"],
+                "brief_fingerprint": fingerprint,
+                "season_horizon": {
+                    "start": horizon_start.isoformat(),
+                    "end": season_end.isoformat(),
+                    "days": horizon_days,
+                    "annualization_days": 365,
+                },
                 "objective_label": OBJECTIVE_LABELS[params["objective"]],
                 "current": {"sales_krw": current_score.total, "objective_krw": current_obj},
                 "baseline": {
@@ -1335,24 +1605,35 @@ class RelayoutTools:
                 "alternatives": results,
                 "search": _search_note(engine),
                 "unplaced": setup["unplaced"],
+                "entry_assignment": setup["entry_assignment"],
                 "caveats": caveats,
                 "label": "추정치",
                 "created_at": _now(),
             }
         )
+        if protected and project.get("selected_alt_id"):
+            project["decision_history"].append(self._decision_record(project, replaced_at=_now()))
         project["plan"] = plan
         project["selected_alt_id"] = None
         project["decided_by"] = None
         project["decided_at"] = None
+        project["decision_snapshot"] = None
+        project.pop("decision_source", None)
         project["check"] = None
         project["phasing"] = None
         project["status"] = "planned"
         self._save_project(project)
-        return plan
+        return self._plan_response(plan, project)
 
     # Decision and drawing check ----------------------------------------------------------------------
     @_locked
-    def relayout_select(self, brief_id: str, alt_id: str, decided_by: str = "채팅 사용자") -> dict[str, Any]:
+    def relayout_select(
+        self,
+        brief_id: str,
+        alt_id: str,
+        decided_by: str = "채팅 사용자",
+        decision_source: str | None = None,
+    ) -> dict[str, Any]:
         """Record the human decision: which alternative the CAD team should draw."""
         project = self._project(brief_id)
         plan = project.get("plan")
@@ -1365,6 +1646,15 @@ class RelayoutTools:
             raise ToolError(
                 f"{alt_id}는 이 브리프의 대안이 아니에요. 대안: {', '.join(a['alt_id'] for a in plan['alternatives'])}"
             )
+        if decision_source not in (None, "chat", "api"):
+            raise ToolError("decision_source는 chat 또는 api여야 해요.")
+        if decision_source is None and decided_by == "채팅 사용자":
+            decision_source = "chat"
+        chosen = next(a for a in plan["alternatives"] if a["alt_id"] == alt_id)
+        if chosen.get("all_constraints_satisfied") is False or any(
+            not row.get("ok", False) for row in chosen.get("constraints", [])
+        ):
+            raise ToolError(f"{alt_id}는 제약을 충족하지 못해 선택할 수 없어요. 제약 충족표를 확인하세요.")
         project.update(
             {
                 "selected_alt_id": alt_id,
@@ -1373,6 +1663,23 @@ class RelayoutTools:
                 "check": None,
             }
         )
+        if decision_source is not None:
+            project["decision_source"] = decision_source
+        else:
+            project.pop("decision_source", None)
+        project["decision_snapshot"] = copy.deepcopy(
+            {
+                "alt_id": alt_id,
+                "rev_id": chosen.get("rev_id"),
+                "kpi": chosen.get("kpi", {}),
+                "search_status": chosen.get("search_status"),
+                "plan_params": plan.get("params", {}),
+                "decided_by": project["decided_by"],
+                "decided_at": project["decided_at"],
+                **({"decision_source": decision_source} if decision_source is not None else {}),
+            }
+        )
+        project["decision_history"].append(self._decision_record(project))
         if (project.get("phasing") or {}).get("alt_id") != alt_id:
             project["phasing"] = None
         project["status"] = "selected"
@@ -1506,28 +1813,38 @@ class RelayoutTools:
         self._save_project(project)
         return check
 
-    def relayout_after_upload(self, rev: str, parent_rev: str | None) -> dict[str, Any] | None:
+    def relayout_after_upload(self, rev: str, parent_rev: str | None) -> dict[str, Any]:
         """Hook for drawing uploads: check the new revision against the selected plan of a brief with the
         same base revision and the same effective date (other uploads, such as redrawn copies, are skipped)."""
         if not parent_rev:
-            return None
+            return {"skipped": True, "reason": "부모 개정이 없어 개편 브리프의 기준 개정과 대조할 수 없어요."}
         effective = self._model(rev).revision.effective_date
         latest: tuple[str, str] | None = None
+        matching = []
         for brief_id in self._brief_ids():
             project = self._project(brief_id)
-            if not project.get("selected_alt_id"):
-                continue
             try:
                 brief = self._brief(brief_id)
             except ToolError:
                 continue
             if brief["base_rev"] != parent_rev or brief["effective_date"] != effective:
                 continue
+            matching.append(brief_id)
+            if not project.get("selected_alt_id"):
+                continue
             stamp = project.get("decided_at") or ""
             if latest is None or stamp > latest[0]:
                 latest = (stamp, brief_id)
         if latest is None:
-            return None
+            if matching:
+                return {
+                    "skipped": True,
+                    "reason": f"기준 개정·적용일이 맞는 브리프({', '.join(matching)})에 선택한 대안이 없어요.",
+                }
+            return {
+                "skipped": True,
+                "reason": f"기준 개정 {parent_rev}와 적용일 {effective or '미기록'}이 모두 맞는 개편 브리프가 없어요.",
+            }
         check = self.relayout_check_drawing(latest[1], rev)
         return {k: check[k] for k in ("brief_id", "alt_id", "conformance_pct", "summary")}
 
@@ -1541,14 +1858,17 @@ class RelayoutTools:
         season: str | None = None,
         include_expiring: bool = True,
         top: int = 5,
+        lease_cutoff: str | None = None,
+        as_of: str | None = None,
     ) -> dict[str, Any]:
         """Where a new brand (catalog brand or a category's typical brand) would sell best: vacant units and,
-        optionally, units whose lease ends within six months after the data period (estimates)."""
+        optionally, units whose lease ends before the explicit cutoff (estimates)."""
         from cad2anything.layout import AssignmentScorer, LayoutConstraints
         from cad2anything.layout.whatif import brand_info
 
         rev = rev or self.latest_sales_rev()
-        inputs = self._layout_inputs(rev)
+        as_of = self._cutoff(as_of or self._data_range()[1]).isoformat()
+        inputs = self._relayout_inputs(rev, as_of)
         infos = dict(brand_info(inputs["brands"]))
         catalog = self._catalog()
         placements = self._placements(rev)
@@ -1575,20 +1895,22 @@ class RelayoutTools:
         constraints = LayoutConstraints(area_tolerance=DEFAULT_AREA_TOLERANCE)
         wanted = [_floor_code(f) for f in floors] if floors else list(info.preferred_floors)
         assignment = dict(inputs["assignment"])
-        _, data_end = self._data_range()
-        horizon = (data_end + timedelta(days=183)).isoformat()
+        cutoff = self._cutoff(
+            lease_cutoff or (self._cutoff(as_of) + timedelta(days=183)), "lease_cutoff"
+        ).isoformat()
         leases = self._leases()
         expiring: dict[str, str] = {}
         if include_expiring and leases is not None:
+            eligible = self._expiring_pairs(cutoff)
             for b, u, e in zip(leases["brand_id"], leases["unit_code"], leases["lease_end"], strict=True):
-                if assignment.get(u) == b and e <= horizon:
+                if assignment.get(u) == b and (b, u) in eligible:
                     expiring[u] = e
         factor = 1.0
         if season:
             code = SEASON_ALIASES.get(str(season).strip().upper()) or SEASON_ALIASES.get(str(season).strip())
             if code is None:
                 raise ToolError("season은 SS 또는 FW여야 해요.")
-            factor = self._season_factors(code).get(info.category, 1.0)
+            factor = self._season_factors(code, as_of).get(info.category, 1.0)
         table = self.unit_table(rev).set_index("unit_code")
         rows = []
         for code, unit in scorer.units.items():
@@ -1603,10 +1925,15 @@ class RelayoutTools:
                 continue
             trial = dict(assignment)
             trial[code] = info.brand_id
+            if any(
+                (other := trial.get(v)) in infos and constraints.conflicting(info, infos[other])
+                for v in scorer.neighbors.get(code, ())
+            ):
+                continue
             value = scorer.location_value(info.brand_id, code) * (
                 1 + scorer.bonus(info.brand_id, code, trial)
             )
-            half = scorer.half_width(info.brand_id, code)
+            half = scorer.half_width(info.brand_id, code, trial)
             features = []
             if code in table.index:
                 row = table.loc[code]
@@ -1638,6 +1965,12 @@ class RelayoutTools:
         lo, hi = constraints.area_band(info)
         result = {
             "rev": rev,
+            "as_of": as_of,
+            "lease_cutoff": cutoff,
+            "lease_cutoff_note": (
+                f"계약 종료일이 {cutoff}보다 앞선 매장만 계약 만료 후보로 봐요. "
+                "lease_cutoff 생략 시 데이터 기준일에서 183일 뒤를 써요."
+            ),
             "brand": {
                 "brand_id": info.brand_id,
                 "brand_name": info.brand_name,
@@ -1711,6 +2044,7 @@ class RelayoutTools:
         objective: str = "sales",
         include_other_floors: bool = False,
         top: int = 5,
+        as_of: str | None = None,
     ) -> dict[str, Any]:
         """What would fit one unit (a vacancy or a store about to leave): categories ranked by expected sales
         (or commission) of a typical new brand there, with the best unplaced catalog brands (estimates)."""
@@ -1718,6 +2052,7 @@ class RelayoutTools:
         from cad2anything.layout.whatif import brand_info
 
         rev = rev or self.latest_sales_rev()
+        as_of = self._cutoff(as_of or self._data_range()[1]).isoformat()
         objective = str(objective or "sales").lower()
         if objective not in OBJECTIVE_LABELS:
             raise ToolError("objective는 sales(매출) 또는 commission(수수료 수익)이어야 해요.")
@@ -1726,7 +2061,7 @@ class RelayoutTools:
         unit = model.unit_by_code(code)
         if unit is None:
             raise ToolError(f"{rev}에 매장 {unit_code}가 없어요.")
-        inputs = self._layout_inputs(rev)
+        inputs = self._relayout_inputs(rev, as_of)
         catalog = self._catalog()
         infos = dict(brand_info(inputs["brands"]))
         typical = {
@@ -1760,7 +2095,7 @@ class RelayoutTools:
             )
             if season_code is None:
                 raise ToolError("season은 SS 또는 FW여야 해요.")
-            factors = self._season_factors(season_code)
+            factors = self._season_factors(season_code, as_of)
         rates = self._category_rates(inputs["fit_rev"])
         placements = self._placements(rev)
         anchors = catalog.set_index("brand_id")["anchor"] if "anchor" in catalog else pd.Series(dtype=bool)
@@ -1769,7 +2104,7 @@ class RelayoutTools:
             trial = dict(assignment)
             trial[code] = brand_id
             value = scorer.location_value(brand_id, code) * (1 + scorer.bonus(brand_id, code, trial))
-            return value, scorer.half_width(brand_id, code)
+            return value, scorer.half_width(brand_id, code, trial)
 
         options, excluded = [], []
         for category, info in typical.items():
@@ -1869,6 +2204,7 @@ class RelayoutTools:
             ]
         result = {
             "rev": rev,
+            "as_of": as_of,
             "unit": {
                 "unit_code": code,
                 "floor": geometry.floor,
@@ -1936,11 +2272,24 @@ class RelayoutTools:
             if re.fullmatch(r"\d+", wanted):
                 wanted = f"ALT-{wanted}"
             alternative = self._selected(project, wanted)
+            basis = "selected"
+            basis_note = f"요청에 지정한 {alternative['alt_id']}를 기준으로 계산했어요. " + (
+                "프로젝트에서 결정한 대안과 같아요."
+                if project.get("selected_alt_id") == alternative["alt_id"]
+                else "이 요청만으로 프로젝트의 대안 선택을 바꾸지는 않아요."
+            )
         elif project.get("selected_alt_id"):
             alternative = self._selected(project)
+            basis = "selected"
+            basis_note = f"사람이 선택한 {alternative['alt_id']}를 기준으로 계산했어요."
         else:
             options = [a for a in plan["alternatives"] if a["alt_id"] != "ALT-0"] or plan["alternatives"]
             alternative = max(options, key=lambda a: a["kpi"]["net_krw"])
+            basis = "best_net_fallback"
+            basis_note = (
+                f"아직 선택한 대안이 없어 기존 비교 지표(net_krw)가 가장 큰 {alternative['alt_id']}를 "
+                "임시 기준으로 계산했어요. 사람이 결정한 대안은 아니에요."
+            )
         try:
             crews = int(crews)
             weeks = float(brief["downtime_weeks"] if fitout_weeks is None else fitout_weeks)
@@ -1958,7 +2307,26 @@ class RelayoutTools:
         occupancy = _occupancy(base_model, set(brief["floors"]))
         # Annual sales by unit: actual results when the base revision has them (already loaded by the plan).
         estimated = not (base_model.revision.kind == RevisionKind.ACTUAL and self._has_sales(base_rev))
-        frame = self.expected_unit_sales(base_rev) if estimated else self.productivity_frame(base_rev, "unit")
+        as_of = plan.get("as_of") or self._brief_as_of(brief)
+        if estimated:
+            from cad2anything.layout import AssignmentScorer
+
+            inputs = self._relayout_inputs(base_rev, as_of)
+            frame = (
+                AssignmentScorer(
+                    inputs["features"],
+                    inputs["brands"],
+                    inputs["model"],
+                    inputs["affinity"],
+                    inputs["adjacency"],
+                )
+                .score(inputs["assignment"])
+                .units
+            )
+        else:
+            frame = self.productivity_frame(
+                base_rev, "unit", end=min(self.revision_period(base_rev)[1], as_of)
+            )
         column = "expected_sales" if estimated else "sales"
         annual = dict(
             zip(
@@ -2325,6 +2693,9 @@ class RelayoutTools:
                 "alt_id": alternative["alt_id"],
                 "rev_id": alternative.get("rev_id"),
                 "base_rev": base_rev,
+                "as_of": as_of,
+                "basis": basis,
+                "basis_note": basis_note,
                 "params": {
                     "crews": crews,
                     "fitout_weeks": _num(weeks),
@@ -2414,7 +2785,8 @@ class RelayoutTools:
             "width:12px;height:12px;margin:0 4px 0 12px;vertical-align:middle}</style></head><body>",
             f"<h1>{esc(brief['title'])} 제안서</h1>",
             f"<p class='muted'>기준 개정 {esc(brief['base_rev'])} · 적용일 {esc(str(brief['effective_date']))} · "
-            f"대상 {esc(', '.join(brief['floors']))} · 목표 {esc(brief['objective_label'])} · 작성 {esc(_now())} · 모든 금액은 연 단위 추정치</p>",
+            f"대상 {esc(', '.join(brief['floors']))} · 목표 {esc(brief['objective_label'])} · 작성 {esc(_now())} · "
+            "매출·증가 효과는 연간 추정치, 공사 손실은 1회성, 시즌 순효과는 첫 시즌 기준</p>",
             "<h2>1. 개편 조건</h2><table><tbody>",
             f"<tr><th>시즌</th><td>{esc(brief['season_label'])} {brief['year']}</td></tr>",
             f"<tr><th>이동 대상</th><td>{'계약 만료 매장만' if brief['movable'] == 'expiring' else '전체'}, 최대 {brief['max_moves']}곳, "
@@ -2468,15 +2840,34 @@ class RelayoutTools:
                 )
             out.append("</table>")
         if plan:
+            horizon = plan.get("season_horizon") or {}
+            if not horizon:
+                first, last = season_range(brief["season"], brief["year"])
+                first = max(first, self._cutoff(brief["effective_date"]))
+                horizon = {
+                    "start": first.isoformat(),
+                    "end": last.isoformat(),
+                    "days": max(0, (last - first).days + 1),
+                }
             out.append(
-                "<h2>3. 대안 비교</h2><table><tr><th>대안</th><th>이전</th><th>순효과</th><th>목표 변화</th><th>이전 손실</th><th>지금 대비 매출</th></tr>"
+                "<h2>3. 대안 비교</h2>"
+                f"<p class='muted'>데이터 기준일 {esc(str(plan.get('as_of') or self._brief_as_of(brief)))} · "
+                f"첫 시즌 {esc(horizon['start'])}~{esc(horizon['end'])}({horizon['days']}일). "
+                "공사비·이사비와 투자 회수 기간은 포함하지 않아요. "
+                "기존 비교 지표는 연간 증가 효과에서 1회성 손실을 뺀 값이며 순위 계산에만 그대로 써요.</p>"
+                "<table><tr><th>대안</th><th>이전</th><th>첫 시즌 기준 순효과</th><th>연간 증가 효과</th>"
+                "<th>1회성 공사 손실</th><th>기존 비교 지표</th><th>지금 대비 연 매출</th></tr>"
             )
             for alt in plan["alternatives"]:
                 k = alt["kpi"]
+                uplift = k.get("annual_uplift_krw", k["objective_delta_krw"])
+                loss = k.get("one_off_loss_krw", k["move_cost_krw"])
+                season_net = k.get("season_net_krw", uplift * horizon["days"] / 365.0 - loss)
                 mark = " (선택)" if alt["alt_id"] == project.get("selected_alt_id") else ""
                 out.append(
-                    f"<tr><td>{esc(alt['alt_id'])}{mark}</td><td class='num'>{k['moves']}</td><td class='num'>{_signed_krw(k['net_krw'])}</td>"
-                    f"<td class='num'>{_signed_krw(k['objective_delta_krw'])}</td><td class='num'>{_krw(k['move_cost_krw'])}</td>"
+                    f"<tr><td>{esc(alt['alt_id'])}{mark}</td><td class='num'>{k['moves']}</td><td class='num'>{_signed_krw(season_net)}</td>"
+                    f"<td class='num'>{_signed_krw(uplift)}</td><td class='num'>{_krw(loss)}</td>"
+                    f"<td class='num'>{_signed_krw(k['net_krw'])}</td>"
                     f"<td class='num'>{_signed_krw(k['vs_current_sales_krw'])}</td></tr>"
                 )
             out.append("</table>")
@@ -2493,7 +2884,7 @@ class RelayoutTools:
             decided = (
                 f"{esc(project['decided_by'])}님이 {esc(str(project['decided_at']))}에 결정"
                 if project.get("selected_alt_id")
-                else "아직 결정 전이라 순효과가 가장 큰 대안을 보여 줘요"
+                else "아직 결정 전이라 기존 비교 지표(net_krw)가 가장 큰 대안을 보여 줘요"
             )
             out.append(
                 f"<h2>4. {esc(chosen['alt_id'])} 상세</h2><p class='muted'>{decided}. {esc(chosen['summary'])}</p>"
@@ -2537,7 +2928,8 @@ class RelayoutTools:
         section = 5
         if phasing:
             out.append(
-                f"<h2>{section}. 공사 순서({esc(phasing['alt_id'])})</h2><p>{esc(phasing['summary'])}</p>"
+                f"<h2>{section}. 공사 순서({esc(phasing['alt_id'])})</h2>"
+                f"<p class='muted'>{esc(phasing.get('basis_note') or '')}</p><p>{esc(phasing['summary'])}</p>"
                 "<table><tr><th>순서</th><th>주차</th><th>작업</th><th>브랜드</th><th>매장</th><th>먼저 끝나야 하는 순서</th>"
                 "<th>손실</th><th>설명</th></tr>"
             )

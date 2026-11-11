@@ -49,7 +49,7 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' exis
   name: 'cad2anything'
 }
 
-// One replica keeps the in-memory workspace consistent; Blob Storage and PostGIS hold durable state.
+// One replica keeps the in-memory workspace consistent; PostgreSQL mirrors durable workspace files.
 resource atlasApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: 'ca-atlas-${token}'
   location: location
@@ -85,12 +85,14 @@ resource atlasApp 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('2.0'), memory: '4Gi' }
           env: [
             { name: 'AZURE_CLIENT_ID', value: appIdentity.properties.clientId }
-            { name: 'WORKSPACE_DIR', value: '/tmp/workspace' }
+            { name: 'WORKSPACE_DIR', value: '/home/app/workspace' }
             // Blob Storage allows only private endpoints under the subscription policy; mirror to PostgreSQL.
             { name: 'WORKSPACE_MIRROR', value: 'postgres' }
             { name: 'FOUNDRY_PROJECT_ENDPOINT', value: 'https://${foundry.name}.services.ai.azure.com/api/projects/${project.name}' }
             { name: 'CHAT_MODEL_DEPLOYMENT', value: chatModelName }
             { name: 'MINI_MODEL_DEPLOYMENT', value: miniModelName }
+            { name: 'CHAT_TURN_DEADLINE_S', value: '230' }
+            { name: 'LOG_LEVEL', value: 'INFO' }
             { name: 'POSTGRES_HOST', value: postgres.properties.fullyQualifiedDomainName }
             { name: 'POSTGRES_DATABASE', value: 'cad2anything' }
             { name: 'POSTGRES_USER', value: appIdentity.name }
@@ -109,8 +111,18 @@ resource atlasApp 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               type: 'Readiness'
-              httpGet: { path: '/healthz', port: 8000 }
+              httpGet: { path: '/readyz', port: 8000 }
               periodSeconds: 15
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              type: 'Liveness'
+              httpGet: { path: '/healthz', port: 8000 }
+              initialDelaySeconds: 60
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 5
             }
           ]
         }

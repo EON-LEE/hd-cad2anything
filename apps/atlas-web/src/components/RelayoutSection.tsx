@@ -1,21 +1,25 @@
 // "시즌 개편" section of the layout tab: brief → 진단 → 대안 → 사람 선택 → 도면 대조 → 제안서.
 import { useEffect, useRef, useState } from 'react'
-import { errorText } from '../api/client'
+import { ApiError, errorText } from '../api/client'
 import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
 import { useCachedResource } from '../hooks/useCachedResource'
 import { useElapsedSeconds } from '../hooks/useElapsedSeconds'
 import { formatKrw, formatPercent } from '../lib/format'
-import { RELAYOUT_STATUS_LABELS, pastDiagnosis, weeksText } from '../lib/relayout'
+import { RELAYOUT_STATUS_LABELS, applyPlanResult, decisionConflictText, pastDiagnosis, weeksText } from '../lib/relayout'
+import { useAppState } from '../state/store'
 import type { RelayoutObjective, RelayoutMovable, RelayoutPhasingRequest, RelayoutPlanOptions, RelayoutProject } from '../types/api'
 import { RelayoutAlternatives, type RelayoutBusy } from './RelayoutAlternatives'
 import { BriefSummary, DiagnosisDisclosure } from './RelayoutBrief'
 import { RelayoutCheckPanel } from './RelayoutCheck'
 import { RelayoutPhasingPanel } from './RelayoutPhasing'
+import { WritesNotice } from './WritesNotice'
+import './chatState.css'
 
 /** A request to open one brief (agent `panel = {type: "layout", payload: {brief_id}}` or an upload job). */
 export interface RelayoutRequest {
-  briefId: string
+  /** The brief to open; null when none was named (the brief on screen stays, else the first one is opened). */
+  briefId: string | null
   seq: number
 }
 
@@ -46,6 +50,7 @@ const clampInt = (value: string, min: number, max: number, fallback: number) => 
 
 export function RelayoutSection({ request }: { request: RelayoutRequest | null }) {
   const { source, refreshMeta } = useData()
+  const { dataEpoch } = useAppState()
   const briefs = useCachedResource(cacheKeys.relayoutBriefs(source.mode), () => source.listRelayoutBriefs())
   const [briefId, setBriefId] = useState<string | null>(request?.briefId ?? null)
   const [loaded, setLoaded] = useState<{ briefId: string; project: RelayoutProject } | null>(null)
@@ -53,13 +58,17 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
   const [reloadSeq, setReloadSeq] = useState(0)
   const [busy, setBusy] = useState<RelayoutBusy>(null)
   const [actionError, setActionError] = useState<{ briefId: string; action: Exclude<RelayoutBusy, null>; message: string } | null>(null)
+  // The server refused to replace a recorded decision; the person decides (see `confirmReplace`).
+  const [conflict, setConflict] = useState<{ briefId: string; message: string; options: RelayoutPlanOptions } | null>(null)
+  const conflictRef = useRef<HTMLDivElement>(null)
   const [announcement, setAnnouncement] = useState('')
   const [form, setForm] = useState<{ briefId: string; values: PlanForm } | null>(null)
   // Diagnosis disclosure: follows the status until the user diagnoses (open) or plans (closed) again.
   const [diagnosisView, setDiagnosisView] = useState<{ briefId: string | null; seq: number; open: boolean }>({ briefId: null, seq: 0, open: false })
   const currentBrief = useRef(briefId)
   // The request the section was mounted with is already loaded through the initial brief.
-  const handledRequest = useRef(request ? `${request.briefId}:${request.seq}` : null)
+  const handledRequest = useRef(request ? `${request.briefId ?? ''}:${request.seq}` : null)
+  const appliedEpoch = useRef(dataEpoch)
   const elapsed = useElapsedSeconds(busy === 'plan')
 
   useEffect(() => {
@@ -67,21 +76,34 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
   }, [briefId])
 
   // Open the requested brief and reload it and the brief list, even when it is already shown
-  // (e.g. after an upload job checked the drawing against the decided plan).
+  // (e.g. after an upload job checked the drawing against the decided plan). A request that names no brief
+  // keeps the brief on screen; without one the first brief of the list is opened (below).
   const reloadBriefs = briefs.reload
   useEffect(() => {
     if (!request) return
-    const key = `${request.briefId}:${request.seq}`
+    const key = `${request.briefId ?? ''}:${request.seq}`
     if (handledRequest.current === key) return
     handledRequest.current = key
-    setBriefId(request.briefId)
+    if (request.briefId) setBriefId(request.briefId)
     setReloadSeq((n) => n + 1)
     reloadBriefs()
   }, [request?.briefId, request?.seq, reloadBriefs])
 
+  // An agent tool changed relayout data (planned, decided, phased, checked a drawing): load the project again.
+  useEffect(() => {
+    if (dataEpoch === appliedEpoch.current) return
+    appliedEpoch.current = dataEpoch
+    setReloadSeq((n) => n + 1)
+    reloadBriefs()
+  }, [dataEpoch, reloadBriefs])
+
   useEffect(() => {
     if (briefId === null && briefs.data?.length) setBriefId(briefs.data[0].brief_id)
   }, [briefId, briefs.data])
+
+  useEffect(() => {
+    if (conflict) conflictRef.current?.focus()
+  }, [conflict])
 
   useEffect(() => {
     if (!briefId) return
@@ -109,12 +131,16 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
   // The last diagnose/plan action on this brief decides whether the diagnosis is open.
   const diagnosisAction = diagnosisView.briefId === briefId && diagnosisView.seq > 0
 
-  /** Run one project action; the result is shown at once and the whole project is reloaded after it. */
+  /**
+   * Run one project action; the result is shown at once and the whole project is reloaded after it. `onError`
+   * may handle a failure itself (return true) instead of the generic error line.
+   */
   async function act<T>(
     action: Exclude<RelayoutBusy, null>,
     call: (id: string) => Promise<T>,
     apply: (project: RelayoutProject, result: T) => RelayoutProject,
     done: (result: T) => string,
+    onError?: (error: unknown, id: string) => boolean,
   ): Promise<boolean> {
     const id = briefId
     if (!id || busy) return false
@@ -132,7 +158,7 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
       setReloadSeq((n) => n + 1)
       return true
     } catch (error) {
-      if (currentBrief.current === id) setActionError({ briefId: id, action, message: errorText(error) })
+      if (currentBrief.current === id && !onError?.(error, id)) setActionError({ briefId: id, action, message: errorText(error) })
       return false
     } finally {
       setBusy(null)
@@ -147,31 +173,41 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
       () => '진단을 마쳤습니다.',
     )
 
-  const plan = () => {
-    if (!values) return
-    const options: RelayoutPlanOptions = {
-      objective: values.objective,
-      max_moves: values.maxMoves,
-      downtime_weeks: values.downtimeWeeks,
-      movable: values.movable,
-    }
+  const runPlan = (options: RelayoutPlanOptions) => {
     setAnnouncement('대안을 만드는 중입니다. 수십 초 걸릴 수 있습니다.')
+    setConflict(null)
     void act(
       'plan',
       (id) => source.planRelayout(id, options),
-      (p, result) => ({
-        ...p,
-        plan: result,
-        status: 'planned',
-        selected_alt_id: result.alternatives.some((a) => a.alt_id === p.selected_alt_id) ? p.selected_alt_id : null,
-        // New alternatives drop the earlier construction order (the backend resets it too).
-        phasing: null,
-      }),
-      (result) => `대안 ${result.alternatives.length}개를 만들었습니다.`,
+      // The decision after the call comes from the server's answer, never from what was selected here before.
+      applyPlanResult,
+      (result) =>
+        result.reused ? '같은 조건이라 저장된 대안을 그대로 보여 드립니다. 결정과 공사 순서도 그대로예요.' : `대안 ${result.alternatives.length}개를 만들었습니다.`,
+      (error, id) => {
+        // 409: a decision, drawing check or construction order exists and these conditions differ.
+        if (!(error instanceof ApiError) || error.status !== 409) return false
+        setConflict({ briefId: id, message: decisionConflictText(errorText(error)), options })
+        return true
+      },
     ).then((ok) => {
       // The plan saved hypothetical revisions; list them in the revision selector.
       if (ok) refreshMeta?.().catch(() => undefined)
     })
+  }
+
+  const plan = () => {
+    if (!values) return
+    runPlan({
+      objective: values.objective,
+      max_moves: values.maxMoves,
+      downtime_weeks: values.downtimeWeeks,
+      movable: values.movable,
+    })
+  }
+
+  // Only after the person confirmed: the same conditions again, replacing the recorded decision.
+  const confirmReplace = () => {
+    if (conflict) runPlan({ ...conflict.options, replace_decision: true })
   }
 
   const select = (altId: string, decidedBy: string) =>
@@ -203,6 +239,8 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
 
   const update = (patch: Partial<PlanForm>) => {
     if (briefId && values) setForm({ briefId, values: { ...values, ...patch } })
+    // A refusal belongs to the conditions that were sent.
+    setConflict(null)
   }
 
   const reportUrl = project ? (project.report_url ?? source.relayoutReportUrl(project.brief.brief_id)) : null
@@ -211,6 +249,7 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
   return (
     <div className="relayout" aria-busy={busy !== null}>
       <p className="muted">개편 브리프로 진단하고, 대안을 비교해 결정한 뒤 CAD팀이 올린 도면과 대조합니다.</p>
+      <WritesNotice />
       <div className="relayout-picker">
         <label className="field stacked">
           <span>개편 브리프</span>
@@ -335,11 +374,30 @@ export function RelayoutSection({ request }: { request: RelayoutRequest | null }
               </button>
               {busy === 'plan' && <p className="muted small">대안 계산은 수십 초 걸릴 수 있습니다. 다른 탭을 보셔도 계산은 계속됩니다.</p>}
               {!project.diagnosis && busy !== 'plan' && <p className="muted small">진단 전이면 먼저 진단한 뒤 대안을 만듭니다.</p>}
+              {project.selected_alt_id && busy !== 'plan' && !conflict && (
+                <p className="muted small">
+                  결정한 대안({project.selected_alt_id})이 있어요. 같은 조건이면 저장된 대안을 그대로 보여 주고, 조건을 바꿔 다시 만들 때는 결정·도면 대조·공사 순서가 지워지므로 한 번 더 확인해요.
+                </p>
+              )}
             </form>
             {errorFor('plan') && (
               <p className="error-text" role="alert">
                 대안을 만들지 못했습니다: {errorFor('plan')}
               </p>
+            )}
+            {conflict && conflict.briefId === briefId && (
+              <div ref={conflictRef} className="notice warn decision-conflict" role="alert" tabIndex={-1}>
+                <strong>이미 결정한 대안이 있어요</strong>
+                <p>{conflict.message}</p>
+                <div className="form-actions">
+                  <button type="button" className="primary" disabled={busy !== null} onClick={confirmReplace}>
+                    결정을 지우고 다시 만들기
+                  </button>
+                  <button type="button" disabled={busy !== null} onClick={() => setConflict(null)}>
+                    지금 대안 유지
+                  </button>
+                </div>
+              </div>
             )}
           </section>
 

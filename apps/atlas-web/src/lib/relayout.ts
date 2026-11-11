@@ -22,6 +22,7 @@ import { bool, count, isRecord, list, num, optText, records, text, texts, type R
 import { CHANGE_COLORS } from './colors'
 import { formatKrw, formatNumber } from './format'
 import { floorOfUnitCode } from './geometry'
+import { normalizeSearchStatus, optimalityGapNote, optimalityNote } from './layout'
 
 export const RELAYOUT_STATUS_LABELS: Record<string, string> = {
   draft: '초안',
@@ -228,6 +229,13 @@ function normalizeChange(r: Rec): RelayoutChange {
 function normalizeRelayoutAlternative(r: Rec, index: number): RelayoutAlternative {
   const kpi = isRecord(r.kpi) ? r.kpi : {}
   const changes = records(r.changes).map(normalizeChange)
+  const status = normalizeSearchStatus(r.search_status)
+  const optionalNums = {
+    annual_uplift_krw: num(kpi.annual_uplift_krw),
+    one_off_loss_krw: num(kpi.one_off_loss_krw),
+    season_net_krw: num(kpi.season_net_krw),
+  }
+  const solver = { objective_rounding_krw: num(r.objective_rounding_krw), gap_krw: num(r.gap_krw), bound_krw: num(r.bound_krw) }
   return {
     alt_id: text(r.alt_id ?? r.id, `ALT-${index}`),
     rev_id: optText(r.rev_id),
@@ -239,6 +247,8 @@ function normalizeRelayoutAlternative(r: Rec, index: number): RelayoutAlternativ
       objective_delta_krw: num(kpi.objective_delta_krw),
       move_cost_krw: num(kpi.move_cost_krw),
       net_krw: num(kpi.net_krw),
+      // The first-season wording needs all three; a backend that predates them sends none.
+      ...(optionalNums.season_net_krw !== null ? optionalNums : {}),
       vs_current_sales_krw: num(kpi.vs_current_sales_krw),
       vs_current_objective_krw: num(kpi.vs_current_objective_krw),
       moves: num(kpi.moves) ?? changes.filter((c) => c.type === 'move').length,
@@ -250,6 +260,10 @@ function normalizeRelayoutAlternative(r: Rec, index: number): RelayoutAlternativ
       ...(optText(c.detail) ? { detail: text(c.detail) } : {}),
     })),
     explanations: texts(r.explanations),
+    ...(status ? { search_status: status } : {}),
+    ...(solver.objective_rounding_krw !== null ? { objective_rounding_krw: solver.objective_rounding_krw } : {}),
+    ...(solver.gap_krw !== null ? { gap_krw: solver.gap_krw } : {}),
+    ...(solver.bound_krw !== null ? { bound_krw: solver.bound_krw } : {}),
   }
 }
 
@@ -257,6 +271,7 @@ export function normalizePlan(raw: unknown): RelayoutPlan | null {
   if (!isRecord(raw)) return null
   const current = isRecord(raw.current) ? raw.current : {}
   const baseline = isRecord(raw.baseline) ? raw.baseline : {}
+  const horizon = isRecord(raw.season_horizon) ? num(raw.season_horizon.days) : null
   return {
     params: isRecord(raw.params) ? raw.params : {},
     current: { sales_krw: num(current.sales_krw), objective_krw: num(current.objective_krw) },
@@ -268,6 +283,10 @@ export function normalizePlan(raw: unknown): RelayoutPlan | null {
       reason: text(u.reason),
     })),
     caveats: texts(raw.caveats),
+    ...(horizon !== null ? { season_horizon: { days: horizon } } : {}),
+    // A plan response carries the decision the server holds after the call; the project view repeats it outside `plan`.
+    ...('selected_alt_id' in raw ? { selected_alt_id: optText(raw.selected_alt_id), decided_by: optText(raw.decided_by), decided_at: optText(raw.decided_at) } : {}),
+    ...(raw.reused === true ? { reused: true } : {}),
   }
 }
 
@@ -359,6 +378,8 @@ export function normalizePhasing(raw: unknown): RelayoutPhasing | null {
     brief_id: text(raw.brief_id),
     alt_id: optText(raw.alt_id),
     rev_id: optText(raw.rev_id),
+    ...(optText(raw.basis) ? { basis: optText(raw.basis) } : {}),
+    ...(optText(raw.basis_note) ? { basis_note: optText(raw.basis_note) } : {}),
     params: {
       crews: num(params.crews),
       fitout_weeks: num(params.fitout_weeks),
@@ -591,6 +612,68 @@ export function defaultExpandedAlternative(plan: RelayoutPlan | null, selectedAl
 /** Display name of a brand in check results: the name, else the ID, else (공실). */
 export function brandDisplay(name: string | null, id: string | null): string {
   return name ?? id ?? '(공실)'
+}
+
+/**
+ * What the screen may say about how an alternative was found, from its `search_status` only (null = nothing).
+ * The baseline is not searched; the first alternative is the first one that is not the baseline.
+ */
+export function alternativeSearchNote(plan: RelayoutPlan | null, alt: RelayoutAlternative): string | null {
+  if (isBaselineAlternative(alt)) return null
+  const first = plan?.alternatives.find((a) => !isBaselineAlternative(a))?.alt_id === alt.alt_id
+  return optimalityNote(alt.search_status, { first, roundingKrw: alt.objective_rounding_krw })
+}
+
+/** The solver's remaining gap, when there is one ("최적 상한과의 차이 최대 …"). */
+export function alternativeGapNote(alt: RelayoutAlternative): string | null {
+  return optimalityGapNote(alt.gap_krw)
+}
+
+/** True when the alternative carries the first-season figures (`annual_uplift_krw`, `one_off_loss_krw`, `season_net_krw`). */
+export function hasSeasonKpi(kpi: RelayoutAlternative['kpi']): boolean {
+  return kpi.season_net_krw !== null && kpi.season_net_krw !== undefined
+}
+
+/**
+ * The server's refusal to replace a recorded decision, for a person: the sentence that tells the agent to call
+ * again with `replace_decision=true` is left out (the person confirms with a button instead).
+ */
+export function decisionConflictText(message: string): string {
+  const kept = message
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s && !/replace_decision/.test(s))
+  return kept.length ? kept.join(' ') : message
+}
+
+/** Note under a construction order saying which alternative it is for and why; the fallback is always spelled out. */
+export function phasingBasisNote(phasing: Pick<RelayoutPhasing, 'basis' | 'basis_note' | 'alt_id'>): string | null {
+  if (phasing.basis_note) return phasing.basis_note
+  if (phasing.basis === 'best_net_fallback') {
+    return `아직 결정한 대안이 없어 순효과가 가장 큰 ${phasing.alt_id ?? '대안'}을 임시 기준으로 계산했어요. 사람이 결정한 대안은 아니에요.`
+  }
+  return null
+}
+
+/**
+ * The project after a plan call. The decision comes from the server's answer, never from what was selected before:
+ * identical conditions return the stored plan with the decision, drawing check and construction order intact
+ * (`reused`); a replacement carries no decision. An answer without decision fields comes from a backend that always
+ * cleared the decision when it planned again.
+ */
+export function applyPlanResult(project: RelayoutProject, plan: RelayoutPlan): RelayoutProject {
+  const kept = plan.reused === true
+  const selected = plan.selected_alt_id ?? null
+  return {
+    ...project,
+    plan,
+    selected_alt_id: selected,
+    decided_by: selected ? (plan.decided_by ?? null) : null,
+    decided_at: selected ? (plan.decided_at ?? null) : null,
+    status: kept ? project.status : 'planned',
+    check: kept ? project.check : null,
+    phasing: kept ? project.phasing : null,
+  }
 }
 
 /** Strongest and weakest categories of the season (factor above / below 1). */

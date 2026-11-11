@@ -174,7 +174,16 @@ export function Legend({
         )}
         {heatmap ? (
           <section>
-            <h3>{heatmap.label || heatmap.metric}</h3>
+            <h3>
+              {heatmap.label || heatmap.metric}
+              {heatmap.estimated === true && !/추정/.test(heatmap.label || heatmap.metric) ? ' (모델 추정치)' : ''}
+            </h3>
+            {heatmap.estimated === true && (
+              <p className="hint heatmap-estimate">이 개정은 거래 실적이 없어요. 실제 매출이 아니라 모델로 추정한 값이에요.</p>
+            )}
+            {heatmap.rev && heatmap.rev !== rev && (
+              <p className="hint heatmap-rev">이 색칠은 {heatmap.rev} 개정의 값이에요. 지금 화면은 {rev} 개정이에요.</p>
+            )}
             {heatmap.legend?.binary ? (
               <ul>
                 <li>

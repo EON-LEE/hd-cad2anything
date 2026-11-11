@@ -232,17 +232,31 @@ pre {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+  /* Allow the revision <select> to shrink instead of forcing horizontal page scroll (R2). */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .topbar select {
-  min-width: 90px;
+  /* A long revision label must not widen the page: cap and ellipsize instead of overflowing. */
+  min-width: 0;
+  max-width: 100%;
   color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .field {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.field > select {
+  flex: 1 1 auto;
 }
 
 .field > span {
@@ -314,19 +328,75 @@ pre {
   grid-template-columns: minmax(0, 1fr) clamp(360px, 32vw, 470px);
 }
 
+/* Map/side view switch: hidden on desktop, shown on the stacked phone layout (R1). */
+.view-toggle {
+  display: none;
+}
+
 @media (max-width: 900px) {
+  /* Dynamic viewport units keep the active pane and the chat composer within one screen, even with the
+     mobile browser's collapsing URL bar (the old 62vh/70vh/100vh rows pushed the composer off-screen). */
   .app {
-    height: auto;
-    min-height: 100vh;
+    height: 100dvh;
+    min-height: 100dvh;
   }
 
+  .view-toggle {
+    display: flex;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 5;
+  }
+
+  .view-toggle-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 9px 10px;
+    font-weight: 600;
+    border: 1px solid #cbd5e1;
+    background: #fff;
+  }
+
+  .view-toggle-btn.active {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+  }
+
+  .view-toggle-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-left: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: middle;
+  }
+
+  /* One pane fills the remaining height; the toggle swaps which one is shown. */
   .main {
     grid-template-columns: 1fr;
-    grid-template-rows: 62vh auto;
+    grid-template-rows: 1fr;
+  }
+
+  .main > * {
+    min-height: 0;
+  }
+
+  .main.view-map .sidebar {
+    display: none;
+  }
+
+  .main.view-side .canvas-wrap {
+    display: none;
   }
 
   .sidebar {
-    min-height: 70vh;
+    min-height: 0;
   }
 }
 
@@ -417,6 +487,85 @@ pre {
 .button-group {
   display: inline-flex;
   gap: 4px;
+}
+
+/* Keyboard/screen-reader unit finder, a row under the map toolbar (R3). */
+.unit-finder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+.unit-finder-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.unit-finder-box {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 340px;
+}
+
+.unit-finder-input {
+  width: 100%;
+}
+
+.unit-finder-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.unit-finder-option {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.unit-finder-option.active {
+  background: #eff6ff;
+}
+
+.unit-finder-option.selected {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.unit-finder-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.unit-finder-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.unit-finder-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .legend {
@@ -1392,6 +1541,63 @@ th {
 
 .canvas-cards > * {
   pointer-events: auto;
+}
+
+/* Compact (phone) collapse of the floating cards: one-line header with a 자세히 expander (R1). */
+.card-head-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.card-compact-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.card-expand {
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.route-collapsed-note,
+.flow-collapsed-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (max-width: 719.98px) {
+  /* Keep the collapsed cards from blanketing the small canvas (card area well under half, R1). */
+  .canvas-cards {
+    width: min(300px, calc(100% - 24px));
+    gap: 6px;
+  }
+
+  .journey-card.card-collapsed,
+  .route-card.card-collapsed,
+  .flow-card.card-collapsed {
+    width: auto;
+    max-width: 100%;
+  }
+
+  .card-collapsed .journey-head {
+    border-bottom: none;
+  }
+
+  .card-collapsed h2 {
+    font-size: 14px;
+    max-width: 62vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .journey-card {

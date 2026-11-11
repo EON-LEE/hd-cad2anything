@@ -108,8 +108,17 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
         revisions = []
         for revision in self.ws.revisions():
             meta = self.ws.model_meta(revision.rev_id)
-            revisions.append(revision.to_dict() | {"model_source": meta.get("source")})
-        return {"revisions": revisions}
+            revisions.append(
+                revision.to_dict()
+                | {"model_source": meta.get("source"), "has_sales": self._has_sales(revision.rev_id)}
+            )
+        return {
+            "revisions": revisions,
+            "note": (
+                "has_sales가 false인 개정은 거래 실적이 없어 실적 지표를 계산할 수 없습니다"
+                "(레이아웃 모형의 기대 매출 추정치만 쓸 수 있습니다)."
+            ),
+        }
 
     def spatial_floor_summary(self, rev: str, floor: str) -> dict[str, Any]:
         model = self._model(rev)
@@ -172,6 +181,7 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
             raise ToolError(f"sort_by는 {', '.join(FIND_SORTS)} 중 하나여야 합니다.")
         model = self._model(rev)
         query = (brand_query or "").strip().lower()
+        notes: list[str] = []
         rows = []
         for unit in sorted(model.units(floor), key=lambda u: u.attributes.get("unit_code") or ""):
             attrs = unit.attributes
@@ -194,21 +204,34 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
             features = self.unit_features(rev)
             if features is None:
                 raise ToolError("보행거리를 계산할 공간 특징을 사용할 수 없습니다.")
-            distance = features.set_index("unit_code")[sort_by].to_dict()
+            flag = "escalator_fallback" if sort_by == "walk_to_escalator_m" else "entrance_fallback"
+            indexed = features.set_index("unit_code")
+            distance = indexed[sort_by].to_dict()
+            fallback = indexed[flag].to_dict() if flag in indexed else {}
+            estimated = 0
             for row in rows:
                 value = distance.get(row["unit_code"])
                 row[sort_by] = None if value is None or pd.isna(value) else round(float(value), 1)
+                row[flag] = bool(fallback.get(row["unit_code"], False))
+                estimated += row[flag]
             rows.sort(key=lambda row: (row[sort_by] is None, row[sort_by] or 0.0))
+            if estimated:
+                notes.append(
+                    f"{estimated}개 매장은 통로로 이어지지 않아 {sort_by}가 직선거리 추정이에요({flag}=true)."
+                )
         elif sort_by == "area_m2":
             rows.sort(key=lambda row: -row["area_m2"])
         limit = max(1, min(int(limit), 200))
-        return {
+        result = {
             "rev": rev,
             "count": len(rows),
             "sort_by": sort_by,
             "units": rows[:limit],
             "truncated": len(rows) > limit,
         }
+        if notes:
+            result["notes"] = notes
+        return result
 
     def spatial_unit_details(self, rev: str, unit_code: str) -> dict[str, Any]:
         model = self._model(rev)
@@ -239,6 +262,15 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
                 for column in ("frontage_m", "walk_to_escalator_m", "walk_to_entrance_m"):
                     if column in row and pd.notna(row[column]):
                         result[column] = round(float(row[column]), 1)
+                for column, label in (
+                    ("escalator_fallback", "에스컬레이터"),
+                    ("entrance_fallback", "출입구"),
+                ):
+                    if column in row and bool(row[column]):
+                        result[column] = True
+                        result.setdefault("notes", []).append(
+                            f"통로로 {label}에 이어지지 않아 보행거리를 직선거리로 추정했습니다."
+                        )
         fixtures = [
             f
             for f in model.by_kind(EntityKind.FIXTURE, unit.floor)
@@ -252,29 +284,33 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
 
     def spatial_nearby_units(self, rev: str, unit_code: str, radius_m: float = 15.0) -> dict[str, Any]:
         radius_m = max(0.0, min(float(radius_m), 60.0))
+        model = self._model(rev)
+        unit = self._unit(model, unit_code)
+        others = [u for u in model.units(unit.floor) if u.entity_id != unit.entity_id]
+        source, engine_note = "memory", "메모리 계산"
         if self.use_postgis:
             try:
                 from cad2anything.store import postgis
 
                 with postgis.connect() as conn:
-                    rows = postgis.nearby_units(conn, rev, unit_code, radius_m)
-                return {
-                    "rev": rev,
-                    "unit_code": unit_code,
-                    "radius_m": radius_m,
-                    "engine": "postgis",
-                    "units": rows,
-                }
+                    pg_rows = postgis.nearby_units(conn, rev, unit_code, radius_m)
+                if pg_rows or not others:
+                    return {
+                        "rev": rev,
+                        "unit_code": unit_code,
+                        "radius_m": radius_m,
+                        "engine": "postgis",
+                        "source": "postgis",
+                        "units": pg_rows,
+                    }
+                # Uploaded revisions live in the workspace only, so an empty answer is not an empty floor.
+                engine_note = f"PostGIS에 {rev} 도면이 없어 메모리 계산으로 대체"
+                source = "memory_fallback"
             except Exception as exc:  # fall back to in-memory geometry
                 engine_note = f"PostGIS 사용 불가({type(exc).__name__}), 메모리 계산으로 대체"
-        else:
-            engine_note = "메모리 계산"
-        model = self._model(rev)
-        unit = self._unit(model, unit_code)
+                source = "memory_fallback"
         rows = []
-        for other in model.units(unit.floor):
-            if other.entity_id == unit.entity_id:
-                continue
+        for other in others:
             distance = unit.geometry.distance(other.geometry)
             if distance <= radius_m:
                 rows.append(
@@ -286,6 +322,7 @@ class Toolkit(AnalyticsTools, SpatialTools, RelayoutTools, UploadTools, Benchmar
             "unit_code": unit_code,
             "radius_m": radius_m,
             "engine": engine_note,
+            "source": source,
             "units": rows,
         }
 

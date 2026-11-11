@@ -23,8 +23,10 @@ from cad2anything.services.uploads import (
     MAX_FILES,
     MAX_TOTAL_BYTES,
     MB,
+    REV_ID_PATTERN,
     ConflictError,
     NotFoundError,
+    revision_id_rules,
     size_text,
 )
 
@@ -42,7 +44,7 @@ _DRAWINGS_BODY = {
                     "required": ["files", "rev_id", "effective_date"],
                     "properties": {
                         "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
-                        "rev_id": {"type": "string", "pattern": "^[A-Z0-9][A-Z0-9_-]{0,15}$"},
+                        "rev_id": {"type": "string", "pattern": REV_ID_PATTERN},
                         "parent_rev": {"type": "string"},
                         "effective_date": {"type": "string", "format": "date"},
                         "units": {"type": "string", "enum": ["m", "mm"]},
@@ -144,6 +146,10 @@ async def _read(upload: UploadFile, limit: int) -> bytes:
 def build_upload_router(toolkit: Any) -> APIRouter:
     """Routes of §1.2 bound to ``toolkit`` (a Toolkit with ``UploadTools``)."""
     router = APIRouter(tags=["uploads"])
+
+    @router.get("/api/uploads/rules")
+    def upload_rules() -> dict[str, Any]:
+        return revision_id_rules()
 
     @router.post("/api/uploads/drawings", status_code=202, openapi_extra=_DRAWINGS_BODY)
     async def upload_drawings(request: Request) -> dict[str, Any]:

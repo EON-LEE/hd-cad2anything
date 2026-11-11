@@ -5,8 +5,11 @@ import { useData } from '../api/source'
 import { formatDateTime, formatKrw } from '../lib/format'
 import {
   OBJECTIVE_LABELS,
+  alternativeGapNote,
+  alternativeSearchNote,
   defaultExpandedAlternative,
   groupRelayoutChanges,
+  hasSeasonKpi,
   isBaselineAlternative,
   relayoutPreview,
 } from '../lib/relayout'
@@ -155,6 +158,10 @@ function AlternativeCard({ alt, project, busy, expanded, previewing, onToggle, o
   const k = alt.kpi
   // A range is only worth showing when the estimate is uncertain (ALT-0 may send 0 ~ 0).
   const hasRange = k.sales_low_krw !== null && k.sales_high_krw !== null && k.sales_low_krw !== k.sales_high_krw
+  // First-season wording (연간 증가 효과 / 1회성 공사 손실 / 첫 시즌 기준 순효과) when the backend sends it.
+  const seasonKpi = hasSeasonKpi(k)
+  const searchNote = alternativeSearchNote(project.plan, alt)
+  const gapNote = searchNote ? alternativeGapNote(alt) : null
 
   return (
     <article className={`alt-card relayout-alt${selected ? ' selected' : ''}${previewing ? ' active' : ''}`} aria-labelledby={titleId}>
@@ -167,19 +174,46 @@ function AlternativeCard({ alt, project, busy, expanded, previewing, onToggle, o
         <span className={`badge ${failed.length ? 'danger' : 'ok'}`}>{failed.length ? `제약 위반 ${failed.length}` : '제약 충족'}</span>
       </header>
       {alt.summary && <p className="alt-summary">{alt.summary}</p>}
+      {searchNote && (
+        <p className="muted small alt-search">
+          {searchNote}
+          {gapNote ? ` · ${gapNote}` : ''}
+        </p>
+      )}
       <dl className="kv kpi">
-        <dt>순효과</dt>
-        <dd>
-          <strong className={k.net_krw !== null && k.net_krw < 0 ? 'negative' : undefined}>{formatKrw(k.net_krw, true)}</strong>
-        </dd>
-        <dt>목표 변화</dt>
-        <dd>
-          {formatKrw(k.objective_delta_krw, true)} <span className="muted">({objective})</span>
-        </dd>
-        <dt>이전 비용</dt>
-        <dd>
-          {formatKrw(k.move_cost_krw)} <span className="muted">(이전 {k.moves ?? 0}건)</span>
-        </dd>
+        {seasonKpi ? (
+          <>
+            <dt>첫 시즌 기준 순효과</dt>
+            <dd>
+              <strong className={k.season_net_krw !== null && k.season_net_krw !== undefined && k.season_net_krw < 0 ? 'negative' : undefined}>
+                {formatKrw(k.season_net_krw, true)}
+              </strong>
+            </dd>
+            <dt>연간 증가 효과</dt>
+            <dd>
+              {formatKrw(k.annual_uplift_krw ?? k.objective_delta_krw, true)} <span className="muted">({objective})</span>
+            </dd>
+            <dt>1회성 공사 손실</dt>
+            <dd>
+              {formatKrw(k.one_off_loss_krw ?? k.move_cost_krw)} <span className="muted">(이전 {k.moves ?? 0}건)</span>
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>순효과</dt>
+            <dd>
+              <strong className={k.net_krw !== null && k.net_krw < 0 ? 'negative' : undefined}>{formatKrw(k.net_krw, true)}</strong>
+            </dd>
+            <dt>목표 변화</dt>
+            <dd>
+              {formatKrw(k.objective_delta_krw, true)} <span className="muted">({objective})</span>
+            </dd>
+            <dt>이전 비용</dt>
+            <dd>
+              {formatKrw(k.move_cost_krw)} <span className="muted">(이전 {k.moves ?? 0}건)</span>
+            </dd>
+          </>
+        )}
         <dt>기준안 대비 매출 변화</dt>
         <dd>
           {formatKrw(k.sales_delta_krw, true)}
@@ -349,6 +383,11 @@ export function RelayoutAlternatives({
         지금 매출 {formatKrw(plan.current.sales_krw)} · 기준안 {formatKrw(plan.baseline.sales_krw)}
         {plan.baseline.note ? `(${plan.baseline.note})` : ''}. 금액은 연간 추정치입니다.
       </p>
+      {plan.alternatives.some((a) => hasSeasonKpi(a.kpi)) && (
+        <p className="muted small">
+          첫 시즌 기준 순효과 = 연간 증가 효과 × 시즌 반영 기간{plan.season_horizon?.days ? `(${plan.season_horizon.days}일)` : ''} ÷ 365일 − 1회성 공사 손실이에요.
+        </p>
+      )}
       {project.selected_alt_id && (
         <div className="decision-box">
           <strong>

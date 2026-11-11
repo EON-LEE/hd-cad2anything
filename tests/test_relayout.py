@@ -10,7 +10,7 @@ from cad2anything.layout import LayoutConstraints, check_constraints, generate_a
 from cad2anything.mockgen.relayout import BRIEF_ID, EFFECTIVE_DATE, build_leases, ensure_relayout_metadata
 from cad2anything.model import Revision, RevisionKind
 from cad2anything.services.atlas_api import create_api
-from cad2anything.services.errors import NotFoundToolError
+from cad2anything.services.errors import DecisionExistsError, NotFoundToolError
 from cad2anything.services.tools import ToolError, Toolkit
 
 
@@ -84,6 +84,35 @@ def test_brief_validation_brands(toolkit):
         toolkit.relayout_project("NOPE")
 
 
+@pytest.mark.parametrize("rate", [-0.5, 20, float("nan"), float("inf"), -float("inf"), "not-a-number", 101])
+def test_entry_commission_rate_must_be_a_finite_fraction(toolkit, rate):
+    raw = _raw_brief(toolkit)
+    raw["entries"][0]["commission_rate"] = rate
+    _, errors, _ = toolkit.relayout_validate_brief(raw)
+    assert any("commission_rate" in error for error in errors)
+    if rate == 20:
+        assert any("0.2" in error and "백분율" in error for error in errors)
+
+
+@pytest.mark.parametrize("rate", [0.0, 0.2, 1.0])
+def test_entry_commission_fraction_boundaries_are_valid(toolkit, rate):
+    raw = _raw_brief(toolkit)
+    raw["entries"][0]["commission_rate"] = rate
+    brief, errors, _ = toolkit.relayout_validate_brief(raw)
+    assert not errors and brief["entries"][0]["commission_rate"] == rate
+
+
+def test_missing_leases_do_not_default_to_all_movable(toolkit, monkeypatch):
+    raw = _raw_brief(toolkit)
+    raw.pop("movable")
+    monkeypatch.setattr(toolkit, "_leases", lambda: None)
+    brief, errors, warnings = toolkit.relayout_validate_brief(raw)
+    assert not errors and brief["movable"] == "expiring"
+    assert any(
+        "기존 브랜드는 이동하지 않아요" in warning and "movable=all" in warning for warning in warnings
+    )
+
+
 def test_engine_weights_free_brands_and_move_costs(toolkit):
     inputs = toolkit._layout_inputs("R2")
     base = dict(inputs["assignment"])
@@ -132,6 +161,8 @@ def test_diagnose(toolkit):
     candidates = {c["brand_id"] for c in diagnosis["candidates"]}
     assert {e["brand_id"] for e in brief["exits"]} <= candidates
     assert all(e["feasible_units"] >= 1 for e in diagnosis["entries"])
+    assert diagnosis["as_of"] == "2026-09-30"
+    assert diagnosis["lease_cutoff"] == brief["effective_date"]
     assert toolkit._project(BRIEF_ID)["status"] in ("diagnosed", "planned", "selected", "checked")
 
 
@@ -161,12 +192,17 @@ def test_plan_alternatives(toolkit, plan):
     engine_alts = plan["alternatives"][1:]
     if engine_alts:
         first = engine_alts[0]
-        assert plan["search"]["status"] == first["search_status"] == "optimal"
-        assert "최적해" in first["summary"] and "CP-SAT" in plan["search"]["note"]
+        assert plan["search"]["status"] == first["search_status"]
+        assert first["search_status"] in ("optimal", "feasible")
+        assert first["objective_rounding_krw"] == 100
+        if first["search_status"] == "optimal":
+            assert "100원 단위로 반올림한 모델과 제약 안에서" in first["summary"]
+        assert "CP-SAT" in plan["search"]["note"]
         assert plan["search"]["net_upper_bound_krw"] >= first["kpi"]["net_krw"] - 1.0
         for other in engine_alts[1:]:
-            assert other["kpi"]["net_krw"] <= first["kpi"]["net_krw"] + 1.0
-            assert "ALT-1보다" in other["summary"]
+            assert other["search_status"] in ("optimal_diverse", "feasible")
+            if first["search_status"] == "optimal":
+                assert "ALT-1보다" in other["summary"]
 
 
 def test_select_check_and_report(toolkit, plan, monkeypatch):
@@ -210,13 +246,13 @@ def test_select_check_and_report(toolkit, plan, monkeypatch):
     assert any(a["unit_code"] == resized.attributes["unit_code"] for a in check["area_changes"])
     hook = toolkit.relayout_after_upload("R3", "R2")
     assert hook["brief_id"] == BRIEF_ID and hook["alt_id"] == chosen["alt_id"]
-    assert toolkit.relayout_after_upload("R3", "R0") is None
+    skipped = toolkit.relayout_after_upload("R3", "R0")
+    assert skipped["skipped"] and "기준 개정" in skipped["reason"]
     redrawn = copy.deepcopy(drawn)
     redrawn.revision = Revision("R2X", RevisionKind.ACTUAL, "R2", "2026-11-01", source="test")
     toolkit.ws.save_model(redrawn, {"source": "uploaded", "parent": "R2"})
-    assert (
-        toolkit.relayout_after_upload("R2X", "R2") is None
-    )  # other effective date: not the relayout drawing
+    skipped = toolkit.relayout_after_upload("R2X", "R2")
+    assert skipped["skipped"] and "적용일" in skipped["reason"]
     toolkit.ws.delete_file("models/R2X.json")
     with pytest.raises(ToolError):
         toolkit.relayout_check_drawing(BRIEF_ID, "R2")
@@ -234,6 +270,10 @@ def test_entry_options(toolkit):
     result = toolkit.relayout_entry_options(brand=outdoor, season="FW")
     values = [o["expected_sales_krw"] for o in result["options"]]
     assert values == sorted(values, reverse=True) and result["season_factor"]
+    assert result["as_of"] == "2026-09-30" and result["lease_cutoff_note"]
+    assert all(
+        option["lease_end"] < result["lease_cutoff"] for option in result["options"] if option["lease_end"]
+    )
     assert all(o["status"] in ("공실", "계약 만료 예정") for o in result["options"])
     assert all(o["low_krw"] <= o["expected_sales_krw"] <= o["high_krw"] for o in result["options"])
     by_category = toolkit.relayout_entry_options(category="카페", floors=["8F"], include_expiring=True, top=3)
@@ -311,6 +351,8 @@ def test_phasing_of_plan(toolkit, plan):
     alternative = next(a for a in project["plan"]["alternatives"] if a["alt_id"] == result["alt_id"])
     if project.get("selected_alt_id"):
         assert result["alt_id"] == project["selected_alt_id"]
+        assert result["basis"] == "selected"
+    assert result["basis_note"]
     _assert_valid_phasing(toolkit, alternative, result)
     assert project["phasing"]["alt_id"] == result["alt_id"] and result["summary"]
     wider = toolkit.relayout_phasing(BRIEF_ID, alt_id=result["alt_id"], crews=6)
@@ -397,7 +439,8 @@ def test_relayout_rest(toolkit):
     assert diagnosis["season"]["code"] == "FW"
     assert client.post(f"/api/relayout/{BRIEF_ID}/plan", json={"objective": "profit"}).status_code == 422
     plan = client.post(
-        f"/api/relayout/{BRIEF_ID}/plan", json={"objective": "sales", "n_alternatives": 1}
+        f"/api/relayout/{BRIEF_ID}/plan",
+        json={"objective": "sales", "n_alternatives": 1, "replace_decision": True},
     ).json()
     assert plan["params"]["objective"] == "sales" and plan["alternatives"][0]["alt_id"] == "ALT-0"
     assert client.post(f"/api/relayout/{BRIEF_ID}/check", json={"rev": "R2"}).status_code == 400
@@ -422,12 +465,20 @@ def test_relayout_rest(toolkit):
     assert report.status_code == 200 and report.headers["content-type"].startswith("text/html")
 
 
-def test_replan_removes_stale_revisions(toolkit, plan):
-    smaller = toolkit.relayout_plan(BRIEF_ID, n_alternatives=1, max_moves=2)
+def test_replan_protects_decision_and_removes_stale_revisions_only_after_confirmation(toolkit, plan):
+    before = copy.deepcopy(toolkit._project(BRIEF_ID))
+    with pytest.raises(DecisionExistsError, match="replace_decision=true"):
+        toolkit.relayout_plan(BRIEF_ID, n_alternatives=1, max_moves=2)
+    assert toolkit._project(BRIEF_ID) == before
+    smaller = toolkit.relayout_plan(BRIEF_ID, n_alternatives=1, max_moves=2, replace_decision=True)
     ids = {a["rev_id"] for a in smaller["alternatives"]}
     stale = {a["rev_id"] for a in plan["alternatives"]} - ids
     for rev_id in stale:
         assert not toolkit.ws.has_model(rev_id)
         assert rev_id not in {r.rev_id for r in toolkit.ws.revisions()}
     assert all(sum(1 for c in a["changes"] if c["type"] == "move") <= 2 for a in smaller["alternatives"])
-    assert toolkit._project(BRIEF_ID)["selected_alt_id"] is None
+    project = toolkit._project(BRIEF_ID)
+    assert project["selected_alt_id"] is None and project["check"] is None and project["phasing"] is None
+    assert project["decision_history"][:-1] == before["decision_history"]
+    assert project["decision_history"][-1]["alt_id"] == before["selected_alt_id"]
+    assert project["decision_history"][-1]["replaced_at"]

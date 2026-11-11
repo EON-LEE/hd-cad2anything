@@ -1,11 +1,14 @@
 // Drawing upload form (POST /api/uploads/drawings) with the contract's checks done before sending.
 import { useRef, useState, type FormEvent } from 'react'
 import { errorText } from '../api/client'
+import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
+import { useCachedResource } from '../hooks/useCachedResource'
 import { REVISION_KIND_LABELS, revisionMarkers } from '../lib/format'
-import { floorFromFileName, formatBytes, validateDrawingUpload, type DrawingField, type FieldError } from '../lib/uploads'
+import { DEFAULT_UPLOAD_RULES, floorFromFileName, formatBytes, validateDrawingUpload, type DrawingField, type FieldError } from '../lib/uploads'
 import { pickDefaultRevision } from '../state/uiState'
 import type { DrawingProfile } from '../types/api'
+import { WritesNotice } from './WritesNotice'
 
 const FIELD_IDS: Record<DrawingField, string> = {
   files: 'upload-files',
@@ -23,6 +26,9 @@ export function DrawingUploadForm({
   onCreated: (jobId: string) => void
 }) {
   const { source, meta } = useData()
+  // The server's revision id rules; a backend without the endpoint (or an error) leaves the built-in rules in place.
+  const rules = useCachedResource(cacheKeys.uploadRules(source.mode), () => source.getUploadRules()).data ?? null
+  const maxLength = rules?.max_length ?? DEFAULT_UPLOAD_RULES.max_length
   const fileInput = useRef<HTMLInputElement>(null)
   const [files, setFiles] = useState<File[]>([])
   const [revId, setRevId] = useState('')
@@ -53,7 +59,7 @@ export function DrawingUploadForm({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    const found = validateDrawingUpload({ files, revId, effectiveDate, revisions: meta.revisions })
+    const found = validateDrawingUpload({ files, revId, effectiveDate, revisions: meta.revisions, rules })
     setErrors(found)
     setSubmitError(null)
     if (found.length) {
@@ -129,18 +135,18 @@ export function DrawingUploadForm({
             type="text"
             value={revId}
             required
-            maxLength={16}
+            maxLength={maxLength}
             autoComplete="off"
             spellCheck={false}
             placeholder="예: R3"
-            pattern="[A-Z0-9_\-]{1,16}"
+            pattern="[A-Z0-9][A-Z0-9_\-]*"
             aria-invalid={fieldErrors('rev_id').length > 0}
             aria-describedby={describedBy('rev_id', 'upload-rev-hint')}
             onChange={(e) => setRevId(e.target.value.toUpperCase())}
           />
           <p id="upload-rev-hint" className="hint">
-            영문 대문자·숫자·-·_ 1~16자
-            {existing?.model_source === 'uploaded' ? ` · 업로드한 ${existing.rev_id}를 새 도면으로 바꿉니다.` : ''}
+            영문 대문자·숫자·-·_ 1~{maxLength}자, 첫 글자는 영문 대문자나 숫자예요. H와 숫자(H1)는 가상 개정용이라 쓸 수 없어요.
+            {existing?.model_source === 'uploaded' ? ` 업로드한 ${existing.rev_id}를 새 도면으로 바꿉니다.` : ''}
           </p>
           {errorList('rev_id')}
         </div>
@@ -208,6 +214,7 @@ export function DrawingUploadForm({
           도면을 올리지 못했습니다: {submitError}
         </p>
       )}
+      <WritesNotice />
       <button type="submit" className="primary" disabled={busy}>
         {busy ? '올리는 중…' : '올리기'}
       </button>

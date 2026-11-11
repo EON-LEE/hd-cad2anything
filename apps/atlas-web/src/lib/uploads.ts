@@ -10,6 +10,9 @@ import type {
   UploadJob,
   UploadJobStep,
   UploadJobSummary,
+  UploadRelayoutCheck,
+  UploadRules,
+  UploadStageError,
 } from '../types/api'
 import { isRecord, list, num, optText, records, text, texts, type Rec } from './coerce'
 
@@ -38,6 +41,8 @@ export const LAYER_SEMANTIC_LABELS: Record<string, string> = Object.fromEntries(
 export interface MetadataKindInfo {
   kind: MetadataKind
   label: string
+  /** One sentence on what the table or document is for (shown under the kind selector when present). */
+  description?: string
   /** Display text of the accepted formats. */
   formats: string
   /** `accept` attribute of the file input. */
@@ -62,7 +67,14 @@ export const METADATA_KINDS: readonly MetadataKindInfo[] = [
     required: ['lease_id', 'brand_id', 'unit_code', 'lease_start', 'lease_end'],
     optional: ['contract_area_m2', 'commission_rate'],
   },
-  { kind: 'pos_terminals', label: 'POS 단말', ...TABLE, required: ['pos_id', 'brand_id', 'unit_code', 'valid_from', 'valid_to'], optional: [] },
+  {
+    kind: 'pos_terminals',
+    label: 'POS 단말 매핑',
+    description: 'POS 단말이 어느 브랜드·매장에서 언제부터 언제까지 쓰였는지 잇는 표예요. 거래·매출 데이터를 올리는 곳이 아니에요.',
+    ...TABLE,
+    required: ['pos_id', 'brand_id', 'unit_code', 'valid_from', 'valid_to'],
+    optional: [],
+  },
   {
     kind: 'relayout_brief',
     label: '개편 브리프',
@@ -101,10 +113,11 @@ export const JOB_STATUS_LABELS: Record<string, string> = {
   running: '처리 중',
   needs_review: '검토 필요',
   done: '완료',
+  partial: '일부 단계 실패',
   failed: '실패',
 }
 
-export const JOB_STATUS_TONE: Record<string, string> = { running: 'warn', needs_review: 'warn', done: 'ok', failed: 'danger' }
+export const JOB_STATUS_TONE: Record<string, string> = { running: 'warn', needs_review: 'warn', partial: 'warn', done: 'ok', failed: 'danger' }
 
 export const STEP_LABELS: Record<string, string> = {
   save: '파일 저장',
@@ -139,21 +152,76 @@ export const SEVERITY_LABELS: Record<string, string> = { error: '오류', warnin
 
 export const SEVERITY_TONE: Record<string, string> = { error: 'danger', warning: 'warn' }
 
-/** Jobs stop changing in these states (`needs_review` still produced a model, with guessed layers). */
+/** Jobs stop changing in these states (`needs_review` and `partial` still produced a model). */
 export function isJobSettled(status: string | null | undefined): boolean {
-  return status === 'done' || status === 'failed' || status === 'needs_review'
+  return status === 'done' || status === 'failed' || status === 'needs_review' || status === 'partial'
 }
 
-/** True when the job produced a revision that can be opened (`done` or `needs_review`). */
+/**
+ * True when the job produced a revision that can be opened: `done`, `needs_review` (guessed layers) or `partial`
+ * (the model was saved, a later step failed — open it with the warning).
+ */
 export function jobHasRevision(status: string | null | undefined): boolean {
-  return status === 'done' || status === 'needs_review'
+  return status === 'done' || status === 'needs_review' || status === 'partial'
+}
+
+/**
+ * Whether the job's revision can be opened. The server's `revision_available` wins when it is sent: a job that a
+ * later upload of the same revision replaced no longer owns the saved model, whatever its status says.
+ */
+export function jobRevisionAvailable(job: { status: string; revision_available?: boolean | null }): boolean {
+  return typeof job.revision_available === 'boolean' ? job.revision_available : jobHasRevision(job.status)
 }
 
 // --- client-side validation -------------------------------------------------------------------
 
-export const REV_ID_PATTERN = /^[A-Z0-9_-]{1,16}$/
+/**
+ * Revision id rules as the backend applies them (GET /api/uploads/rules): the first character is a capital letter
+ * or digit, then up to 15 of capital letters, digits, `-` and `_`; `H` + digits is kept for what-if revisions.
+ * The form uses these when the server has no rules endpoint (older backends).
+ */
+export const DEFAULT_UPLOAD_RULES: UploadRules = { rev_id_pattern: '^[A-Z0-9][A-Z0-9_-]{0,15}$', reserved_patterns: ['^H[0-9]+$'], max_length: 16 }
+export const REV_ID_PATTERN = new RegExp(DEFAULT_UPLOAD_RULES.rev_id_pattern)
 export const MAX_FILE_BYTES = 30 * 1024 * 1024
 export const MAX_TOTAL_BYTES = 100 * 1024 * 1024
+
+function compilePattern(source: string): RegExp | null {
+  try {
+    return new RegExp(source)
+  } catch {
+    return null
+  }
+}
+
+/** GET /api/uploads/rules; null when the response is not usable (the default rules apply then). */
+export function normalizeUploadRules(raw: unknown): UploadRules | null {
+  if (!isRecord(raw)) return null
+  const pattern = optText(raw.rev_id_pattern)
+  if (!pattern || !compilePattern(pattern)) return null
+  const max = num(raw.max_length)
+  return {
+    rev_id_pattern: pattern,
+    reserved_patterns: texts(raw.reserved_patterns).filter((p) => compilePattern(p) !== null),
+    max_length: max !== null && max >= 1 ? Math.round(max) : DEFAULT_UPLOAD_RULES.max_length,
+  }
+}
+
+/** Why a new revision id cannot be used, in Korean; null when it is fine. */
+export function revIdProblem(revId: string, rules: UploadRules | null | undefined = DEFAULT_UPLOAD_RULES): string | null {
+  const id = revId.trim()
+  if (!id) return '새 개정 ID를 입력하세요.'
+  const active = rules ?? DEFAULT_UPLOAD_RULES
+  const pattern = compilePattern(active.rev_id_pattern) ?? REV_ID_PATTERN
+  if (!pattern.test(id)) {
+    const rest = new RegExp(`^[A-Z0-9_-]{1,${active.max_length}}$`)
+    if (rest.test(id) && !/^[A-Z0-9]/.test(id)) return '개정 ID는 영문 대문자나 숫자로 시작해야 합니다.'
+    return `개정 ID는 영문 대문자·숫자·-·_로 1~${active.max_length}자여야 합니다.`
+  }
+  if (active.reserved_patterns.some((source) => compilePattern(source)?.test(id))) {
+    return `${id}은(는) 가상 개정(what-if)에 쓰는 ID 형식이라 업로드 개정 ID로 쓸 수 없습니다. 다른 ID를 입력하세요.`
+  }
+  return null
+}
 
 function extension(name: string): string {
   const dot = name.lastIndexOf('.')
@@ -199,6 +267,8 @@ export interface DrawingFormInput {
   effectiveDate: string
   /** Known revisions: an existing ID that was not made by an upload cannot be reused. */
   revisions?: readonly RevisionInfo[]
+  /** The server's revision id rules (GET /api/uploads/rules); the built-in rules apply when absent. */
+  rules?: UploadRules | null
 }
 
 function validDate(value: string): boolean {
@@ -245,8 +315,8 @@ export function validateDrawingUpload(input: DrawingFormInput): FieldError[] {
   }
 
   const revId = input.revId.trim()
-  if (!revId) errors.push({ field: 'rev_id', message: '새 개정 ID를 입력하세요.' })
-  else if (!REV_ID_PATTERN.test(revId)) errors.push({ field: 'rev_id', message: '개정 ID는 영문 대문자·숫자·-·_로 1~16자여야 합니다.' })
+  const revProblem = revIdProblem(revId, input.rules)
+  if (revProblem) errors.push({ field: 'rev_id', message: revProblem })
   else {
     const existing = input.revisions?.find((r) => r.rev_id === revId)
     if (existing && existing.model_source !== 'uploaded') {
@@ -270,6 +340,30 @@ export function validateMetadataFile(kind: string, file: { name: string } | null
 
 // --- normalization ----------------------------------------------------------------------------
 
+/** Downstream failures of a `partial` job: `[{step, message}]` (plain strings are accepted too). */
+export function normalizeStageErrors(value: unknown): UploadStageError[] {
+  return list(value).flatMap((item): UploadStageError[] => {
+    if (typeof item === 'string') return item.trim() ? [{ step: '', message: item }] : []
+    if (!isRecord(item)) return []
+    const step = text(item.step ?? item.name)
+    const message = text(item.message ?? item.error)
+    return step || message ? [{ step, message }] : []
+  })
+}
+
+/** The fields a job summary row and a full job share (all additive: absent on older backends). */
+function jobExtras(raw: Rec): Pick<UploadJobSummary, 'revision_available' | 'review_reason' | 'stage_errors' | 'superseded_by'> {
+  const errors = normalizeStageErrors(raw.stage_errors)
+  const reason = optText(raw.review_reason)
+  const superseded = optText(raw.superseded_by)
+  return {
+    ...(typeof raw.revision_available === 'boolean' ? { revision_available: raw.revision_available } : {}),
+    ...(reason ? { review_reason: reason } : {}),
+    ...(errors.length ? { stage_errors: errors } : {}),
+    ...(superseded ? { superseded_by: superseded } : {}),
+  }
+}
+
 export function normalizeJobSummary(raw: unknown): UploadJobSummary | null {
   if (!isRecord(raw) || !optText(raw.job_id)) return null
   return {
@@ -279,6 +373,7 @@ export function normalizeJobSummary(raw: unknown): UploadJobSummary | null {
     rev_id: optText(raw.rev_id),
     created_at: optText(raw.created_at),
     updated_at: optText(raw.updated_at),
+    ...jobExtras(raw),
   }
 }
 
@@ -325,6 +420,26 @@ function normalizeQa(qa: Rec): NonNullable<UploadJob['qa']> {
   }
 }
 
+/** `relayout_check` of a job: a result, or `{skipped: true, reason}` when the automatic check did not apply. */
+function normalizeJobCheck(check: Rec): UploadRelayoutCheck {
+  const skipped = check.skipped === true
+  const reason = optText(check.reason)
+  return {
+    brief_id: text(check.brief_id),
+    alt_id: optText(check.alt_id),
+    conformance_pct: num(check.conformance_pct),
+    summary: text(check.summary),
+    ...(skipped ? { skipped: true } : {}),
+    ...(skipped || reason ? { reason } : {}),
+  }
+}
+
+function metadataSnapshot(value: unknown): Record<string, string> | null {
+  if (!isRecord(value)) return null
+  const entries = Object.entries(value).flatMap(([table, hash]) => (typeof hash === 'string' && hash ? [[table, hash] as const] : []))
+  return entries.length ? Object.fromEntries(entries) : null
+}
+
 export function normalizeUploadJob(raw: unknown): UploadJob {
   const summary = normalizeJobSummary(raw)
   if (!summary || !isRecord(raw)) throw new Error('업로드 작업 응답 형식이 계약과 다릅니다 (job_id 필요).')
@@ -333,12 +448,21 @@ export function normalizeUploadJob(raw: unknown): UploadJob {
   const changes = isRecord(raw.changes) ? raw.changes : null
   const qa = isRecord(raw.qa) ? raw.qa : null
   const check = isRecord(raw.relayout_check) ? raw.relayout_check : null
+  const snapshot = metadataSnapshot(raw.metadata_snapshot)
   return {
     ...summary,
+    stage_errors: summary.stage_errors ?? [],
+    superseded_by: summary.superseded_by ?? null,
+    review_reason: summary.review_reason ?? null,
     parent_rev: optText(raw.parent_rev),
     effective_date: optText(raw.effective_date),
     profile: optText(raw.profile),
-    files: records(raw.files).map((f) => ({ name: text(f.name), floor: optText(f.floor), bytes: num(f.bytes) })),
+    files: records(raw.files).map((f) => ({
+      name: text(f.name),
+      floor: optText(f.floor),
+      bytes: num(f.bytes),
+      ...(optText(f.sha256) ? { sha256: optText(f.sha256) } : {}),
+    })),
     floors_uploaded: texts(raw.floors_uploaded),
     floors_inherited: texts(raw.floors_inherited),
     steps: records(raw.steps).map(normalizeStep),
@@ -353,9 +477,8 @@ export function normalizeUploadJob(raw: unknown): UploadJob {
     impact: records(raw.impact).map((i) => ({ generator: text(i.generator), title_ko: text(i.title_ko, text(i.generator)), risk_tier: text(i.risk_tier) })),
     artifacts: records(raw.artifacts).map((a) => ({ generator: text(a.generator), status: text(a.status) })),
     qa: qa ? normalizeQa(qa) : null,
-    relayout_check: check
-      ? { brief_id: text(check.brief_id), alt_id: optText(check.alt_id), conformance_pct: num(check.conformance_pct), summary: text(check.summary) }
-      : null,
+    relayout_check: check ? normalizeJobCheck(check) : null,
+    ...(snapshot ? { metadata_snapshot: snapshot } : {}),
     error: optText(raw.error) ?? (isRecord(raw.error) ? optText(raw.error.message) : null),
   }
 }
@@ -383,6 +506,8 @@ export function normalizeMetadataResult(raw: unknown): MetadataUploadResult {
 export function normalizeMetadataStatus(raw: unknown): MetadataStatus[] {
   return records(raw).map((s) => ({
     kind: text(s.kind),
+    ...(optText(s.label_ko) ? { label_ko: optText(s.label_ko) } : {}),
+    ...(optText(s.description_ko) ? { description_ko: optText(s.description_ko) } : {}),
     present: s.present === true,
     rows: num(s.rows),
     updated_at: optText(s.updated_at),

@@ -189,11 +189,27 @@ describe('appReducer: chat runs', () => {
     // A later patch of one field goes through normalization too.
     state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route/walk_m', value: '90' }] }])
     expect(state.ui.route?.walk_m).toBe(90)
-    // A route and a journey are drawn alone: showing the journey replaces the route (contract §3).
-    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: journey }] }])
+    // The backend explicitly clears the route when a later answer draws a journey.
+    state = run(state, [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/journey', value: journey },
+          { op: 'replace', path: '/route', value: null },
+        ],
+      },
+    ])
     expect(state.ui.route).toBeNull()
     expect(state.ui.journey?.stops).toHaveLength(2)
-    state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: route }] }])
+    state = run(state, [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/route', value: route },
+          { op: 'replace', path: '/journey', value: null },
+        ],
+      },
+    ])
     expect(state.ui.route?.origin.ref).toBe('ENT-1')
     expect(state.ui.journey).toBeNull()
     state = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/route', value: null }] }])
@@ -216,6 +232,9 @@ describe('appReducer: chat runs', () => {
         delta: [
           { op: 'replace', path: '/route', value: route },
           { op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] },
+          { op: 'replace', path: '/heatmap', value: null },
+          { op: 'replace', path: '/edges', value: [] },
+          { op: 'replace', path: '/compareRev', value: null },
         ],
       },
     ])
@@ -226,7 +245,19 @@ describe('appReducer: chat runs', () => {
 
     state = run(state, [
       { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] }, { op: 'replace', path: '/compareRev', value: 'R1' }] },
-      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: flow }, { op: 'replace', path: '/floor', value: '3F' }] },
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/flow', value: flow },
+          { op: 'replace', path: '/floor', value: '3F' },
+          { op: 'replace', path: '/route', value: null },
+          { op: 'replace', path: '/journey', value: null },
+          { op: 'replace', path: '/heatmap', value: null },
+          { op: 'replace', path: '/highlights', value: [] },
+          { op: 'replace', path: '/edges', value: [] },
+          { op: 'replace', path: '/compareRev', value: null },
+        ],
+      },
     ])
     // Showing a flow clears the journey, the route and the analysis displays (contract §3: ui_show_flow).
     expect(state.ui).toMatchObject({ route: null, journey: null, heatmap: null, highlights: [], edges: [], compareRev: null })
@@ -244,7 +275,16 @@ describe('appReducer: chat runs', () => {
     expect(state.ui.highlights).toHaveLength(1)
 
     // Showing a journey or a route clears the flow.
-    const withJourney = run(state, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/journey', value: journey }] }])
+    const withJourney = run(state, [
+      {
+        type: 'STATE_DELTA',
+        delta: [
+          { op: 'replace', path: '/journey', value: journey },
+          { op: 'replace', path: '/flow', value: null },
+          { op: 'replace', path: '/highlights', value: [] },
+        ],
+      },
+    ])
     expect(withJourney.ui.flow).toBeNull()
     expect(withJourney.ui.highlights).toEqual([])
     const withRoute = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/route', value: route }] })
@@ -257,6 +297,13 @@ describe('appReducer: chat runs', () => {
     const bad = run(cleared, [{ type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: { title: 'x' } }] }])
     expect(bad.ui.flow).toBeNull()
     expect(bad.ui.highlights).toHaveLength(1)
+
+    const popupAfterHighlight = run(createAppState(ui), [
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C05' }] }] },
+      { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/flow', value: flow }] },
+    ])
+    expect(popupAfterHighlight.ui.flow).not.toBeNull()
+    expect(popupAfterHighlight.ui.highlights).toHaveLength(1)
   })
 
   it('applies the overlay rule to user patches too (closing a card clears only its overlay)', () => {
@@ -351,7 +398,7 @@ describe('appReducer: chat runs', () => {
     expect(lastRun(aborted)).toMatchObject({ status: 'stopped', endedAt: 20 })
 
     const cut = appReducer(appReducer(state, { type: 'chat/user', id: 'u3', text: 'again', at: 10 }), { type: 'chat/closed', at: 30 })
-    expect(lastRun(cut)).toMatchObject({ status: 'error', endedAt: 30 })
+    expect(lastRun(cut)).toMatchObject({ status: 'incomplete', endedAt: 30 })
     // Closing after the run ended changes nothing.
     expect(appReducer(cut, { type: 'chat/closed' })).toBe(cut)
   })
@@ -397,5 +444,126 @@ describe('appReducer: chat runs', () => {
         { op: 'replace', path: '', value: {} },
       ]),
     ).toEqual(['heatmap', 'edges', '/'])
+  })
+})
+
+describe('appReducer: a stream that ends early', () => {
+  it('keeps the partial answer and marks it incomplete, with the reason when the connection broke', () => {
+    let state = appReducer(createAppState(ui), { type: 'chat/user', id: 'u', text: '비교해줘', at: 0 })
+    state = run(state, [
+      { type: 'RUN_STARTED', thread_id: 't1', run_id: 'r1' },
+      { type: 'TOOL_CALL_START', tool_call_id: 'c1', tool_name: 'analytics_productivity' },
+      { type: 'TEXT_MESSAGE_CONTENT', message_id: 'm', delta: '3층 효율은 ' },
+    ])
+    const cut = appReducer(state, { type: 'chat/closed', detail: '응답을 받는 중 연결이 끊겼습니다: network error', at: 50 })
+    expect(cut.chat.running).toBe(false)
+    expect(lastRun(cut)).toMatchObject({ status: 'incomplete', answer: '3층 효율은 ', error: expect.stringContaining('network error'), endedAt: 50 })
+    expect(lastRun(cut).steps[0]).toMatchObject({ status: 'error' })
+    // The thread survives, so the next question continues the conversation.
+    expect(cut.chat.threadId).toBe('t1')
+    // Not a user abort.
+    expect(appReducer(state, { type: 'chat/closed', aborted: true, at: 50 }).chat.items.at(-1)).toMatchObject({ run: { status: 'stopped' } })
+  })
+})
+
+describe('appReducer: panel requests are kept per panel type', () => {
+  const layoutPanel = (alternatives: unknown[] = [{ id: 'ALT-3F-A', moves: [] }]) =>
+    ({ type: 'layout', payload: { rev: 'R2', floors: ['3F'], alternatives } }) as const
+
+  it('keeps the layout alternatives when a later panel of another type arrives (A, then B)', () => {
+    let state = createAppState(ui)
+    state = appReducer(state, { type: 'chat/event', event: { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: layoutPanel() }] } })
+    expect(state.panelSeq).toBe(1)
+    expect(state.panels.layout).toEqual({ type: 'layout', payload: layoutPanel().payload, seq: 1, rev: 'R2' })
+
+    state = appReducer(state, { type: 'chat/event', event: { type: 'STATE_DELTA', delta: [{ op: 'replace', path: '/panel', value: { type: 'journey', payload: {} } }] } })
+    expect(state.ui.panel?.type).toBe('journey')
+    expect(state.panelSeq).toBe(2)
+    // The journey does not erase the layout result; it is remembered as a panel too.
+    expect(state.panels.layout?.seq).toBe(1)
+    expect(state.panels.layout?.payload.alternatives).toEqual([{ id: 'ALT-3F-A', moves: [] }])
+    expect(state.panels.journey).toMatchObject({ type: 'journey', seq: 2 })
+
+    // Closing the panel keeps what was prepared for the tabs.
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/panel', value: { type: 'none', payload: {} } }] })
+    expect(state.ui.panel?.type).toBe('none')
+    expect(state.panels.layout?.seq).toBe(1)
+    expect((state.panels as Record<string, unknown>).none).toBeUndefined()
+  })
+
+  it('replaces a request of the same type and notes the revision on screen when it arrived', () => {
+    let state = createAppState(ui)
+    const open = (payload: Record<string, unknown>) =>
+      (state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/panel', value: { type: 'uploads', payload } }] }))
+    open({ job_id: 'J1' })
+    open({ job_id: 'J2' })
+    expect(state.panels.uploads).toMatchObject({ payload: { job_id: 'J2' }, seq: 2, rev: 'R2' })
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/rev', value: 'R1' }, { op: 'replace', path: '/panel', value: layoutPanel() }] })
+    expect(state.panels.layout).toMatchObject({ seq: 3, rev: 'R1' })
+    // An invalid patch changes nothing, the requests included.
+    const before = state.panels
+    expect(appReducer(state, { type: 'ui/patch', ops: [{ op: 'remove', path: '/missing/deep' }] }).panels).toBe(before)
+  })
+
+  it('retires change-list and artifact requests when the revision changes on its own, but not layout or upload ones', () => {
+    let state = createAppState(ui)
+    const show = (type: string, payload: Record<string, unknown>) =>
+      (state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/panel', value: { type, payload } }] }))
+    show('changes', { rev_from: 'R0', rev_to: 'R1' })
+    show('artifact', { generator: 'area-table' })
+    show('uploads', { job_id: 'J1' })
+    show('layout', layoutPanel().payload)
+    expect(Object.keys(state.panels).sort()).toEqual(['artifact', 'changes', 'layout', 'uploads'])
+
+    // A request that arrives together with its revision keeps both.
+    state = appReducer(state, {
+      type: 'ui/patch',
+      ops: [{ op: 'replace', path: '/rev', value: 'R1' }, { op: 'replace', path: '/panel', value: { type: 'changes', payload: { rev_from: 'R0', rev_to: 'R1' } } }],
+    })
+    expect(state.panels.changes?.seq).toBe(5)
+    // The user picks another revision: the review tab follows the screen again.
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/rev', value: 'R2' }] })
+    expect(Object.keys(state.panels).sort()).toEqual(['layout', 'uploads'])
+    // So does a change of the comparison.
+    show('artifact', { generator: 'area-table' })
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/compareRev', value: 'R0' }] })
+    expect(state.panels.artifact).toBeUndefined()
+    expect(state.panels.layout).toBeDefined()
+  })
+
+  it('does not touch the requests for other UI changes', () => {
+    let state = createAppState(ui)
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/panel', value: { type: 'changes', payload: { rev_to: 'R1' } } }] })
+    const panels = state.panels
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/floor', value: '1F' }] })
+    state = appReducer(state, { type: 'ui/patch', ops: [{ op: 'replace', path: '/highlights', value: [{ unit_code: '3F-C01' }] }] })
+    expect(state.panels).toBe(panels)
+    expect(state.panelSeq).toBe(1)
+  })
+})
+
+describe('appReducer: conversation thread and data epoch', () => {
+  it('continues a restored thread, follows the thread the server reports and forgets it on a new conversation', () => {
+    let state = createAppState(ui, { threadId: 'restored-thread' })
+    expect(state.chat).toEqual({ threadId: 'restored-thread', runId: null, running: false, items: [] })
+    expect(createAppState(ui, { threadId: null }).chat.threadId).toBeNull()
+    expect(createAppState(ui, { threadId: '' }).chat.threadId).toBeNull()
+    expect(createAppState(ui).chat.threadId).toBeNull()
+
+    state = appReducer(state, { type: 'chat/user', id: 'u', text: '이어서', at: 0 })
+    state = run(state, [{ type: 'RUN_STARTED', thread_id: 'server-thread', run_id: 'r' }, { type: 'RUN_FINISHED', thread_id: 'server-thread', run_id: 'r' }])
+    expect(state.chat.threadId).toBe('server-thread')
+    expect(appReducer(state, { type: 'chat/reset' }).chat.threadId).toBeNull()
+  })
+
+  it('counts changes of server data so open panels can reload', () => {
+    const state = createAppState(ui)
+    expect(state.dataEpoch).toBe(0)
+    const next = appReducer(appReducer(state, { type: 'data/changed' }), { type: 'data/changed' })
+    expect(next.dataEpoch).toBe(2)
+    // Nothing else moves with it.
+    expect(next.ui).toBe(state.ui)
+    expect(next.chat).toBe(state.chat)
+    expect(next.panelSeq).toBe(0)
   })
 })

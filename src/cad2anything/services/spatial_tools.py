@@ -41,8 +41,10 @@ BASE_FIELDS = (
     "frontage_m",
     "walk_to_escalator_m",
     "nearest_escalator_id",
+    "escalator_fallback",
     "walk_to_entrance_m",
     "nearest_entrance_id",
+    "entrance_fallback",
 )
 KPI_COLUMNS = {
     "sales": "sales_krw",
@@ -67,6 +69,8 @@ BOOL_FIELDS = (
     "entrance_front",
     "main_walkway",
     "low_efficiency",
+    "escalator_fallback",
+    "entrance_fallback",
 )
 AGGREGATES = ("count", "sum", "mean", "median", "min", "max", "rate")
 OP_ALIASES = {
@@ -119,15 +123,40 @@ FIELD_NOTES = {
         "(층별 최댓값=1). 도면 구조로 계산한 값이며 관측한 유동이 아니에요."
     ),
     "main_walkway": "main_walkway는 traffic_potential 0.5 이상인 매장이에요.",
-    "distance_m": "distance_m는 통로망을 따라 걷는 거리예요(매장은 통로에 접한 면의 가운데 기준).",
+    "distance_m": "distance_m는 통로망을 따라 걷는 거리예요(매장은 통로에 접한 면의 가운데 기준). 1m 격자 근사라 실제보다 조금 길 수 있어요.",
+    "walk_to_escalator_m": (
+        "walk_to_escalator_m는 같은 층에서 가장 가까운 에스컬레이터까지 통로를 따라 걷는 거리예요"
+        "(1m 격자 근사라 실제보다 조금 길 수 있어요). 통로로 이어지지 않은 매장은 직선거리 추정이고 "
+        "escalator_fallback이 true예요."
+    ),
+    "escalator_fallback": (
+        "escalator_fallback은 통로로 에스컬레이터에 이어지지 않아 walk_to_escalator_m를 직선거리로 추정한 매장이에요."
+    ),
+    "walk_to_entrance_m": (
+        "walk_to_entrance_m는 같은 층에서 가장 가까운 건물 출입구까지 통로를 따라 걷는 거리예요"
+        "(1m 격자 근사). 통로로 이어지지 않은 매장은 직선거리 추정이고 entrance_fallback이 true예요."
+    ),
+    "entrance_fallback": (
+        "entrance_fallback은 통로로 출입구에 이어지지 않아 walk_to_entrance_m를 직선거리로 추정한 매장이에요."
+    ),
     "adjacent_to": "adjacent_to는 벽을 맞댄 매장이에요(대상 매장 자신은 뺍니다).",
 }
 ROUTE_CAVEAT = {
-    "escalator": "통로망 최단 경로로 계산한 걷는 거리예요. 에스컬레이터를 타는 구간과 층마다 갈아타는 거리는 넣지 않았어요.",
-    "elevator": "통로망 최단 경로로 계산한 걷는 거리예요. 엘리베이터를 기다리고 타는 구간은 넣지 않았어요.",
-    "stairs": "통로망 최단 경로로 계산한 걷는 거리예요. 계단을 오르내리는 구간은 넣지 않았어요.",
+    "escalator": "통로망 최단 경로로 계산한 걷는 거리예요(1m 격자 근사라 실제보다 조금 길 수 있어요). 에스컬레이터를 타는 구간과 층마다 갈아타는 거리는 넣지 않았어요.",
+    "elevator": "통로망 최단 경로로 계산한 걷는 거리예요(1m 격자 근사라 실제보다 조금 길 수 있어요). 엘리베이터를 기다리고 타는 구간은 넣지 않았어요.",
+    "stairs": "통로망 최단 경로로 계산한 걷는 거리예요(1m 격자 근사라 실제보다 조금 길 수 있어요). 계단을 오르내리는 구간은 넣지 않았어요.",
 }
-STRAIGHT_NOTE = "통로로 이어지지 않아 직선거리로 계산했어요."
+GRID_NOTE = "보행거리는 통로를 1m 격자로 나눠 8방향으로 이은 근사값이라 실제보다 조금 길 수 있어요."
+STRAIGHT_NOTE = "통로로 이어지지 않아 직선거리로 어림잡았어요(실제 걷는 거리는 이보다 길어요)."
+LINK_NAMES_KO = {"escalator": "에스컬레이터", "elevator": "엘리베이터", "stairs": "계단"}
+STRAIGHT_FLOOR_NOTE = (
+    "두 층을 잇는 통로 경로를 찾지 못해 각 층에서 가장 가까운 {link}까지의 직선거리로 어림잡았어요"
+    "(실제 걷는 거리는 이보다 길어요)."
+)
+UNKNOWN_WALK_NOTE = (
+    "두 층을 잇는 {link}를 도면에서 찾지 못해 걷는 거리를 계산하지 못했어요(walk_m은 비어 있어요). "
+    "via를 바꾸거나 도면의 수직동선을 확인해 주세요."
+)
 VIA_ALIASES = {
     "escalator": "escalator",
     "에스컬레이터": "escalator",
@@ -170,8 +199,13 @@ def _bool(value: Any) -> bool:
     raise ToolError(f"참/거짓 값이 필요합니다: {value}")
 
 
-def _round5(meters: float) -> int:
-    return int(5 * round(float(meters) / 5.0))
+def _round5(meters: float | None) -> int | None:
+    """Walking distance rounded to 5 m; a short non-zero walk keeps 1 m so it is never shown as 0 m."""
+    if meters is None:
+        return None
+    value = float(meters)
+    rounded = int(5 * round(value / 5.0))
+    return rounded if rounded or value <= 0 else max(int(round(value)), 1)
 
 
 def _floor_ko(code: str | None) -> str:
@@ -229,6 +263,7 @@ class SpatialTools:
                 ].astype(bool)
             period = None
             estimated = False
+            annualization = None
             if model.revision.kind == RevisionKind.ACTUAL and self._has_sales(rev):
                 try:
                     kpi = self.productivity_frame(rev, "unit", start, end)
@@ -236,6 +271,7 @@ class SpatialTools:
                     kpi = None
                 if kpi is not None and len(kpi):
                     period = kpi.attrs.get("period")
+                    annualization = kpi.attrs.get("annualization")
                     columns = [c for c in KPI_COLUMNS if c in kpi]
                     kpi = kpi[["unit_code", *columns]].rename(columns=KPI_COLUMNS)
                     frame = frame.merge(kpi, on="unit_code", how="left")
@@ -254,6 +290,7 @@ class SpatialTools:
                 except (ToolError, KeyError, ValueError):
                     pass
             frame.attrs["period"] = period
+            frame.attrs["annualization"] = annualization
             frame.attrs["kind"] = model.revision.kind.value
             frame.attrs["estimated"] = estimated
             return frame
@@ -500,6 +537,8 @@ class SpatialTools:
         }
         if table.attrs.get("period"):
             result["period"] = table.attrs["period"]
+        if table.attrs.get("annualization"):
+            result["annualization"] = table.attrs["annualization"]
         if metric_specs:
             result["totals"] = {spec[0]: self._aggregate(matched, spec) for spec in metric_specs}
         if groups:
@@ -535,6 +574,18 @@ class SpatialTools:
             result["rows"] = ordered[columns].head(limit).to_dict(orient="records")
             result["truncated"] = len(ordered) > limit
         notes = [FIELD_NOTES[f] for f in [*sorted(used), *groups, sort_key or ""] if f in FIELD_NOTES]
+        touched = {*used, *groups, sort_key or ""}
+        for column, flag, label in (
+            ("walk_to_escalator_m", "escalator_fallback", "에스컬레이터"),
+            ("walk_to_entrance_m", "entrance_fallback", "출입구"),
+        ):
+            if column in touched and flag in matched:
+                fallbacks = int(matched[flag].fillna(False).astype(bool).sum())
+                if fallbacks:
+                    notes.append(
+                        f"이 중 {fallbacks}개 매장은 통로로 {label}에 이어지지 않아 {column}가 "
+                        f"직선거리 추정이에요({flag}=true)."
+                    )
         if any(
             c in KPI_COLUMNS.values()
             for c in [*used, *groups, sort_key or ""] + [s[2] or "" for s in metric_specs]
@@ -701,10 +752,12 @@ class SpatialTools:
                 if a.entity_id == b.entity_id:
                     continue
                 route = planner.route_between(a, b, via)
-                options.append((route.straight, route.length_m, b.entity_id, a, b, route))
+                length = route.length_m
+                order = (route.straight, length is None, length or 0.0, b.entity_id)
+                options.append((order, length, b.entity_id, a, b, route))
         if not options:
             raise ToolError("출발지와 도착지가 같습니다.")
-        options.sort(key=lambda o: (o[0], o[1], o[2]))
+        options.sort(key=lambda o: o[0])
         _, _, _, start, finish, route = options[0]
         origin_place, destination_place = self._place(start), self._place(finish)
         for place, entity in ((origin_place, start), (destination_place, finish)):
@@ -712,26 +765,40 @@ class SpatialTools:
         transitions = []
         if route.via and start.floor != finish.floor:
             floors, height = self._vertical(rev, start.floor or "", finish.floor or "")
-            transitions.append(
-                {
-                    "from_floor": start.floor,
-                    "to_floor": finish.floor,
-                    "via": route.via,
-                    "floors": floors,
-                    "height_m": height,
-                }
-            )
-        legs = [{"floor": leg.floor, "walk_m": _round5(leg.length_m)} for leg in route.legs]
+            transition = {
+                "from_floor": start.floor,
+                "to_floor": finish.floor,
+                "via": route.via,
+                "floors": floors,
+                "height_m": height,
+            }
+            if route.straight:
+                transition["straight"] = True
+            transitions.append(transition)
+        legs = [
+            {"floor": leg.floor, "walk_m": _round5(leg.length_m)}
+            | ({"straight": True} if route.straight else {})
+            for leg in route.legs
+        ]
+        walk_m = _round5(route.length_m)
+        link_name = LINK_NAMES_KO.get(via, via)
+        caveat = ROUTE_CAVEAT[via]
+        if route.straight and walk_m is None:
+            caveat = f"{caveat} {UNKNOWN_WALK_NOTE.format(link=link_name)}"
+        elif route.straight and start.floor != finish.floor:
+            caveat = f"{caveat} {STRAIGHT_FLOOR_NOTE.format(link=link_name)}"
+        elif route.straight:
+            caveat = f"{caveat} {STRAIGHT_NOTE}"
         result: dict[str, Any] = {
             "title": f"{origin_place['label']} → {destination_place['label']}",
             "rev": rev,
             "via_type": via,
             "origin": origin_place,
             "destination": destination_place,
-            "walk_m": _round5(route.length_m),
+            "walk_m": walk_m,
             "legs": legs,
             "transitions": transitions,
-            "caveat": ROUTE_CAVEAT[via] + (f" {STRAIGHT_NOTE}" if route.straight else ""),
+            "caveat": caveat,
         }
         if route.straight:
             result["straight"] = True
@@ -747,6 +814,7 @@ class SpatialTools:
                 if len(alternatives) == 3:
                     break
             result["alternatives"] = alternatives
+
         if with_geometry:
             result["segments"] = [
                 {"floor": leg.floor, "points": [list(p) for p in leg.points]}

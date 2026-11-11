@@ -17,6 +17,7 @@ from cad2anything.layout import (
     score_assignment,
     to_hypothetical_revision,
 )
+from cad2anything.layout.whatif import unit_info
 from cad2anything.model import (
     ChangeSet,
     ChangeType,
@@ -260,6 +261,37 @@ def test_affinity_bonus_is_netted_at_the_reference_layout(setup):
     assert s01["expected_sales"] == pytest.approx(observed["3F-S01"] / (1 + bonus))
 
 
+def test_stationary_reference_has_uncertainty_when_new_neighbors_change_affinity(setup):
+    _, brands, features, pairs, productivity, params = setup
+    affinity = pd.DataFrame({"level": ["brand"], "item_a": ["B304"], "item_b": ["B307"], "lift": [100.0]})
+    changed = dict(BASE, **{"3F-S02": "B307", "3F-S04": "B305"})
+    scored = score_assignment(
+        changed, features, brands, params, affinity_pairs=affinity, adjacency_pairs=pairs
+    ).units.set_index("unit_code")
+    stationary = scored.loc["3F-S01"]
+    observed = productivity.set_index("unit_code").loc["3F-S01", "sales"]
+    assert stationary["brand_id"] == BASE["3F-S01"]
+    assert stationary["expected_sales"] == pytest.approx(observed * 1.15)
+    assert stationary["half_width_log"] > 0
+    assert stationary["low"] < stationary["expected_sales"] < stationary["high"]
+
+
+def test_straight_escalator_fallback_is_flagged_and_imputed():
+    features = pd.DataFrame(
+        {
+            "unit_code": ["A", "B", "C", "D"],
+            "floor": ["1F", "1F", "1F", "2F"],
+            "area_m2": [100.0] * 4,
+            "walk_to_escalator_m": [10.0, 1.0, math.nan, 3.0],
+            "escalator_fallback": [False, True, False, True],
+        }
+    )
+    units = unit_info(features)
+    assert not units["A"].walk_imputed and units["A"].walk_m == 10.0
+    assert all(units[code].walk_imputed for code in ("B", "C", "D"))
+    assert all(units[code].walk_m == 10.0 for code in ("B", "C", "D"))
+
+
 def _verify_constraints(alt, brands, features, pairs, constraints):
     info = brands.set_index("brand_id")
     feats = features.set_index("unit_code")
@@ -432,9 +464,12 @@ def test_exact_search_matches_brute_force_optimum(setup):
         alternatives
     )
     for alt in alternatives[1:]:
-        assert alt.delta <= first.delta * (1 + 1e-9) and "ALT-1(최적해)" in alt.summary
+        assert alt.search_status in ("optimal_diverse", "feasible")
+        assert "ALT-1(100원 단위로 반올림한 모델과 제약 안에서 최적해)" in alt.summary
         assert alt.constraint_checks["satisfied"].all()
         assert alt.net_upper_bound_krw == first.net_upper_bound_krw
+        assert alt.objective_rounding_krw == 100
+        assert alt.bound_krw >= alt.bound_krw - alt.gap_krw
 
 
 def test_exact_search_switch_and_fallback(setup, monkeypatch):
@@ -458,6 +493,38 @@ def test_exact_search_switch_and_fallback(setup, monkeypatch):
     monkeypatch.setattr(exact, "solve", lambda *args, **kwargs: None)  # e.g. OR-Tools missing
     fallback, fallback_moves = run()
     assert fallback_moves == plain_moves and fallback[0].search_status == "heuristic"
+
+
+def test_proven_solver_result_does_not_label_retained_annealing_state_optimal(setup, monkeypatch):
+    _, brands, features, pairs, _, params = setup
+    constraints = LayoutConstraints(floors=FLOORS, max_moves=3)
+
+    def worse_solution(search, *args, **kwargs):
+        return exact.ExactResult(
+            state=list(search.base),
+            optimal=True,
+            bound=search.objective_of(search.base) + 1e9,
+            seconds=0.0,
+        )
+
+    monkeypatch.setattr(exact, "solve", worse_solution)
+    alternatives = generate_alternatives(
+        BASE,
+        features,
+        brands,
+        pairs,
+        params,
+        constraints,
+        n_alternatives=1,
+        seed=5,
+    )
+    assert alternatives and alternatives[0].net_delta > 0
+    first = alternatives[0]
+    assert first.search_status == "feasible" and "최적해 확인" not in first.summary
+    assert first.objective_rounding_krw == 100
+    assert first.bound_krw >= first.net_delta
+    assert first.gap_krw == pytest.approx(first.bound_krw - first.net_delta)
+    assert first.to_dict()["gap_krw"] == first.gap_krw
 
 
 def test_hypothetical_revision_matches_moves(setup):

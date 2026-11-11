@@ -34,7 +34,14 @@ const CAVEATS: Record<string, string> = {
   egress: '도면의 통로 폭과 통로망 거리로 계산한 점검이에요. 법정 피난 거리 판정이 아니고 집기와 임시 구조물은 넣지 않았어요. (모의 데이터)',
 }
 
-const LEGEND = { low: '적음', high: '많음', unit: '명(추정)', note: '결제 순서를 통로망 최단 경로로 이어 모은 값' }
+// I11: pass-by counts are weighted trip legs, not unique people — the unit says "회(추정 통과)" and the
+// note makes clear these are passes along the corridor network, not a unique-visitor headcount.
+const LEGEND = {
+  low: '적음',
+  high: '많음',
+  unit: '회(추정 통과)',
+  note: '결제 순서를 통로망 최단 경로로 이어 센 가중 통과 횟수예요. 고유 방문자 수가 아니에요.',
+}
 
 const WARNING_COLOR = '#c62828'
 
