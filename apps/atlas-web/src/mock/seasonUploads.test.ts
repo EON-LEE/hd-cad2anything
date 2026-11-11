@@ -128,7 +128,8 @@ describe('mock seasonal relayout', () => {
 
     // Before a decision: the alternative with the best net effect (ALT-1), the brief's downtime weeks.
     const best = await source.phaseRelayout('FW2026', {})
-    expect(best).toMatchObject({ brief_id: 'FW2026', alt_id: 'ALT-1', rev_id: 'FW2026-A1', params: { crews: 2, fitout_weeks: 2, temporary_sales_ratio: 0.6, use_temporary: true } })
+    expect(best).toMatchObject({ brief_id: 'FW2026', alt_id: 'ALT-1', rev_id: 'FW2026-A1', basis: 'best_net_fallback', params: { crews: 2, fitout_weeks: 2, temporary_sales_ratio: 0.6, use_temporary: true } })
+    expect(best.basis_note).toContain('사람이 결정한 대안은 아니에요')
     expect(best.steps.map((s) => `${s.step}:${s.start_week}-${s.end_week}:${s.action}:${s.unit_code}:${s.brand_name}:${s.waits_for.join(',')}`)).toEqual([
       '1:0-0:exit:3F-E01:Quorelle:',
       '2:0-0:exit:3F-E02:Ilvora Leather:',
@@ -158,8 +159,9 @@ describe('mock seasonal relayout', () => {
     expect((await source.selectRelayoutAlternative('FW2026', { alt_id: 'ALT-2', decided_by: 'MD팀' })).phasing).toMatchObject({ alt_id: 'ALT-2' })
     expect((await source.selectRelayoutAlternative('FW2026', { alt_id: 'ALT-1', decided_by: 'MD팀' })).phasing).toBeNull()
     expect((await source.phaseRelayout('FW2026', {})).alt_id).toBe('ALT-1')
-    // New alternatives drop it too.
-    await source.planRelayout('FW2026', { max_moves: 1 })
+    // A changed plan cannot silently replace the human decision; it needs the explicit flag.
+    await expect(source.planRelayout('FW2026', { max_moves: 1 })).rejects.toMatchObject({ status: 409 })
+    await source.planRelayout('FW2026', { max_moves: 1, replace_decision: true })
     expect((await source.getRelayoutProject('FW2026')).phasing).toBeNull()
   })
 })

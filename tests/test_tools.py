@@ -20,8 +20,11 @@ def toolkit(tmp_path_factory) -> Toolkit:
 
 
 def test_revisions_are_ordered_with_hypothetical_last(toolkit: Toolkit):
-    revisions = [r["rev_id"] for r in toolkit.spatial_list_revisions()["revisions"]]
-    assert revisions == ["R0", "R1", "R2", "H1"]
+    revisions = toolkit.spatial_list_revisions()["revisions"]
+    assert [r["rev_id"] for r in revisions] == ["R0", "R1", "R2", "H1"]
+    # Without transactions no revision has results, and every row says so.
+    assert all(r["has_sales"] is False for r in revisions)
+    assert "has_sales" in toolkit.spatial_list_revisions()["note"]
 
 
 def test_floor_summary_and_find_units(toolkit: Toolkit):
@@ -135,3 +138,63 @@ def test_hypothetical_move_and_swap(toolkit: Toolkit):
 def test_unknown_revision_is_a_tool_error(toolkit: Toolkit):
     with pytest.raises(ToolError, match="R7"):
         toolkit.spatial_floor_summary("R7", "3F")
+
+
+def _fake_postgis(monkeypatch, rows, calls: list):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import cad2anything.store as store
+    import cad2anything.store.postgis  # noqa: F401  (binds the submodule attribute for monkeypatching)
+
+    @contextmanager
+    def connect():
+        yield object()
+
+    def nearby_units(conn, rev, unit_code, radius_m):
+        calls.append((rev, unit_code, radius_m))
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
+
+    monkeypatch.setattr(store, "postgis", SimpleNamespace(connect=connect, nearby_units=nearby_units))
+
+
+def test_nearby_units_falls_back_when_postgis_has_no_rows(toolkit: Toolkit, monkeypatch):
+    unit_code = toolkit.spatial_find_units("R0", floor="3F", vacant=False)["units"][0]["unit_code"]
+    memory = toolkit.spatial_nearby_units("R0", unit_code, radius_m=5)
+    assert memory["units"] and memory["source"] == "memory"
+
+    # An uploaded revision lives in the workspace only, so an empty PostGIS answer is not an empty floor.
+    calls: list = []
+    _fake_postgis(monkeypatch, [], calls)
+    monkeypatch.setattr(toolkit, "use_postgis", True)
+    empty = toolkit.spatial_nearby_units("R0", unit_code, radius_m=5)
+
+    assert calls == [("R0", unit_code, 5.0)]
+    assert empty["source"] == "memory_fallback" and "PostGIS에 R0 도면이 없어" in empty["engine"]
+    assert empty["units"] == memory["units"]
+
+
+def test_nearby_units_keeps_postgis_rows_and_reports_failures(toolkit: Toolkit, monkeypatch):
+    unit_code = toolkit.spatial_find_units("R0", floor="3F", vacant=False)["units"][0]["unit_code"]
+    calls: list = []
+    _fake_postgis(monkeypatch, [{"unit_code": "3F-C99", "distance_m": 1.0}], calls)
+    monkeypatch.setattr(toolkit, "use_postgis", True)
+
+    served = toolkit.spatial_nearby_units("R0", unit_code, radius_m=5)
+    assert served["source"] == "postgis" and served["engine"] == "postgis"
+    assert served["units"] == [{"unit_code": "3F-C99", "distance_m": 1.0}]
+
+    _fake_postgis(monkeypatch, RuntimeError("down"), calls)
+    broken = toolkit.spatial_nearby_units("R0", unit_code, radius_m=5)
+    assert broken["source"] == "memory_fallback" and "PostGIS 사용 불가" in broken["engine"]
+    assert broken["units"]
+
+
+def test_find_units_marks_straight_line_walk_estimates(toolkit: Toolkit):
+    nearest = toolkit.spatial_find_units("R2", floor="3F", sort_by="walk_to_escalator_m", limit=5)
+
+    assert all("escalator_fallback" in row for row in nearest["units"])
+    assert not any(row["escalator_fallback"] for row in nearest["units"])
+    assert "notes" not in nearest  # the demo drawing connects every store to a walkway

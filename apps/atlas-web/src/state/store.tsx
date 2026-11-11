@@ -1,12 +1,26 @@
-import { createContext, useCallback, useContext, useReducer, type Dispatch, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useReducer, type Dispatch, type ReactNode } from 'react'
 import type { PatchOperation } from '../lib/jsonPatch'
 import { appReducer, type AppAction, type AppState } from './reducer'
+import { saveThreadId } from './threadStorage'
 
 const StateContext = createContext<AppState | null>(null)
 const DispatchContext = createContext<Dispatch<AppAction> | null>(null)
 
-export function StoreProvider({ initialState, children }: { initialState: AppState; children: ReactNode }) {
+/** `threadStorageKey`: keep the conversation thread id under this sessionStorage key (see threadStorage.ts). */
+export function StoreProvider({
+  initialState,
+  threadStorageKey,
+  children,
+}: {
+  initialState: AppState
+  threadStorageKey?: string
+  children: ReactNode
+}) {
   const [state, dispatch] = useReducer(appReducer, initialState)
+  const threadId = state.chat.threadId
+  useEffect(() => {
+    if (threadStorageKey) saveThreadId(threadStorageKey, threadId)
+  }, [threadStorageKey, threadId])
   return (
     <DispatchContext value={dispatch}>
       <StateContext value={state}>{children}</StateContext>

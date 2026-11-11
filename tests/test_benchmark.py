@@ -190,6 +190,34 @@ def test_store_compare_errors(toolkit, bare) -> None:
         toolkit.analytics_store_compare(floor="12F")
 
 
+def test_benchmark_caveats_follow_the_data_actually_used(meta) -> None:
+    ensure_store_benchmarks(meta.ws, toolkit=meta)
+    original = meta.analytics_store_compare(level="store")
+    assert "다른 점포 실적은 허구로 만든 합성 시연" in original["caveat"]
+    assert "대상 점포 실적은 합성 거래" in original["caveat"]
+
+    kpi_bytes = meta.ws.table_path("store_kpis").read_bytes()
+    accepted = meta.upload_metadata("store_kpis", "fictional_peer_kpis.csv", kpi_bytes)
+    assert accepted["status"] == "accepted"
+    source = next(row for row in meta.metadata_status() if row["kind"] == "store_kpis")
+    comparison = meta.analytics_store_compare(level="store")
+    assert "fictional_peer_kpis.csv" in comparison["caveat"]
+    assert source["uploaded_at"][:10] in comparison["caveat"]
+    assert "대상 점포 실적은 합성 거래" in comparison["caveat"]
+    assert "업로드 자료가 실제 자료인지는 확인하지" in comparison["caveat"]
+
+    review = meta.analytics_relayout_review("R2")
+    assert "합성 거래" in review["caveat"]
+    assert any("실제 고객 데이터를 익명화한 것이 아니에요" in item for item in review["caveats"])
+    assert "fictional_peer_kpis.csv" not in " ".join(review["caveats"])
+
+    stored = meta.ws.table_path("store_kpis").read_bytes()
+    meta.ws.write_bytes("business/store_kpis.csv", stored + b"\n")
+    changed = meta.analytics_store_compare(level="store")
+    assert "업로드 기록과 달라" in changed["caveat"]
+    assert "fictional_peer_kpis.csv" not in changed["caveat"]
+
+
 def test_store_compare_without_peer_rows(meta) -> None:
     path = meta.ws.root / "business" / "store_kpis.csv"
     header = "store_id,period,floor,category,area_m2,sales_krw\n"

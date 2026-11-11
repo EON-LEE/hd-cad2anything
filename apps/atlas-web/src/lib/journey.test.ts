@@ -171,5 +171,13 @@ describe('journey helpers', () => {
     expect(journeySubtitle(journey)).toBe('40대 여성 VIP · 2025-11-08(토) · 고객 C004211')
     const minimal = normalizeJourney({ stops: [{ unit_code: '3F-C01', time: '10:00' }] })!
     expect(journeySummaryChips(minimal)).toEqual(['결제 1회', '1개 층'])
+    // I10: straight-line and unknown legs are surfaced as extra chips.
+    const fallback = normalizeJourney({
+      ...contractExample,
+      summary: { ...contractExample.summary, straight_legs: 2, skipped_legs: 1 },
+    })!
+    expect(fallback.summary.straight_legs).toBe(2)
+    expect(fallback.summary.skipped_legs).toBe(1)
+    expect(journeySummaryChips(fallback)).toEqual(['결제 4회', '3개 층', '총 51만원', '3시간 5분', '추정 이동 640m', '직선 추정 2구간', '거리 계산 불가 1구간'])
   })
 })

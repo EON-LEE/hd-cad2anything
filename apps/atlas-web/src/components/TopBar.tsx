@@ -33,10 +33,12 @@ export function TopBar() {
   }
 
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
-    let next = index + delta
-    if (event.key === 'Home') next = 0
-    if (event.key === 'End') next = floors.length - 1
+    let next = index
+    if (event.key === 'ArrowRight') next = (index + 1) % floors.length
+    else if (event.key === 'ArrowLeft') next = (index - 1 + floors.length) % floors.length
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = floors.length - 1
+    else return
     if (next === index || next < 0 || next >= floors.length) return
     event.preventDefault()
     patchUi([replaceOp('/floor', floors[next].code)])
@@ -124,6 +126,7 @@ export function TopBar() {
                   ref={(el) => {
                     tabRefs.current[i] = el
                   }}
+                  id={`floor-tab-${f.code}`}
                   type="button"
                   role="tab"
                   aria-selected={selected}

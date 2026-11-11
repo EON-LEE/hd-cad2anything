@@ -48,6 +48,7 @@ TOOL_LABELS = {
     "analytics_relayout_review": "지난 개편 성과 추적",
     "upload_list_jobs": "업로드 작업 확인",
     "revision_check_metadata": "도면과 계약 정보 대조",
+    "data_provenance": "데이터 출처 확인",
     "ui_set_floor": "층 이동",
     "ui_show_heatmap": "도면 색칠",
     "ui_highlight_units": "매장 강조",

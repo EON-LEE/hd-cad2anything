@@ -1,8 +1,12 @@
 """Analytics and layout tools for the Toolkit, shared by the MCP server and the Atlas API.
 
 Money values are full-scale, annualized KRW: each synthetic sample receipt is multiplied by its sampling
-weight, and period totals are scaled by 365 / period days so that revisions whose periods differ in
-length compare directly. Estimates carry a label and a caveat; nothing here claims causality.
+weight, and period totals are scaled by 365 / period days. That plain factor assumes every day of the
+year sells the same, so revisions whose periods cover different seasons do not compare directly: the
+annualization block of every productivity answer reports ``seasonality_adjusted`` and a
+``seasonal_factor`` estimated from the observed monthly sales index (``cad2anything.analytics.
+seasonality``) so that a season-corrected total can be read off. Estimates carry a label and a caveat;
+nothing here claims causality.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import json
 import math
 import re
 import threading
+from bisect import bisect_left
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -73,10 +78,18 @@ PRODUCTIVITY_GUIDE = (
 )
 SALES_NOTE = (
     "합성 표본 거래에 표본 가중치를 곱해 전체 규모로 환산하고, 기간 합계를 연 단위로 환산한 값입니다(원). "
-    "면적은 전용면적 기준입니다."
+    "면적은 전용면적 기준입니다. 연환산은 365/기간일수라 계절성을 보정하지 않습니다"
+    "(seasonality_adjusted=false). 기간이 서로 다른 계절을 덮는 개정끼리 견줄 때는 annualization의 "
+    "seasonal_factor로 보정한 값을 쓰세요."
+)
+SEASON_NOTE = (
+    "연환산 계수는 365/기간일수입니다(계절성 미보정). seasonal_factor는 관측 거래로 추정한 월별 지수로 "
+    "기간이 덮은 계절을 보정한 계수이고, seasonal_ratio(=seasonal_factor/factor)를 곱하면 계절 보정 "
+    "연환산값이 됩니다. 월별 지수는 점포 전체 기준이라 카테고리별 계절성 차이는 담지 못합니다."
 )
 HYPOTHETICAL_HINT = (
-    "가상 개정에는 거래 실적이 없습니다. whatif_score_moves나 layout_generate_alternatives로 추정하세요."
+    "이 개정은 가상 개정이라 실제 거래 실적이 없어 실적 지표를 계산할 수 없습니다. 레이아웃 모형의 기대 매출 "
+    "추정치는 whatif_score_moves, layout_generate_alternatives, spatial_query(expected_sales_krw)로 볼 수 있습니다."
 )
 PAIR_CAVEAT = "같은 고객의 구매가 함께 나타나는 정도입니다. 매장 간 동선이나 인과를 뜻하지 않습니다."
 LAYOUT_NOTE = "검토용 대안입니다. 실제 도면이 아니며, 매출 변화는 모형 추정치입니다."
@@ -215,25 +228,37 @@ def _alternative_summary(alternative: Any) -> dict[str, Any]:
 
 
 def _layout_search_note(alternatives: list[Any]) -> dict[str, Any]:
-    """How the alternatives were searched and whether ALT-1 is proven optimal."""
+    """How the alternatives were searched and whether ALT-1 is proven optimal (within the model)."""
     from cad2anything.layout.whatif import format_krw_delta
 
     if not alternatives:
         return {"status": None, "net_upper_bound_krw": None, "note": None}
     first = alternatives[0]
+    rounding = _finite(getattr(first, "objective_rounding_krw", None))
+    scope = f"{rounding:,.0f}원 단위로 반올림한 모델과 제약 안에서" if rounding else "모델과 제약 안에서"
     notes = {
-        "optimal": "정수계획(CP-SAT)으로 풀어 ALT-1보다 기대 매출 증가가 큰 배치가 없음을 확인했습니다.",
+        "optimal": f"정수계획(CP-SAT)으로 풀어 {scope} ALT-1보다 기대 매출 증가가 큰 배치가 없음을 확인했습니다.",
+        "optimal_diverse": (
+            f"정수계획(CP-SAT)으로 풀어 {scope}, 앞선 대안과 다르게 만드는 조건까지 지키면 더 나은 배치가 "
+            "없음을 확인했습니다. 조건 없는 전체 최적해는 아닙니다."
+        ),
         "feasible": (
-            "정수계획(CP-SAT)이 제한 시간 안에 최적 증명을 끝내지 못했습니다. 이론상 최대 기대 매출 증가는 "
-            f"{format_krw_delta(first.net_upper_bound_krw)}입니다."
+            f"이 배치는 정수계획(CP-SAT)의 증명된 해를 채택한 결과가 아니라 {scope} 최적성은 확인하지 "
+            f"않았습니다. 이론상 최대 기대 매출 증가는 {format_krw_delta(first.net_upper_bound_krw)}입니다."
         ),
         "heuristic": "탐색 알고리즘이 찾은 가장 좋은 배치이며, 최적인지는 증명하지 않았습니다.",
     }
-    return {
+    result: dict[str, Any] = {
         "status": first.search_status,
         "net_upper_bound_krw": first.net_upper_bound_krw,
+        "objective_rounding_krw": rounding,
         "note": notes.get(first.search_status),
     }
+    for key in ("bound_krw", "gap_krw"):
+        value = _finite(getattr(first, key, None))
+        if value is not None:
+            result[key] = value
+    return result
 
 
 def _pct(log_points: Any) -> float | None:
@@ -301,45 +326,74 @@ class AnalyticsTools:
     def _actual_revisions(self) -> list[Any]:
         return [r for r in self.ws.revisions() if r.kind == RevisionKind.ACTUAL and r.effective_date]
 
-    def data_through(self) -> date | None:
-        """Last day with transactions (None without transaction data).
+    def _observed_days(self) -> tuple[date, ...]:
+        """Sorted distinct days with transactions (empty without transaction data).
 
         Reads only the timestamp column and caches it per file version, outside the analytics lock, so
         that metadata requests do not wait for the analytics warm-up."""
         path = self.ws.table_path("transactions")
         if path is None:
-            return None
+            return ()
         stat = path.stat()
         key = (path.name, stat.st_size, stat.st_mtime_ns)
-        cached = getattr(self, "_through_cache", None)
+        cached = getattr(self, "_days_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
-        stamps = pd.to_datetime(pd.read_csv(path, usecols=["ts"])["ts"], errors="coerce")
-        through = stamps.max().date() if stamps.notna().any() else None
-        self._through_cache = (key, through)
-        return through
+        stamps = pd.to_datetime(pd.read_csv(path, usecols=["ts"])["ts"], errors="coerce").dropna()
+        days = tuple(sorted({d.date() for d in pd.DatetimeIndex(stamps).normalize().unique()}))
+        self._days_cache = (key, days)
+        return days
 
-    def _has_sales(self, rev: str) -> bool:
-        """True for an actual revision that took effect on or before the last transaction day."""
+    def data_through(self) -> date | None:
+        """Last day with transactions (None without transaction data)."""
+        days = self._observed_days()
+        return days[-1] if days else None
+
+    def _revision_window(self, rev: str) -> tuple[date, date] | None:
+        """Inclusive calendar window an actual revision was the layout: its effective date to the next
+        actual revision's eve (the last transaction day for the newest one)."""
         revision = self._model(rev).revision
         if revision.kind != RevisionKind.ACTUAL or not revision.effective_date:
+            return None
+        days = self._observed_days()
+        if not days:
+            return None
+        actual = sorted(self._actual_revisions(), key=lambda r: r.effective_date or "")
+        ids = [r.rev_id for r in actual]
+        start, end = date.fromisoformat(revision.effective_date), days[-1]
+        if rev in ids:
+            index = ids.index(rev)
+            if index + 1 < len(actual):
+                end = date.fromisoformat(actual[index + 1].effective_date) - timedelta(days=1)
+        return (start, end) if start <= end else None
+
+    def _has_sales(self, rev: str) -> bool:
+        """True for an actual revision whose own period contains observed transaction days.
+
+        A revision that took effect after the last transaction day, and one whose period happens to hold
+        no transaction at all, both have no results to report (matching ``/api/meta``)."""
+        window = self._revision_window(rev)
+        if window is None:
             return False
-        through = self.data_through()
-        return through is not None and revision.effective_date <= through.isoformat()
+        days = self._observed_days()
+        start, end = window
+        index = bisect_left(days, start)
+        return index < len(days) and days[index] <= end
 
     def latest_sales_rev(self) -> str:
         """Latest actual revision with transactions (falls back to the latest actual revision)."""
         actual = sorted(self._actual_revisions(), key=lambda r: r.effective_date or "")
         if not actual:
             raise ToolError("실제 개정이 없습니다.")
-        through = self.data_through()
-        with_sales = [r for r in actual if through is not None and r.effective_date <= through.isoformat()]
+        with_sales = [r for r in actual if self._has_sales(r.rev_id)]
         return (with_sales or actual)[-1].rev_id
 
-    def _fit_revision(self, rev: str) -> str:
+    def _fit_revision(self, rev: str, as_of: date | None = None) -> str:
         """The revision itself when it is actual with sales, else its nearest such ancestor (without
-        transaction data every actual revision qualifies)."""
+        transaction data every actual revision qualifies). ``as_of`` ignores later revisions."""
         through = self.data_through()
+        if as_of is not None:
+            through = as_of if through is None else min(through, as_of)
 
         def usable(revision: Any) -> bool:
             return revision.kind == RevisionKind.ACTUAL and (
@@ -388,12 +442,23 @@ class AnalyticsTools:
             raise ToolError(f"요청한 기간에 거래 데이터가 없습니다(데이터 기간 {first}~{last}).")
         return s.isoformat(), e.isoformat(), (e - s).days + 1
 
-    def revision_period(self, rev: str, start: Any = None, end: Any = None) -> tuple[str, str, int]:
-        """Inclusive analysis period of an actual revision: its effective date to the next one's eve."""
+    def revision_period(
+        self, rev: str, start: Any = None, end: Any = None, as_of: Any = None
+    ) -> tuple[str, str, int]:
+        """Inclusive analysis period of an actual revision: its effective date to the next one's eve.
+
+        ``as_of`` (``YYYY-MM-DD``) cuts the period off at that day, so that a plan made on a date never
+        sees transactions recorded after it.
+        """
         revision = self._model(rev).revision
         if revision.kind != RevisionKind.ACTUAL:
             raise ToolError(HYPOTHETICAL_HINT)
         first, last = self._data_range()
+        cutoff = _parse_date(as_of, "as_of", end=True)
+        if cutoff is not None:
+            last = min(last, cutoff)
+            if last < first:
+                raise ToolError(f"as_of {cutoff} 이전에는 거래 데이터가 없습니다(데이터 시작 {first}).")
         actual = self._actual_revisions()
         ids = [r.rev_id for r in actual]
         rev_start, rev_end = first, last
@@ -407,7 +472,8 @@ class AnalyticsTools:
         if s > e and rev_start > last:
             raise ToolError(
                 f"{rev}는 {rev_start}부터 적용되는 개정이라 아직 거래 실적이 없습니다(데이터 {last}까지). "
-                "기대 매출 추정이 필요하면 whatif_score_moves나 개편 도구를 쓰세요."
+                "이 개정의 실제 실적 지표는 계산할 수 없고, 기대 매출 추정이 필요하면 whatif_score_moves나 "
+                "layout_generate_alternatives, relayout 도구를 쓰세요."
             )
         if s > e:
             raise ToolError(f"{rev}의 분석 기간에 거래 데이터가 없습니다(데이터 기간 {first}~{last}).")
@@ -472,10 +538,65 @@ class AnalyticsTools:
         return item
 
     # Cached computations -----------------------------------------------------------------------------
+    def _season_profile(self, through: date | None = None) -> tuple[dict[int, float], int]:
+        """Observed monthly sales index (mean over a year = 1) and how many months it could use."""
+        key = ("season_profile", self._data_key(), through.isoformat() if through else None)
+
+        def compute() -> tuple[dict[int, float], int]:
+            from cad2anything.analytics.seasonality import (
+                daily_sales,
+                monthly_sales_index,
+                observed_months,
+            )
+
+            daily = daily_sales(self._enriched())
+            return monthly_sales_index(daily, through), observed_months(daily, through)
+
+        return self._memo(key, compute)
+
+    def _monthly_index(self, through: date | None = None) -> dict[int, float]:
+        """Observed monthly sales index, estimated from transactions only (never from calibration)."""
+        return self._season_profile(through)[0]
+
+    def annualization(self, start: str, end: str, days: int) -> dict[str, Any]:
+        """Plain and season-corrected annualization of one period (the frame keeps the plain factor).
+
+        The monthly index uses only transactions up to ``end``, so a revision is never annualized with
+        sales recorded after its own data end.
+        """
+        from cad2anything.analytics.seasonality import seasonal_factor
+
+        first, last = date.fromisoformat(start), date.fromisoformat(end)
+        index, months = self._season_profile(last)
+        factor = 365.0 / days if days else 0.0
+        seasonal = seasonal_factor(first, last, index)
+        note = SEASON_NOTE
+        if months < 12:
+            note = (
+                f"{note} 이 개정의 데이터 종료일까지 {months}개월치만 관측되어 나머지 달은 지수 1(중립)이라 "
+                "계절 보정 효과가 제한적입니다."
+            )
+        return {
+            "method": "calendar_days",
+            "factor": factor,
+            "seasonality_adjusted": False,
+            "seasonal_factor": seasonal or None,
+            "seasonal_ratio": (seasonal / factor) if factor and seasonal else None,
+            "monthly_index": {str(month): round(value, 4) for month, value in sorted(index.items())},
+            "index_source": "observed_transactions",
+            "index_through": end,
+            "index_months": months,
+            "note": note,
+        }
+
     def productivity_frame(
         self, rev: str, level: str = "unit", start: Any = None, end: Any = None
     ) -> pd.DataFrame:
-        """Annualized space productivity for an actual revision's period (``attrs['period']``)."""
+        """Annualized space productivity for an actual revision's period (``attrs['period']``).
+
+        The annualization factor is 365 / period days and does not correct for seasonality;
+        ``attrs['annualization']`` carries the season-corrected factor estimated from observed sales.
+        """
         if level not in LEVELS:
             raise ToolError(f"level은 {', '.join(LEVELS)} 중 하나여야 합니다.")
         s, e, days = self.revision_period(rev, start, end)
@@ -497,6 +618,7 @@ class AnalyticsTools:
                 if column in frame:
                     frame[column] = frame[column] * factor
             frame.attrs["period"] = {"start": s, "end": e, "days": days}
+            frame.attrs["annualization"] = self.annualization(s, e, days)
             return frame
 
         return self._memo(key, compute)
@@ -559,21 +681,39 @@ class AnalyticsTools:
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
-    def _layout_inputs(self, rev: str) -> dict[str, Any]:
-        fit_rev = self._fit_revision(rev)
-        s, e, days = self.revision_period(fit_rev)
-        key = ("layout", rev, fit_rev, s, e, self._data_key(), self._model_key(rev), self._model_key(fit_rev))
+    def _layout_inputs(self, rev: str, as_of: Any = None) -> dict[str, Any]:
+        """Scoring model, assignment and spatial inputs of one revision.
+
+        ``as_of`` (``YYYY-MM-DD``) cuts the fitting period off at that day, so that a plan dated then is
+        not fitted on transactions recorded afterwards. It also keeps revisions that take effect later
+        out of the fit.
+        """
+        cutoff = _parse_date(as_of, "as_of", end=True)
+        fit_rev = self._fit_revision(rev, cutoff)
+        s, e, days = self.revision_period(fit_rev, as_of=cutoff)
+        key = (
+            "layout",
+            rev,
+            fit_rev,
+            s,
+            e,
+            cutoff.isoformat() if cutoff else None,
+            self._data_key(),
+            self._model_key(rev),
+            self._model_key(fit_rev),
+        )
 
         def compute() -> dict[str, Any]:
             from cad2anything.layout import assignment_from_features, fit_scoring_model
 
             brands = self._table("brands")
             model = fit_scoring_model(
-                self.productivity_frame(fit_rev, "unit"), self.unit_features(fit_rev), brands
+                self.productivity_frame(fit_rev, "unit", s, e), self.unit_features(fit_rev), brands
             )
             features = self.unit_features(rev)
             return {
                 "fit_rev": fit_rev,
+                "as_of": cutoff.isoformat() if cutoff else None,
                 "period": {"start": s, "end": e, "days": days},
                 "model": model,
                 "brands": brands,
@@ -585,13 +725,13 @@ class AnalyticsTools:
 
         return self._memo(key, compute)
 
-    def expected_unit_sales(self, rev: str) -> pd.DataFrame:
+    def expected_unit_sales(self, rev: str, as_of: Any = None) -> pd.DataFrame:
         """Expected annual sales per unit from the layout scoring model (estimates; works for any revision)."""
 
         def compute() -> pd.DataFrame:
             from cad2anything.layout import score_assignment
 
-            inputs = self._layout_inputs(rev)
+            inputs = self._layout_inputs(rev, as_of)
             score = score_assignment(
                 inputs["assignment"],
                 inputs["features"],
@@ -606,7 +746,15 @@ class AnalyticsTools:
             )
             return units
 
-        return self._memo(("expected", rev, self._data_key(), self._model_key(rev)), compute)
+        cutoff = _parse_date(as_of, "as_of", end=True)
+        key = (
+            "expected",
+            rev,
+            cutoff.isoformat() if cutoff else None,
+            self._data_key(),
+            self._model_key(rev),
+        )
+        return self._memo(key, compute)
 
     # Productivity ------------------------------------------------------------------------------------
     @staticmethod
@@ -654,6 +802,7 @@ class AnalyticsTools:
     ) -> dict[str, Any]:
         frame = self.productivity_frame(rev, level, start, end)
         period = frame.attrs.get("period")
+        annualization = frame.attrs.get("annualization")
         if floor:
             if "floor" not in frame:
                 raise ToolError("level=category에서는 floor로 거를 수 없습니다.")
@@ -675,6 +824,10 @@ class AnalyticsTools:
             "sales_per_m2": sales / area if area else None,
             "low_efficiency": len(low),
         }
+        ratio = (annualization or {}).get("seasonal_ratio")
+        if ratio:
+            summary["sales_krw_seasonally_adjusted"] = sales * ratio
+            summary["sales_per_m2_seasonally_adjusted"] = (sales * ratio / area) if area else None
         extra: dict[str, Any] = {}
         if level == "unit":
             from cad2anything.analytics.kpi import CATEGORY_WEAK_INDEX
@@ -700,6 +853,7 @@ class AnalyticsTools:
                 "level": level,
                 "floor": floor,
                 "period": period,
+                "annualization": annualization,
                 "summary": summary,
                 "metric": {
                     "name": "sales_per_m2",
@@ -1101,6 +1255,7 @@ class AnalyticsTools:
                     "customer_id": str(r.customer_id),
                     "date": r.date.isoformat(),
                     "stops": int(r.stops),
+                    "receipts": int(r.receipts),
                 }
                 for i, r in enumerate(ranked.iloc[rank : rank + 3].itertuples(index=False))
             ]
@@ -1120,6 +1275,7 @@ class AnalyticsTools:
             "stops": stops,
             "summary": {
                 "stops": len(stops),
+                "receipts": sum(s["receipts"] for s in stops),
                 "floors": list(dict.fromkeys(s["floor"] for s in stops if s["floor"])),
                 "total_krw": sum(s["amount_krw"] for s in stops),
                 "duration_min": duration,
@@ -1138,12 +1294,21 @@ class AnalyticsTools:
         for stop in stops:
             if planner.has_unit(stop["unit_code"]):
                 stop["x"], stop["y"] = planner.access_xy(stop["unit_code"])
-        segments, transitions, walk = [], [], 0.0
+        segments, transitions = [], []
+        walk, legs, skipped, straight, unknown = 0.0, 0, 0, 0, 0
         for a, b in zip(stops, stops[1:], strict=False):
+            legs += 1
             if not (planner.has_unit(a["unit_code"]) and planner.has_unit(b["unit_code"])):
+                skipped += 1
                 continue
             route = planner.route(a["unit_code"], b["unit_code"])
-            walk += route.length_m
+            length = route.length_m
+            if length is None:
+                unknown += 1
+            else:
+                walk += length
+            if route.straight:
+                straight += 1
             for leg in route.legs:
                 if len(leg.points) >= 2:
                     points = [list(point) for point in leg.points]
@@ -1153,6 +1318,7 @@ class AnalyticsTools:
                             "points": points,
                             "from_order": a["order"],
                             "to_order": b["order"],
+                            **({"straight": True} if route.straight else {}),
                         }
                     )
             if route.via:
@@ -1163,11 +1329,31 @@ class AnalyticsTools:
                         "from_floor": a["floor"],
                         "to_floor": b["floor"],
                         "via": route.via,
+                        **({"straight": True} if route.straight else {}),
                     }
                 )
         journey["segments"] = segments
         journey["transitions"] = transitions
-        journey["summary"]["walk_m"] = int(round(walk / 10.0) * 10)
+        summary = journey["summary"]
+        summary["walk_m"] = int(round(walk / 10.0) * 10)
+        summary["legs"] = legs
+        summary["measured_legs"] = legs - skipped - unknown
+        summary["skipped_legs"] = skipped
+        summary["straight_legs"] = straight
+        notes: list[str] = []
+        if skipped or unknown:
+            missing = skipped + unknown
+            summary["walk_complete"] = False
+            notes.append(
+                f"매장 사이 이동 {legs}구간 중 {missing}구간은 도면에서 찾지 못했거나 통로로 이어지지 않아 "
+                f"walk_m에 넣지 않았어요(실제 보행거리는 더 깁니다)."
+            )
+        else:
+            summary["walk_complete"] = True
+        if straight:
+            notes.append(f"{straight}구간은 통로 경로가 없어 직선거리로 어림잡았어요.")
+        if notes:
+            summary["walk_notes"] = notes
 
     def analytics_customer_journey(
         self,

@@ -7,6 +7,7 @@ import {
   PHASING_ACTION_LABELS,
   PHASING_ACTION_TONE,
   defaultExpandedAlternative,
+  phasingBasisNote,
   phasingCycleText,
   phasingDefaults,
   phasingStepRemark,
@@ -34,6 +35,7 @@ function PhasingResult({ phasing, targetAltId }: { phasing: RelayoutPhasing; tar
   const tableId = useId()
   const rows = showAll ? phasing.steps : phasing.steps.slice(0, STEP_ROWS)
   const stale = !!phasing.alt_id && !!targetAltId && phasing.alt_id !== targetAltId
+  const basisNote = phasingBasisNote(phasing)
   const delay = phasing.entry_delay_krw ?? 0
   const params = phasing.params
   const conditions = [params.crews !== null ? `동시 공사 ${params.crews}곳` : null, params.fitout_weeks !== null ? `공사 ${weeksText(params.fitout_weeks)}` : null]
@@ -50,6 +52,7 @@ function PhasingResult({ phasing, targetAltId }: { phasing: RelayoutPhasing; tar
       </summary>
       {open && (
         <div className="phasing-body">
+          {basisNote && <p className={`notice phasing-basis${phasing.basis === 'best_net_fallback' ? ' warn' : ''}`}>{basisNote}</p>}
           {stale && (
             <p className="notice warn">
               {phasing.alt_id} 기준으로 계산한 결과입니다. 지금 대상은 {targetAltId}이니 다시 계산해 주세요.
@@ -216,7 +219,7 @@ export function RelayoutPhasingPanel({
       <p className="muted small">
         {project.selected_alt_id
           ? `결정한 대안 ${project.selected_alt_id}의 공사 순서를 영업 손실이 가장 적도록 정합니다.`
-          : `아직 결정한 대안이 없어 순효과가 가장 큰 ${targetAltId ?? '대안'}의 공사 순서를 정합니다.`}
+          : `아직 결정한 대안이 없어 임시로 ${targetAltId ?? '대안'}(비교 지표가 가장 큰 대안)의 공사 순서를 정합니다. 사람이 결정한 대안은 아니에요.`}
       </p>
       <form className="phasing-form" onSubmit={(event) => void submit(event)}>
         <details className="phasing-options">

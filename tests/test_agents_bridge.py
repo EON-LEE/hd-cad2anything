@@ -1,14 +1,29 @@
+import hashlib
 import json
+import logging
 import re
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from cad2anything.agents import SPECIALISTS
+from cad2anything.agents import deploy as deploy_module
 from cad2anything.agents.deploy import load_definitions, load_ui_tools, tool_specs
-from cad2anything.agents.runtime import AgentRuntime
-from cad2anything.agents.ui_actions import UiActionHandler, normalize
+from cad2anything.agents.runtime import (
+    INCOMPLETE_ANSWERS,
+    MAX_ROUNDS,
+    RESUME_NOTE,
+    SPECIALIST_OUTPUT_LIMIT,
+    AgentRuntime,
+    agent_reference,
+    agent_versions_from_env,
+    failure_kind,
+    turn_budget_from_env,
+    with_sources,
+)
+from cad2anything.agents.ui_actions import UiActionHandler, normalize, screen_state
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -339,7 +354,7 @@ def _deltas(text, size=7):
     ]
 
 
-def test_preamble_before_a_tool_becomes_a_progress_note_and_long_answers_stream():
+def test_preamble_before_a_tool_becomes_a_progress_note_and_the_answer_follows_the_tools():
     plan = "4층 매장의 ㎡당 매출을 계산하고 하위 매장의 원인을 나눠 볼게요."
     answer = (
         "4층에서 효율이 가장 낮은 곳은 란제리 매장 다섯 곳이에요.\n\n- Ravandre Nuit(4F-E05)가 가장 낮아요."
@@ -396,7 +411,8 @@ def test_preamble_before_a_tool_becomes_a_progress_note_and_long_answers_stream(
     assert events[note + 1]["delta"] == plan
     text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
     assert text == answer and plan not in text
-    assert types.count("TEXT_MESSAGE_CONTENT") > 2  # the answer streams once it is clearly an answer
+    # Unlabelled text is decided when the next output item arrives, so the answer starts after the tools.
+    assert types.index("TEXT_MESSAGE_START") > max(i for i, t in enumerate(types) if t == "TOOL_CALL_END")
     ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
     assert ends["m1"]["ok"] is True
     assert ends["m1"]["result"] == "매장 50곳 중 저효율 5곳 · 가장 낮은 곳 Ravandre Nuit(4F-E05)"
@@ -650,16 +666,17 @@ def test_consult_rejects_empty_requests_and_reuses_repeated_ones():
 class FlakyResponses(FakeResponses):
     """Fails the first specialist call (a stream that breaks mid-way) or every one."""
 
-    def __init__(self, scripted, failures):
+    def __init__(self, scripted, failures, error=None):
         super().__init__(scripted)
         self.failures = failures
+        self.error = error
 
     def create(self, **kwargs):
         name = kwargs["extra_body"]["agent_reference"]["name"]
         if name != "atlas-orchestrator" and self.failures > 0:
             self.calls.append(kwargs)
             self.failures -= 1
-            raise ConnectionError("stream broke")
+            raise self.error or ConnectionError("stream broke")
         return super().create(**kwargs)
 
 
@@ -725,3 +742,793 @@ def test_agent_tool_selection_matches_contract():
     assert [spec["kind"] for spec in researcher] == ["web_search"]
     assert definitions["generator"]["model"] == "mini"
     assert set(SPECIALISTS.values()) <= set(definitions)
+
+
+# --- answers and notes (R1, R7) --------------------------------------------------------------------------
+
+
+def _text(events):
+    return "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+
+
+def _notes(events):
+    return [e["delta"] for e in events if e["type"] == "THINKING_TEXT_MESSAGE_CONTENT"]
+
+
+def _streaming(scripted, **kwargs):
+    client = FakeClient({})
+    client.responses = FakeStreamResponses(scripted)
+    return client, AgentRuntime(client, id_factory=lambda: "id", stream=True, **kwargs)
+
+
+def _broken(*events, error=None):
+    """A response stream that sends ``events`` and then breaks."""
+
+    def stream():
+        yield from events
+        raise error or ConnectionError("stream broke")
+
+    return stream()
+
+
+def _mcp(call_id, name, arguments="{}", output='{"ok": true}'):
+    added = {"type": "mcp_call", "id": call_id, "name": name, "arguments": ""}
+    return added, added | {"arguments": arguments, "output": output}
+
+
+def _done(item):
+    return {"type": "response.output_item.done", "item": item}
+
+
+class _Status(Exception):
+    def __init__(self, status_code, request_id=None):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+        self.request_id = request_id
+
+
+def test_a_long_unlabelled_plan_before_tools_stays_a_note():
+    plan = (
+        "먼저 4층 매장의 ㎡당 매출을 계산할게요.\n"
+        + "그다음 같은 카테고리 매장끼리 비교해 원인을 나눠 볼게요. " * 6
+    )
+    answer = "4층에서 효율이 가장 낮은 곳은 란제리 매장 다섯 곳이에요."
+    added, done = _mcp("m1", "analytics_productivity", '{"rev":"R2","floor":"4F"}')
+    scripted = {
+        "atlas-orchestrator": [
+            [
+                _added({"type": "message"}),
+                *_deltas(plan),
+                _added(added),
+                _done(done),
+                _added({"type": "message"}),
+                *_deltas(answer),
+                _completed([done, _message(answer)]),
+            ]
+        ]
+    }
+    _, runtime = _streaming(scripted)
+    events = list(runtime.run("4층 효율", {"rev": "R2"}))
+    types = [e["type"] for e in events]
+    assert len(plan) > 200 and _notes(events) == [plan.strip()] and _text(events) == answer
+    assert types.index("TEXT_MESSAGE_START") > types.index("TOOL_CALL_END")
+    assert events[-1] == {
+        "type": "RUN_FINISHED",
+        "thread_id": "conv-1",
+        "run_id": "id",
+        "outcome": "answered",
+    }
+
+
+def test_phase_labels_route_commentary_to_notes_and_stream_the_final_answer():
+    plan = "4층 매장의 ㎡당 매출을 계산할게요.\n" + "하위 매장의 원인을 나눠 볼게요. " * 10
+    answer = "4층에서 효율이 가장 낮은 곳은 란제리 매장 다섯 곳이에요."
+    added, done = _mcp("m1", "analytics_productivity")
+    scripted = {
+        "atlas-orchestrator": [
+            [
+                _added({"type": "message", "phase": "commentary"}),
+                *_deltas(plan),
+                _done({"type": "message", "phase": "commentary"}),
+                _added(added),
+                _done(done),
+                _added({"type": "message", "phase": "final_answer"}),
+                *_deltas(answer, size=5),
+                _completed([done, _message(answer)]),
+            ]
+        ]
+    }
+    _, runtime = _streaming(scripted)
+    events = list(runtime.run("4층 효율", {}))
+    contents = [e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT"]
+    assert _notes(events) == [plan.strip()]
+    assert "".join(contents) == answer and len(contents) == len(_deltas(answer, size=5))  # streamed live
+
+
+def test_a_progress_note_is_never_shown_as_the_answer_when_a_ui_action_fails():
+    """Review R1: "I colored the plan" followed by a failed UI action and no answer must not become the answer."""
+    heatmap = {
+        "type": "function_call",
+        "call_id": "f1",
+        "name": "ui_show_heatmap",
+        "arguments": '{"metric":"sales_per_m2","rev":"R2","floor":"4F"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [
+            {"output": [_message("도면에 빨간색으로 칠해 두었어요."), heatmap]},
+            {"output": []},
+        ]
+    }
+    events = list(AgentRuntime(FakeClient(scripted), id_factory=lambda: "id").run("4층 색칠", {"rev": "R2"}))
+    text = _text(events)
+    assert "칠해 두었어요" not in text
+    assert text.startswith(INCOMPLETE_ANSWERS["tool_failed"])
+    assert "- 실패한 단계: 4층 도면에 '㎡당 매출' 색칠" in text
+    assert events[-1]["type"] == "RUN_FINISHED"
+    assert events[-1]["outcome"] == "tool_failed" and events[-1]["incomplete"] is True
+
+
+def test_no_answer_after_successful_tools_is_reported_as_incomplete():
+    _, done = _mcp("m1", "analytics_productivity", '{"rev":"R2"}', '{"rows": 50}')
+    scripted = {"atlas-orchestrator": [{"output": [_message("계산해 볼게요."), done]}]}
+    events = list(AgentRuntime(FakeClient(scripted), id_factory=lambda: "id").run("4층", {}))
+    text = _text(events)
+    assert text.startswith(INCOMPLETE_ANSWERS["no_answer"]) and "- 완료한 단계: 공간 생산성 계산" in text
+    assert "계산해 볼게요" not in text and _notes(events) == ["계산해 볼게요."]
+    assert events[-1]["outcome"] == "no_answer"
+
+
+def test_rounds_exhausted_end_with_an_incomplete_answer():
+    floor = {"type": "function_call", "name": "ui_set_floor", "arguments": '{"floor":"4F"}'}
+    scripted = {"atlas-orchestrator": [{"output": [floor | {"call_id": f"f{i}"}]} for i in range(MAX_ROUNDS)]}
+    client = FakeClient(scripted)
+    events = list(AgentRuntime(client, id_factory=lambda: "id").run("4층", {}))
+    text = _text(events)
+    assert len(client.responses.calls) == MAX_ROUNDS
+    assert text.startswith(INCOMPLETE_ANSWERS["rounds_exhausted"]) and "- 완료한 단계: 4층으로 이동\n" in text
+    assert events[-1]["outcome"] == "rounds_exhausted"
+
+
+def test_text_before_ui_actions_is_a_note_or_the_start_of_the_answer():
+    floor = {"type": "function_call", "call_id": "f1", "name": "ui_set_floor", "arguments": '{"floor":"4F"}'}
+    short = {
+        "atlas-orchestrator": [
+            {"output": [_message("도면에 표시할게요."), floor]},
+            {"output": [_message("4층 효율이 가장 낮아요.")]},
+        ]
+    }
+    events = list(AgentRuntime(FakeClient(short), id_factory=lambda: "id").run("4층", {}))
+    assert _text(events) == "4층 효율이 가장 낮아요." and _notes(events) == ["도면에 표시할게요."]
+
+    answer = "4층에서 효율이 가장 낮은 곳은 란제리 매장이에요.\n- Ravandre Nuit(4F-E05)가 가장 낮아요."
+    long = {
+        "atlas-orchestrator": [
+            {"output": [_message(answer), floor]},
+            {"output": [_message("도면에 표시해 두었어요.")]},
+        ]
+    }
+    events = list(AgentRuntime(FakeClient(long), id_factory=lambda: "id").run("4층", {}))
+    assert _text(events) == f"{answer}\n\n도면에 표시해 두었어요." and _notes(events) == []
+
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 MD 개편 공개 사례를 조사해줘"}',
+    }
+    mixed = {
+        "atlas-orchestrator": [
+            {"output": [_message("공개 사례도 찾아볼게요."), floor, consult]},
+            {"output": [_message("사례를 정리했어요.")]},
+        ],
+        "market-researcher": [{"output_text": "조사 결과"}],
+    }
+    events = list(AgentRuntime(FakeClient(mixed), id_factory=lambda: "id").run("사례", {}))
+    assert _notes(events) == ["공개 사례도 찾아볼게요."] and _text(events) == "사례를 정리했어요."
+
+
+def test_a_broken_specialist_attempt_ends_its_tool_calls_before_the_retry():
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    search = {"type": "web_search_call", "id": "w1", "action": {"query": "백화점 평효율"}}
+    retry = search | {"id": "w2", "status": "completed"}
+    scripted = {
+        "atlas-orchestrator": [
+            [_completed([consult])],
+            [*_deltas("답이에요."), _completed([_message("답이에요.")])],
+        ],
+        "market-researcher": [
+            _broken(_added(search)),
+            [_added(retry), _done(retry), *_deltas("조사 결과"), _completed([_message("조사 결과")])],
+        ],
+    }
+    client, runtime = _streaming(scripted)
+    events = list(runtime.run("벤치마크", {}))
+    starts = [e["tool_call_id"] for e in events if e["type"] == "TOOL_CALL_START"]
+    ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
+    assert set(starts) == set(ends) == {"c1", "w1", "w2"}  # no step stays "running"
+    assert ends["w1"]["ok"] is False and "끊겨" in ends["w1"]["result"]
+    retry_start = next(
+        i for i, e in enumerate(events) if e["type"] == "TOOL_CALL_START" and e["tool_call_id"] == "w2"
+    )
+    assert events.index(ends["w1"]) < retry_start
+    assert ends["c1"]["ok"] is True and client.responses.calls[-1]["input"][0]["output"] == "조사 결과"
+
+
+# --- resuming broken responses (R3) ------------------------------------------------------------------------
+
+
+def test_a_broken_stream_after_a_tool_result_is_resumed_once_without_running_it_again():
+    added, done = _mcp("m1", "registry_run", '{"generator":"signage"}', '{"ok": true, "artifact": "A-1"}')
+    answer = "사인물 초안을 만들었어요."
+    scripted = {
+        "atlas-orchestrator": [
+            _broken(
+                _added({"type": "message"}), *_deltas("사인물 초안을 만들게요."), _added(added), _done(done)
+            ),
+            [*_deltas(answer), _completed([_message(answer)])],
+        ]
+    }
+    client, runtime = _streaming(scripted)
+    events = list(runtime.run("사인물 만들어줘", {"rev": "R2"}))
+    calls = client.responses.calls
+    assert len(calls) == 2 and _text(events) == answer and events[-1]["outcome"] == "answered"
+    resumed = calls[1]["input"]
+    assert resumed[0] == {"role": "user", "content": calls[0]["input"]}  # the conversation lacks the question
+    note = resumed[-1]["content"]
+    assert (
+        note.startswith("[연결 재개]")
+        and "registry_run" in note
+        and "A-1" in note
+        and "다시 호출하지 말고" in note
+    )
+    assert RESUME_NOTE in _notes(events)
+    assert [e["ok"] for e in events if e.get("tool_call_id") == "m1" and e["type"] == "TOOL_CALL_END"] == [
+        True
+    ]
+
+
+def test_a_resume_sends_function_outputs_again_only_when_the_conversation_lacks_them():
+    floor = {"type": "function_call", "call_id": "f1", "name": "ui_set_floor", "arguments": '{"floor":"4F"}'}
+    for stored in (False, True):
+        scripted = {
+            "atlas-orchestrator": [
+                [_completed([floor])],
+                _broken({"type": "response.created"}),
+                [*_deltas("4층으로 옮겼어요."), _completed([_message("4층으로 옮겼어요.")])],
+            ]
+        }
+        handled = []
+        handler = UiActionHandler()
+        original = handler.handle
+        handler.handle = lambda name, args, state, handled=handled, original=original: (
+            handled.append(name) or original(name, args, state)
+        )
+        client = FakeClient({})
+        client.responses = FakeStreamResponses(scripted)
+        items = [{"type": "function_call_output", "call_id": "f1", "output": "{}"}] if stored else []
+        client.conversations.items = SimpleNamespace(
+            list=lambda conversation_id, items=items, **kw: SimpleNamespace(data=items)
+        )
+        runtime = AgentRuntime(client, ui_handler=handler, id_factory=lambda: "id", stream=True)
+        events = list(runtime.run("4층", {}))
+
+        assert handled == ["ui_set_floor"]  # function tools never run twice
+        resumed = client.responses.calls[2]["input"]
+        outputs = [item for item in resumed if item.get("type") == "function_call_output"]
+        assert outputs == ([] if stored else client.responses.calls[1]["input"])
+        assert "[연결 재개]" in resumed[-1]["content"] and events[-1]["outcome"] == "answered"
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (_Status(429), "요청 한도"),
+        (_Status(401), "완료하지 못했어요"),
+        (_Status(400), "완료하지 못했어요"),
+        (ValueError("bug"), "완료하지 못했어요"),
+    ],
+)
+def test_non_transient_failures_are_not_resumed(error, message):
+    added, done = _mcp("m1", "analytics_productivity")
+    client, runtime = _streaming({"atlas-orchestrator": [_broken(_added(added), _done(done), error=error)]})
+    events = []
+    with pytest.raises(type(error)):
+        for event in runtime.run("4층", {}):
+            events.append(event)
+    assert len(client.responses.calls) == 1
+    assert events[-1]["type"] == "RUN_ERROR" and message in events[-1]["message"]
+    assert events[-1]["error_type"] == type(error).__name__
+
+
+def test_a_resume_is_tried_once_and_only_after_tool_results():
+    added, done = _mcp("m1", "analytics_productivity")
+    twice = {
+        "atlas-orchestrator": [_broken(_added(added), _done(done)), _broken({"type": "response.created"})]
+    }
+    client, runtime = _streaming(twice)
+    events = []
+    with pytest.raises(ConnectionError):
+        for event in runtime.run("4층", {}):
+            events.append(event)
+    assert len(client.responses.calls) == 2 and events[-1]["code"] == "transient"
+
+    nothing = {"atlas-orchestrator": [_broken(_added({"type": "message"}), *_deltas("확인할게요"))]}
+    client, runtime = _streaming(nothing)
+    with pytest.raises(ConnectionError):
+        list(runtime.run("4층", {}))
+    assert len(client.responses.calls) == 1
+
+    answered = {
+        "atlas-orchestrator": [
+            _broken(
+                _added(added),
+                _done(done),
+                _added({"type": "message", "phase": "final_answer"}),
+                *_deltas("4층은"),
+            )
+        ]
+    }
+    client, runtime = _streaming(answered)
+    events = []
+    with pytest.raises(ConnectionError):
+        for event in runtime.run("4층", {}):
+            events.append(event)
+    assert len(client.responses.calls) == 1 and _text(events) == "4층은"  # answer text already left
+
+
+def test_failure_kinds():
+    assert failure_kind(_Status(429)) == "rate_limit" and failure_kind(_Status(403)) == "auth"
+    assert failure_kind(_Status(503)) == "transient" and failure_kind(_Status(408)) == "transient"
+    assert failure_kind(_Status(422)) == "rejected" and failure_kind(TimeoutError()) == "transient"
+    assert failure_kind(type("RemoteProtocolError", (Exception,), {})()) == "transient"
+    assert (
+        failure_kind(KeyError("x")) == "other"
+        and failure_kind(RuntimeError("rate limit reached")) == "rate_limit"
+    )
+
+
+# --- specialists (R4, R5, R8) ------------------------------------------------------------------------------
+
+
+def test_specialist_sources_survive_truncation():
+    body = "백화점 층별 효율 사례를 정리했어요. " * 400
+    text = body + "\n\n출처:\n- 기사 A — https://news.example/a"
+    annotations = [
+        {
+            "type": "url_citation",
+            "url": "https://news.example/a",
+            "title": "기사 A",
+            "start_index": 0,
+            "end_index": 1,
+        },
+        {
+            "type": "url_citation",
+            "url": "https://report.example/b",
+            "title": "보고서 B",
+            "start_index": 0,
+            "end_index": 1,
+        },
+        {
+            "type": "url_citation",
+            "url": "https://report.example/b",
+            "title": "보고서 B",
+            "start_index": 2,
+            "end_index": 3,
+        },
+    ]
+    message = {
+        "type": "message",
+        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
+    }
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [{"output": [consult]}, {"output": [_message("요약했어요.")]}],
+        "market-researcher": [{"output": [message]}],
+    }
+    client = FakeClient(scripted)
+    list(AgentRuntime(client, id_factory=lambda: "id").run("벤치마크", {}))
+    output = client.responses.calls[-1]["input"][0]["output"]
+    assert len(text) > SPECIALIST_OUTPUT_LIMIT >= len(output)
+    assert (
+        output.count("https://news.example/a") == 1
+        and output.count("보고서 B — https://report.example/b") == 1
+    )
+    assert "길이 제한으로 본문 뒷부분을 생략했어요" in output
+    assert output.index("생략했어요") < output.index("출처:")
+
+
+def test_with_sources_formats_citations_and_caps_long_lists():
+    assert with_sources("요약", []) == "요약"
+    assert (
+        with_sources("요약", [("기사", "https://a.example")]) == "요약\n\n출처:\n- 기사 — https://a.example"
+    )
+    assert with_sources("요약", [("", "https://a.example")]) == "요약\n\n출처:\n- https://a.example"
+    many = [(f"기사 {i}", f"https://news.example/{i}") for i in range(200)]
+    capped = with_sources("요약", many)
+    assert capped.startswith("요약\n\n출처:") and "줄 생략" in capped and len(capped) < 1700
+    assert with_sources("참고 자료를 보면 매출이 늘었어요.", []) == "참고 자료를 보면 매출이 늘었어요."
+
+
+def test_a_failed_consultation_reused_in_the_same_run_is_still_failed():
+    consult = {
+        "type": "function_call",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [
+            {"output": [consult | {"call_id": "a"}]},
+            {"output": [consult | {"call_id": "b"}]},
+            {"output": [_message("벤치마크는 확인하지 못했어요.")]},
+        ],
+        "market-researcher": [],
+    }
+    client = FakeClient(scripted)
+    client.responses = FlakyResponses(scripted, failures=1, error=_Status(400))
+    events = list(AgentRuntime(client, id_factory=lambda: "id").run("벤치마크와 비교", {}))
+    ends = {e["tool_call_id"]: e for e in events if e["type"] == "TOOL_CALL_END"}
+    assert ends["a"]["ok"] is False and ends["b"]["ok"] is False and "재사용" in ends["b"]["summary"]
+    assert ends["b"]["result"] == "시장 조사 에이전트의 답을 받지 못해 직접 정리해요"
+    researcher = [
+        c
+        for c in client.responses.calls
+        if c["extra_body"]["agent_reference"]["name"] != "atlas-orchestrator"
+    ]
+    assert len(researcher) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(_Status(429), "요청 한도"), (_Status(401), "_Status"), (ValueError("bug"), "ValueError")],
+)
+def test_only_transient_specialist_failures_are_retried(error, expected):
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [{"output": [consult]}, {"output": [_message("답")]}],
+        "market-researcher": [{"output_text": "조사 결과"}],
+    }
+    client = FakeClient(scripted)
+    client.responses = FlakyResponses(scripted, failures=2, error=error)
+    list(AgentRuntime(client, id_factory=lambda: "id").run("벤치마크", {}))
+    researcher = [
+        c for c in client.responses.calls if c["extra_body"]["agent_reference"]["name"] == "market-researcher"
+    ]
+    assert len(researcher) == 1
+    assert expected in json.loads(client.responses.calls[-1]["input"][0]["output"])["error"]
+
+
+# --- versions, budget, cancel and logs (R6, R9, R15) ---------------------------------------------------------
+
+
+def test_agent_versions_can_be_pinned():
+    assert agent_versions_from_env({}) == {}
+    pinned = agent_versions_from_env(
+        {"FOUNDRY_AGENT_VERSIONS": '{"atlas-orchestrator": 7, "generator": "2"}'}
+    )
+    assert pinned == {"atlas-orchestrator": "7", "generator": "2"}
+    for bad in ("[1]", "{", '{"atlas-orchestrator": true}', '{"generator": " "}'):
+        with pytest.raises(ValueError):
+            agent_versions_from_env({"FOUNDRY_AGENT_VERSIONS": bad})
+    assert agent_reference("generator") == {
+        "agent_reference": {"name": "generator", "type": "agent_reference"}
+    }
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [{"output": [consult]}, {"output": [_message("답")]}],
+        "market-researcher": [{"output_text": "조사 결과"}],
+    }
+    client = FakeClient(scripted)
+    events = list(AgentRuntime(client, id_factory=lambda: "id", agent_versions=pinned).run("질문", {}))
+    assert events[0]["agent"] == "atlas-orchestrator" and events[0]["agent_version"] == "7"
+    references = [call["extra_body"]["agent_reference"] for call in client.responses.calls]
+    assert references[0] == {"name": "atlas-orchestrator", "type": "agent_reference", "version": "7"}
+    assert references[1] == {"name": "market-researcher", "type": "agent_reference"}
+
+
+def test_deploy_records_versions_models_and_instruction_hashes(tmp_path, monkeypatch):
+    for name in ("CHAT_MODEL_DEPLOYMENT", "MINI_MODEL_DEPLOYMENT", "MCP_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    dry = deploy_module.deploy(dry_run=True)
+    definitions = {d["name"]: d for d in load_definitions("gpt-6.1-sol", "gpt-5.4-mini")}
+    for name, info in dry.items():
+        expected = hashlib.sha256(definitions[name]["instructions"].encode("utf-8")).hexdigest()
+        assert info["instructions_sha256"] == expected and "version" not in info
+
+    created = []
+
+    class FakeAgents:
+        def create_version(self, agent_name, definition, **kwargs):
+            created.append((agent_name, kwargs))
+            return SimpleNamespace(version=str(len(created)))
+
+    class FakeProject:
+        def __init__(self, endpoint, credential):
+            self.agents = FakeAgents()
+
+    monkeypatch.setattr("azure.ai.projects.AIProjectClient", FakeProject)
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: object())
+    monkeypatch.setenv("MCP_SERVER_URL", "https://mcp.example/mcp")
+    monkeypatch.setenv("MCP_CONNECTION_ID", "conn-id")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    record = tmp_path / "local" / "deployed_agents.json"
+    summary = deploy_module.deploy(record_path=record)
+    saved = json.loads(record.read_text(encoding="utf-8"))
+    assert saved["agents"] == summary and summary["atlas-orchestrator"]["version"] == "1"
+    for name, kwargs in created:
+        assert kwargs["metadata"] == {"instructions_sha256": summary[name]["instructions_sha256"]}
+    pins = agent_versions_from_env({"FOUNDRY_AGENT_VERSIONS": saved["env"]["FOUNDRY_AGENT_VERSIONS"]})
+    assert pins == {name: info["version"] for name, info in summary.items()}
+    assert "https://mcp.example" not in record.read_text(encoding="utf-8")
+    assert "data/local/*" in (REPO / ".gitignore").read_text(encoding="utf-8")
+    assert deploy_module.DEPLOY_RECORD.parent == REPO / "data" / "local"
+
+
+def test_turn_budget_stops_new_consultations_and_rounds():
+    consult = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": "consult_specialist",
+        "arguments": '{"agent":"researcher","request":"백화점 층별 효율 공개 벤치마크를 조사해줘"}',
+    }
+    scripted = {
+        "atlas-orchestrator": [{"output": [consult]}, {"output": [_message("답")]}],
+        "market-researcher": [{"output_text": "조사 결과"}],
+    }
+    client = FakeClient(scripted)
+    events = list(AgentRuntime(client, id_factory=lambda: "id", turn_budget_s=-1).run("벤치마크", {}))
+    assert len(client.responses.calls) == 1  # no specialist call and no second round
+    end = next(e for e in events if e["type"] == "TOOL_CALL_END")
+    assert end["ok"] is False and "시간 제한" in end["summary"]
+    assert events[-1]["outcome"] == "time_exhausted" and _text(events).startswith(
+        INCOMPLETE_ANSWERS["time_exhausted"]
+    )
+    assert turn_budget_from_env({}) == 200.0 and turn_budget_from_env({"AGENT_TURN_BUDGET_S": "0"}) is None
+    assert turn_budget_from_env({"AGENT_TURN_BUDGET_S": "90"}) == 90.0
+    assert turn_budget_from_env({"AGENT_TURN_BUDGET_S": "soon"}) == 200.0
+
+
+class _CancellingStream:
+    def __init__(self, cancel):
+        self.cancel = cancel
+        self.closed = False
+
+    def __iter__(self):
+        yield _added({"type": "message"})
+        self.cancel.set()
+        yield {"type": "response.output_text.delta", "delta": "계산할게요"}
+        yield _completed([_message("계산할게요")])
+
+    def close(self):
+        self.closed = True
+
+
+def test_cancel_stops_the_run_at_the_next_event_and_closes_the_stream():
+    cancel = threading.Event()
+    stream = _CancellingStream(cancel)
+    client = FakeClient({})
+    client.responses = SimpleNamespace(
+        calls=[], create=lambda **kwargs: client.responses.calls.append(kwargs) or stream
+    )
+    events = list(AgentRuntime(client, id_factory=lambda: "id", stream=True).run("4층", {}, cancel=cancel))
+    assert stream.closed and [e["type"] for e in events] == ["RUN_STARTED", "RUN_ERROR"]
+    assert events[-1] == {"type": "RUN_ERROR", "message": "요청이 취소됐어요.", "code": "cancelled"}
+
+    already = threading.Event()
+    already.set()
+    idle = FakeClient({"atlas-orchestrator": []})
+    events = list(AgentRuntime(idle, id_factory=lambda: "id").run("4층", {}, cancel=already))
+    assert events == [{"type": "RUN_ERROR", "message": "요청이 취소됐어요.", "code": "cancelled"}]
+    assert idle.responses.calls == [] and idle._count == 0
+
+
+def test_runs_log_one_structured_line(caplog):
+    caplog.set_level(logging.INFO, logger="cad2anything.agents")
+    _, done = _mcp("m1", "analytics_productivity", '{"rev":"R2"}', '{"rows": 50}')
+    scripted = {"atlas-orchestrator": [{"output": [done, _message("4층이에요.")]}]}
+    list(AgentRuntime(FakeClient(scripted), id_factory=lambda: "id").run("비밀 질문", {}))
+    lines = [r.getMessage() for r in caplog.records if r.name == "cad2anything.agents"]
+    assert len(lines) == 1 and lines[0].startswith("agent_run ") and "비밀 질문" not in lines[0]
+    record = json.loads(lines[0].split(" ", 1)[1])
+    assert record["thread_id"] == "conv-1" and record["outcome"] == "answered" and record["rounds"] == 1
+    assert record["tool_calls"] == 1 and record["failed_tool_calls"] == 0 and record["duration_ms"] >= 0
+
+    caplog.clear()
+    _, runtime = _streaming({"atlas-orchestrator": [_broken(error=_Status(503, request_id="req-1"))]})
+    with pytest.raises(_Status):
+        list(runtime.run("질문", {}))
+    error_lines = [r for r in caplog.records if r.name == "cad2anything.agents"]
+    assert len(error_lines) == 1 and error_lines[0].levelno == logging.ERROR
+    record = json.loads(error_lines[0].getMessage().split(" ", 1)[1])
+    assert record["outcome"] == "error" and record["error_type"] == "_Status" and record["status_code"] == 503
+    assert record["request_id"] == "req-1" and record["failure"] == "transient"
+
+
+# --- UI state (R2, R11, R12, R13) ---------------------------------------------------------------------------
+
+
+def test_overlays_drawn_earlier_in_the_same_answer_stay():
+    flow = {"mode": "popup", "rev": "R2", "query": {"floor": "3F"}, "floors": {}, "markers": []}
+    for order in (("ui_highlight_units", "ui_show_flow"), ("ui_show_flow", "ui_highlight_units")):
+        handler = UiActionHandler(flow_provider=lambda **params: flow)
+        state = {"rev": "R2", "floor": "3F", "overlays": ["heatmap", "route"]}
+        patches = []
+        for name in order:
+            args = {"unit_codes": ["3F-C05"]} if name == "ui_highlight_units" else {"mode": "popup"}
+            patches += handler.handle(name, args, state).patches
+        paths = [p["path"] for p in patches]
+        assert paths.count("/highlights") == 1 and paths.count("/flow") == 1, (
+            order
+        )  # drawn once, never cleared
+        assert next(p for p in patches if p["path"] == "/highlights")["value"][0]["unit_code"] == "3F-C05"
+        assert {"/heatmap", "/route"} <= set(paths)  # the earlier answer's overlays are replaced
+        assert "/journey" not in paths and "/edges" not in paths  # not on screen: nothing to clear
+
+
+def test_overlays_of_an_earlier_answer_are_cleared_from_the_reported_screen():
+    handler = UiActionHandler()
+    reported = handler.handle(
+        "ui_highlight_units", {"unit_codes": ["4F-E01"]}, {"rev": "R2", "overlays": ["flow"]}
+    )
+    assert [p["path"] for p in reported.patches] == ["/highlights", "/flow"]
+    full_state = {"rev": "R2", "journey": {"stops": []}, "route": None, "flow": None}
+    edges = handler.handle("ui_draw_edges", {"edges": [{"from": "4F-E01", "to": "3F-C05"}]}, full_state)
+    assert [p["path"] for p in edges.patches] == ["/edges", "/journey"]
+    nothing = handler.handle("ui_highlight_units", {"unit_codes": ["4F-E01"]}, {"rev": "R2", "overlays": []})
+    assert [p["path"] for p in nothing.patches] == ["/highlights"]
+    unknown = handler.handle("ui_highlight_units", {"unit_codes": ["4F-E01"]}, {"rev": "R2"})
+    assert [p["path"] for p in unknown.patches] == ["/highlights", "/journey", "/route", "/flow"]
+
+
+def test_heatmap_switches_the_revision_with_its_colors_and_flags_estimates():
+    calls = []
+    handler = UiActionHandler(
+        heatmap_provider=lambda m, r, f: calls.append((m, r, f)) or {"4F-E01": 1.0, "4F-E02": 3.0},
+        has_sales=lambda rev: not rev.startswith("FW2026"),
+    )
+    state = {"rev": "R2", "floor": "3F", "overlays": ["highlights", "flow", "compare"]}
+    result = handler.handle(
+        "ui_show_heatmap", {"metric": "sales_per_m2", "rev": "FW2026-A1", "floor": "4F"}, state
+    )
+    assert calls == [("sales_per_m2", "FW2026-A1", "4F")]
+    assert [p["path"] for p in result.patches] == [
+        "/rev",
+        "/highlights",
+        "/compareRev",
+        "/flow",
+        "/floor",
+        "/heatmap",
+    ]
+    heatmap = result.patches[-1]["value"]
+    assert heatmap["rev"] == "FW2026-A1" and heatmap["estimated"] is True
+    assert heatmap["label"] == "연환산 ㎡당 매출(원) (모델 추정치)"
+    output = json.loads(result.output)
+    assert output["rev"] == "FW2026-A1" and output["rev_switched"] is True and output["estimated"] is True
+    assert "실적이라고 말하지 마세요" in output["note"] and "모델 추정치" in output["shown"]
+    assert "FW2026-A1 개정으로 바꿨습니다" in output["shown"]
+    assert state["rev"] == "FW2026-A1" and state["floor"] == "4F"
+
+    state = {"rev": "R2", "floor": "4F", "overlays": []}
+    handler.handle("ui_highlight_units", {"unit_codes": ["4F-E01"]}, state)
+    switched = handler.handle(
+        "ui_show_heatmap", {"metric": "sales_per_m2", "rev": "R0", "floor": "4F"}, state
+    )
+    assert [p["path"] for p in switched.patches] == ["/rev", "/highlights", "/heatmap"]  # R2 highlights go
+    assert switched.patches[-1]["value"]["estimated"] is False
+    assert "estimated" not in json.loads(switched.output)
+    same = handler.handle(
+        "ui_show_heatmap", {"metric": "walk_to_escalator_m", "rev": "R0", "floor": "4F"}, state
+    )
+    assert [p["path"] for p in same.patches] == ["/heatmap"]
+    unknown = UiActionHandler(heatmap_provider=lambda m, r, f: {"4F-E01": 1.0})
+    flagless = unknown.handle("ui_show_heatmap", {"metric": "sales_per_m2", "rev": "H1", "floor": "4F"}, {})
+    assert flagless.patches[0] == {"op": "replace", "path": "/rev", "value": "H1"}
+    flagless_heatmap = next(p["value"] for p in flagless.patches if p["path"] == "/heatmap")
+    assert flagless_heatmap["estimated"] is False  # no sales information: not flagged
+
+
+def test_revision_switch_clears_reported_overlays_when_current_revision_is_unknown():
+    handler = UiActionHandler(
+        heatmap_provider=lambda *_: {"4F-E01": 1.0},
+        has_sales=lambda _rev: True,
+    )
+    state = {
+        "overlays": ["highlights", "flow"],
+        "highlights": [{"unit_code": "4F-E02"}],
+        "flow": {"mode": "traffic"},
+    }
+
+    result = handler.handle("ui_show_heatmap", {"metric": "sales_per_m2", "rev": "R1"}, state)
+
+    assert [patch["path"] for patch in result.patches] == [
+        "/rev",
+        "/highlights",
+        "/flow",
+        "/heatmap",
+    ]
+    assert result.patches[1]["value"] == []
+    assert result.patches[2]["value"] is None
+
+
+def test_route_and_journey_wording_follow_what_was_drawn():
+    base = {
+        "origin": {"label": "정문", "floor": "1F"},
+        "destination": {"label": "8F-C05", "floor": "8F"},
+        "walk_m": 85,
+        "transitions": [],
+    }
+    line = [{"floor": "1F", "points": [[0.0, 0.0], [1.0, 1.0]]}]
+    cases = [
+        (base | {"segments": line}, "1층 도면에 경로를 파란 선으로 그렸습니다"),
+        (base | {"segments": line, "straight": True, "walk_m": 40}, "직선(추정)으로 표시했습니다"),
+        (base | {"segments": [], "straight": True, "walk_m": None}, "경로 선을 그리지 않았습니다"),
+    ]
+    for route, expected in cases:
+        handler = UiActionHandler(route_provider=lambda rev=None, route=route, **params: route)
+        output = json.loads(handler.handle("ui_show_route", {"origin": "정문"}, {"rev": "R2"}).output)
+        assert expected in output["shown"]
+        if route.get("straight"):
+            assert output["straight"] is True and "파란 선" not in output["shown"]
+        if route["walk_m"] is None:
+            assert "걷는 거리는 알 수 없습니다" in output["shown"]
+        elif route.get("straight"):
+            assert "직선으로 잰 추정치" in output["shown"]
+
+    journey = {
+        "rev": "R2",
+        "stops": [{"order": 1, "floor": "1F"}, {"order": 2, "floor": "3F"}],
+        "segments": [],
+    }
+    handler = UiActionHandler(journey_provider=lambda **params: journey)
+    shown = json.loads(handler.handle("ui_show_journey", {}, {"rev": "R2"}).output)["shown"]
+    assert "추정 경로를 그리고" not in shown and "그리지 못했습니다" in shown
+    drawn = journey | {"segments": [{"floor": "1F", "points": [[0, 0], [1, 1]], "straight": True}]}
+    handler = UiActionHandler(journey_provider=lambda **params: drawn)
+    shown = json.loads(handler.handle("ui_show_journey", {}, {"rev": "R2"}).output)["shown"]
+    assert "추정 경로를 그리고" in shown and "직선(추정)" in shown
+
+
+def test_ui_actions_reject_malformed_calls_instead_of_failing_the_run():
+    handler = UiActionHandler()
+    assert json.loads(handler.handle("ui_highlight_units", {}, {}).output)["ok"] is False
+    assert json.loads(handler.handle("ui_clear", {"what": "everything"}, {}).output)["ok"] is False
+    assert json.loads(handler.handle("estimated", {}, {}).output)["ok"] is False  # only ui_* functions
+
+
+def test_the_prompt_gets_a_compact_screen_state():
+    full = {
+        "rev": "R2",
+        "floor": "3F",
+        "selection": [],
+        "compareRev": None,
+        "heatmap": {"metric": "sales_per_m2", "values": {"3F-C01": 0.5}},
+        "highlights": [],
+        "flow": None,
+        "overlays": ["route"],
+        "layers": {"labels": True},
+    }
+    assert screen_state(full) == {"rev": "R2", "floor": "3F", "overlays": ["heatmap", "route"]}
+    scripted = {"atlas-orchestrator": [{"output": [_message("3층이에요.")]}]}
+    client = FakeClient(scripted)
+    list(AgentRuntime(client, id_factory=lambda: "id").run("여기는?", full))
+    sent = client.responses.calls[0]["input"]
+    assert sent == '[ui_state] {"rev": "R2", "floor": "3F", "overlays": ["heatmap", "route"]}\n\n여기는?'

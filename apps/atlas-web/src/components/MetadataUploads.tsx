@@ -9,6 +9,7 @@ import { METADATA_KINDS, METADATA_KIND_LABELS, metadataKindInfo, validateMetadat
 import { replaceOp } from '../state/reducer'
 import { usePatchUi } from '../state/store'
 import type { MetadataKind, MetadataStatus, MetadataUploadResult } from '../types/api'
+import { WritesNotice } from './WritesNotice'
 
 function MetadataResult({ result }: { result: MetadataUploadResult }) {
   const patchUi = usePatchUi()
@@ -89,17 +90,21 @@ function StatusTable({ status }: { status: MetadataStatus[] }) {
           </tr>
         </thead>
         <tbody>
-          {status.map((s) => (
-            <tr key={s.kind}>
-              <td title={s.required_columns.length ? `필수: ${s.required_columns.join(', ')}` : undefined}>{METADATA_KIND_LABELS[s.kind] ?? s.kind}</td>
-              <td>
-                <span className={`badge ${s.present ? 'ok' : 'warn'}`}>{s.present ? '있음' : '없음'}</span>
-              </td>
-              <td>{formatNumber(s.rows)}</td>
-              <td className="nowrap">{formatDateTime(s.updated_at)}</td>
-              <td>{s.items.join(', ') || '–'}</td>
-            </tr>
-          ))}
+          {status.map((s) => {
+            const label = s.label_ko ?? METADATA_KIND_LABELS[s.kind] ?? s.kind
+            const title = s.description_ko ?? (s.required_columns.length ? `필수: ${s.required_columns.join(', ')}` : undefined)
+            return (
+              <tr key={s.kind}>
+                <td title={title}>{label}</td>
+                <td>
+                  <span className={`badge ${s.present ? 'ok' : 'warn'}`}>{s.present ? '있음' : '없음'}</span>
+                </td>
+                <td>{formatNumber(s.rows)}</td>
+                <td className="nowrap">{formatDateTime(s.updated_at)}</td>
+                <td>{s.items.join(', ') || '–'}</td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -188,6 +193,7 @@ export function MetadataUploads() {
             ))}
           </select>
           <p id="metadata-kind-hint" className="hint">
+            {info.description ? `${info.description} ` : ''}
             {info.formats} · 필수 {info.required.join(', ')}
             {info.optional.length ? ` (선택: ${info.optional.join(', ')})` : ''} · {info.storage}
           </p>
@@ -213,6 +219,7 @@ export function MetadataUploads() {
             </p>
           )}
         </div>
+        <WritesNotice />
         <button type="submit" className="primary" disabled={busy}>
           {busy ? '올리는 중…' : '올리기'}
         </button>

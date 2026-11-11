@@ -118,9 +118,16 @@ flowchart LR
 
 ## 5. 개정 루프
 
-**상태 전이**
+**도면 작업 처리 상태**
 
-`uploaded → parsed → modeled → diffed → impact_planned → regenerated → qa_checked → awaiting_approval → published | rejected`
+도면 작업은 `queued → running → done | needs_review | partial | failed`로 진행한다.
+`needs_review`는 파싱한 레이어 검토 큐에 항목이 있다는 뜻이다. 모델은 저장되어 있다.
+`partial`은 모델을 저장했지만 변경 비교, 계약 대조, 영향 분석, 산출물 재생성, 개편안 대조 중 하나 이상이 실패한 상태다.
+`failed`는 주로 모델을 저장하기 전 처리 실패나 서버 재시작으로 작업이 중단된 상태다.
+각 작업의 `revision_available`로 이 작업이 저장한 모델의 현재 사용 가능 여부를 확인한다.
+
+이 상태는 처리 상태이며 개정의 승인 상태가 아니다. 이 PoC에는 개정 승인·반려 기능이 없다.
+산출물의 승인·반려는 사람이 Atlas 화면 또는 API에서 별도로 수행한다.
 
 **diff 유형:** `add`, `remove`, `move`, `resize`, `reassign`, `split`/`merge`, `fixture_change`, `walkway_change`
 

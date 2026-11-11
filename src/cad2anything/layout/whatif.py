@@ -16,9 +16,11 @@ Expected sales of brand ``b`` in unit ``u`` (Huff-like attractiveness)::
 - ``bonus_u = min(cap, lambda * sum over adjacent occupied units of max(lift(b, b_v) - 1, 0))`` with
   cross-shopping lift from ``analytics.affinity.cross_shopping``; ``lambda`` is an assumption, not fitted.
 
-Ranges: brands at their reference unit have no range (observed). Moved brands get ``exp(+/- h)`` with
+Ranges: brands at their reference unit with unchanged affinity have no range (observed). Moved brands get ``exp(+/- h)`` with
 ``h = sqrt(resid_std**2 + (d_log_area * se_beta)**2 + (d_log_walk * se_gamma)**2)``; prior-based brands
-use ``h = sqrt(2) * resid_std``. Totals combine unit ranges in quadrature (independent errors).
+use ``h = sqrt(2) * resid_std``. A changed affinity effect adds its absolute log change in quadrature,
+including for stationary reference brands; this is an uncertainty assumption, not a fitted confidence
+interval. Totals combine unit ranges in quadrature (independent errors).
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ SCORING_CAVEATS = (
     "노출·면적 탄력성은 관측 데이터의 연관성에서 추정했으며 인과 효과가 아닙니다. 강한 브랜드가 좋은 "
     "위치에 몰려 있으면 노출 탄력성이 과대 추정될 수 있습니다.",
     "인접 친화도 보너스의 강도(lambda)는 가정값이고, 교차구매 lift는 현재 배치의 영향을 이미 포함합니다.",
+    "인접 효과가 달라지면 그 로그 변화량을 불확실성에 더합니다. 추정 범위는 가정에 따른 범위이며 통계적 신뢰구간이 아닙니다.",
 )
 
 
@@ -137,11 +140,18 @@ class UnitInfo:
 
 
 def unit_info(unit_features: pd.DataFrame) -> dict[str, UnitInfo]:
-    """Unit geometry facts; missing walking distances use the floor median (then the store median)."""
+    """Missing or straight-line fallback walks use the reliable floor median, then store median."""
     feats = unit_features.drop_duplicates("unit_code").copy()
     feats["area_m2"] = pd.to_numeric(feats["area_m2"], errors="coerce")
     feats = feats.loc[feats["area_m2"] > 0]
     walk = pd.to_numeric(feats["walk_to_escalator_m"], errors="coerce")
+    walk = walk.where(np.isfinite(walk) & (walk >= 0))
+    fallback = (
+        to_bool(feats["escalator_fallback"], feats.index)
+        if "escalator_fallback" in feats
+        else pd.Series(False, index=feats.index)
+    )
+    walk = walk.mask(fallback)
     floor_median = walk.groupby(feats["floor"]).transform("median")
     store_median = float(walk.median()) if walk.notna().any() else 0.0
     filled = walk.fillna(floor_median).fillna(store_median)
@@ -479,20 +489,29 @@ class AssignmentScorer:
         """Expected sales without the affinity multiplier."""
         return math.exp(sum(self.location_terms(brand_id, unit_code)))
 
-    def half_width(self, brand_id: str, unit_code: str) -> float:
-        """Log half-width of the range (0 at the brand's observed reference unit)."""
+    def half_width(
+        self, brand_id: str, unit_code: str, assignment: Mapping[str, str | None] | None = None
+    ) -> float:
+        """Log half-width, including uncertainty from a changed affinity effect when supplied."""
         ref = self.model.brand_reference.get(brand_id)
         if ref is None:
             return math.sqrt(2.0) * self.model.resid_std
-        if ref.unit_code == unit_code:
-            return 0.0
         unit = self.units[unit_code]
         se_beta = self.model.beta_se_for(self.category_of(brand_id))
         d_area = math.log(unit.area_m2) - math.log(ref.area_m2)
         d_walk = math.log1p(unit.walk_m) - math.log1p(ref.walk_m)
-        return math.sqrt(
-            self.model.resid_std**2 + (d_area * se_beta) ** 2 + (d_walk * self.model.gamma_se) ** 2
+        location_var = (
+            0.0
+            if ref.unit_code == unit_code
+            else self.model.resid_std**2 + (d_area * se_beta) ** 2 + (d_walk * self.model.gamma_se) ** 2
         )
+        affinity_delta = (
+            math.log1p(self.bonus(brand_id, unit_code, assignment))
+            - math.log1p(self.bonus(brand_id, ref.unit_code, self.model.reference_assignment))
+            if assignment is not None
+            else 0.0
+        )
+        return math.sqrt(location_var + affinity_delta**2)
 
     def score(self, assignment: Mapping[str, str | None]) -> AssignmentScore:
         assignment = normalize_assignment(assignment)
@@ -514,6 +533,7 @@ class AssignmentScorer:
                 "category": None,
                 "area_m2": unit.area_m2,
                 "walk_to_escalator_m": unit.walk_m,
+                "walk_imputed": unit.walk_imputed,
                 "expected_sales": 0.0,
                 "low": 0.0,
                 "high": 0.0,
@@ -531,7 +551,7 @@ class AssignmentScorer:
                 base, area_term, exposure_term = self.location_terms(brand_id, unit_code)
                 bonus = self.bonus(brand_id, unit_code, assignment)
                 expected = math.exp(base + area_term + exposure_term) * (1.0 + bonus)
-                half = self.half_width(brand_id, unit_code)
+                half = self.half_width(brand_id, unit_code, assignment)
                 ref = self.model.brand_reference.get(brand_id)
                 row.update(
                     {

@@ -42,6 +42,8 @@ export interface Meta {
   facility: Facility
   /** Last date with transaction data (YYYY-MM-DD); absent on older backends. */
   data_through?: string | null
+  /** `false` when the server cannot save changes (uploads, decisions, reviews); absent on older backends. */
+  writes_available?: boolean
   revisions: RevisionInfo[]
   floors: FloorInfo[]
   categories: CategoryInfo[]
@@ -213,6 +215,14 @@ export interface LayoutMove {
   to_unit: string
 }
 
+/**
+ * How an alternative was found. `optimal` only for the first alternative (no diversity penalty) when the exact
+ * solver proved it; `optimal_diverse` is proven optimal under the condition to differ from the earlier ones;
+ * `feasible` has no optimality proof; `heuristic` had no exact solve. Older backends send `optimal` for every
+ * proven alternative.
+ */
+export type SearchStatus = 'optimal' | 'optimal_diverse' | 'feasible' | 'heuristic'
+
 export interface LayoutAlternative {
   id: string
   moves: LayoutMove[]
@@ -224,7 +234,12 @@ export interface LayoutAlternative {
   explanations: string[]
   /** Optional extension: hypothetical revision saved for this alternative. */
   rev_id?: string
-  search_status?: 'optimal' | 'feasible' | 'heuristic'
+  search_status?: SearchStatus
+  /** The model's objective is rounded to this unit (KRW) before the exact search; 100 for the exact solver. */
+  objective_rounding_krw?: number | null
+  /** Distance between the found solution and the solver's bound (KRW), when a bound exists. */
+  gap_krw?: number | null
+  bound_krw?: number | null
 }
 
 export interface LayoutRequest {
@@ -368,8 +383,14 @@ export interface RelayoutKpi {
   sales_high_krw: number | null
   objective_delta_krw: number | null
   move_cost_krw: number | null
-  /** objective_delta_krw - move_cost_krw */
+  /** objective_delta_krw - move_cost_krw. Kept for ranking; the screen shows `season_net_krw` when present. */
   net_krw: number | null
+  /** Yearly gain of the objective against the baseline (same value as `objective_delta_krw`); absent on older backends. */
+  annual_uplift_krw?: number | null
+  /** One-off loss of the works (same value as `move_cost_krw`); absent on older backends. */
+  one_off_loss_krw?: number | null
+  /** Net effect over the first season only: yearly gain × season days / 365 − one-off loss. */
+  season_net_krw?: number | null
   vs_current_sales_krw: number | null
   vs_current_objective_krw: number | null
   moves: number | null
@@ -385,6 +406,11 @@ export interface RelayoutAlternative {
   changes: RelayoutChange[]
   constraints: { name: string; ok: boolean; detail?: string }[]
   explanations: string[]
+  /** Absent for the baseline and on older backends. */
+  search_status?: SearchStatus
+  objective_rounding_krw?: number | null
+  gap_krw?: number | null
+  bound_krw?: number | null
 }
 
 export interface RelayoutPlanOptions {
@@ -395,6 +421,11 @@ export interface RelayoutPlanOptions {
   movable?: RelayoutMovable
   extra_exits?: string[]
   extra_entries?: string[]
+  /**
+   * Replace a recorded decision (the server answers 409 with the reason when a decision, drawing check or
+   * construction order exists and the conditions differ). Only set after the user confirmed.
+   */
+  replace_decision?: boolean
 }
 
 export interface RelayoutPlan {
@@ -405,6 +436,14 @@ export interface RelayoutPlan {
   /** Entry brands that found no unit. */
   unplaced: { brand_id: string; brand_name: string; reason: string }[]
   caveats: string[]
+  /** Days of the first season the `season_net_krw` of the alternatives counts. */
+  season_horizon?: { start?: string | null; end?: string | null; days: number | null } | null
+  /** The decision the server holds after this call (a plan response always carries it; absent on older backends). */
+  selected_alt_id?: string | null
+  decided_by?: string | null
+  decided_at?: string | null
+  /** True when identical conditions returned the stored plan without recomputing (the decision is kept). */
+  reused?: boolean
 }
 
 export type RelayoutCheckStatus = 'match' | 'different_unit' | 'missing' | 'not_exited'
@@ -492,6 +531,10 @@ export interface RelayoutPhasing {
   brief_id: string
   alt_id: string | null
   rev_id: string | null
+  /** `selected`: the alternative a person decided (or the one the request named); `best_net_fallback`: no decision yet, the best-net alternative was used as a stand-in. */
+  basis?: 'selected' | 'best_net_fallback' | string | null
+  /** Korean sentence saying which alternative the order is for and why. */
+  basis_note?: string | null
   params: { crews: number | null; fitout_weeks: number | null; temporary_sales_ratio: number | null; use_temporary: boolean | null }
   steps: PhasingStep[]
   total_weeks: number | null
@@ -618,7 +661,11 @@ export interface RelayoutReview {
 // Drawing and metadata uploads: /api/uploads/*
 // ---------------------------------------------------------------------------------------------
 
-export type UploadJobStatus = 'queued' | 'running' | 'needs_review' | 'done' | 'failed'
+/**
+ * `partial`: the model was saved but at least one later step (diff, qa, impact, generate, relayout check) failed.
+ * Older backends only know the other states.
+ */
+export type UploadJobStatus = 'queued' | 'running' | 'needs_review' | 'done' | 'partial' | 'failed'
 export type UploadStepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed'
 
 export interface DrawingUploadRequest {
@@ -642,6 +689,14 @@ export interface UploadJobCreated {
   status: UploadJobStatus | string
 }
 
+export interface UploadStageError {
+  step: string
+  message: string
+}
+
+/** Why a job waits for a person; `layer_review_queue`: layers whose meaning the parser guessed. */
+export type UploadReviewReason = 'layer_review_queue' | string
+
 export interface UploadJobSummary {
   job_id: string
   kind: string
@@ -649,6 +704,13 @@ export interface UploadJobSummary {
   rev_id: string | null
   created_at: string | null
   updated_at: string | null
+  /** Whether this job's model is the revision currently saved under `rev_id` (absent on older backends). */
+  revision_available?: boolean
+  review_reason?: UploadReviewReason | null
+  /** Downstream steps that failed after the model was saved (status `partial`). */
+  stage_errors?: UploadStageError[]
+  /** Id of a later job that uploaded the same revision again and replaced this job's model. */
+  superseded_by?: string | null
 }
 
 export interface UploadJobStep {
@@ -677,11 +739,27 @@ export interface UploadQaIssue {
   message: string
 }
 
+/**
+ * Automatic check of the uploaded drawing against the decided relayout plan. `skipped` (with a Korean `reason`)
+ * means the check did not apply (no brief for the parent revision, no decision): it is not a failure.
+ */
+export interface UploadRelayoutCheck {
+  brief_id: string
+  alt_id: string | null
+  conformance_pct: number | null
+  summary: string
+  skipped?: boolean
+  reason?: string | null
+}
+
 export interface UploadJob extends UploadJobSummary {
+  stage_errors: UploadStageError[]
+  superseded_by: string | null
+  review_reason: UploadReviewReason | null
   parent_rev: string | null
   effective_date: string | null
   profile: string | null
-  files: { name: string; floor: string | null; bytes: number | null }[]
+  files: { name: string; floor: string | null; bytes: number | null; sha256?: string | null }[]
   floors_uploaded: string[]
   floors_inherited: string[]
   steps: UploadJobStep[]
@@ -690,8 +768,19 @@ export interface UploadJob extends UploadJobSummary {
   impact: { generator: string; title_ko: string; risk_tier: string }[]
   artifacts: { generator: string; status: string }[]
   qa: { errors: number; warnings: number; infos: number; issues: UploadQaIssue[] } | null
-  relayout_check: { brief_id: string; alt_id: string | null; conformance_pct: number | null; summary: string } | null
+  relayout_check: UploadRelayoutCheck | null
+  /** sha256 of the metadata tables the job used. */
+  metadata_snapshot?: Record<string, string> | null
   error: string | null
+}
+
+/** GET /api/uploads/rules: what the server accepts as a new revision id (the form checks the same before sending). */
+export interface UploadRules {
+  /** Regular expression source, e.g. `^[A-Z0-9][A-Z0-9_-]{0,15}$`. */
+  rev_id_pattern: string
+  /** Ids the server keeps for itself (e.g. `^H[0-9]+$` for what-if revisions). */
+  reserved_patterns: string[]
+  max_length: number
 }
 
 export interface LayerMapping {
@@ -733,6 +822,9 @@ export interface MetadataUploadResult {
 
 export interface MetadataStatus {
   kind: MetadataKind | string
+  /** Korean name and one-sentence description from the server (override the built-in labels when present). */
+  label_ko?: string | null
+  description_ko?: string | null
   present: boolean
   rows: number | null
   updated_at: string | null
@@ -785,6 +877,10 @@ export interface JourneySummary {
   total_krw: number | null
   duration_min: number | null
   walk_m: number | null
+  /** Legs whose distance could not be computed and were left out of walk_m (I10). */
+  skipped_legs?: number | null
+  /** Legs whose distance is a straight-line estimate, not a walkway distance (I10). */
+  straight_legs?: number | null
 }
 
 /** Segment filter as an object (`{age_band: "40s", tier: ["VIP", "VVIP"]}`) or the string form. */
@@ -863,6 +959,8 @@ export interface Route {
   transitions: RouteTransition[]
   /** Walking distance on the origin and destination floors (rounded to 5 m); null when unknown. */
   walk_m: number | null
+  /** True when walk_m is a straight-line estimate because the route could not follow walkways (I10). */
+  straight?: boolean
   caveat: string | null
   [key: string]: unknown
 }
@@ -955,10 +1053,15 @@ export interface FlowParams {
 // POST /api/chat (AG-UI compatible SSE)
 // ---------------------------------------------------------------------------------------------
 
+/** Overlays that can be on screen; the chat request lists the visible ones so the agent adds to them instead of clearing them. */
+export type OverlayName = 'heatmap' | 'highlights' | 'edges' | 'flow' | 'route' | 'journey' | 'compare'
+
 export interface ChatUiState {
   rev: string
   floor: string
   selection: string[]
+  /** Names of the overlays currently visible (see `OverlayName`). */
+  overlays?: OverlayName[]
 }
 
 export interface ChatRequest {
@@ -1009,7 +1112,13 @@ export type AgUiEvent =
       ok?: boolean
     }
   | { type: 'STATE_DELTA'; delta: PatchOperation[] }
-  | { type: 'RUN_FINISHED'; thread_id: string; run_id: string }
+  | {
+      type: 'RUN_FINISHED'
+      thread_id: string
+      run_id: string
+      outcome?: string
+      incomplete?: boolean
+    }
   | { type: 'RUN_ERROR'; message: string }
 
 export type AgUiEventType = AgUiEvent['type']
@@ -1047,6 +1156,10 @@ export interface Heatmap {
   label: string
   values: Record<string, number> | null
   legend?: HeatmapLegend
+  /** Revision the values were computed for. */
+  rev?: string
+  /** True when the revision has no observed sales: the values are model estimates. */
+  estimated?: boolean
 }
 
 export interface LayerToggles {

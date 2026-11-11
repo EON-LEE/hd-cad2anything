@@ -6,21 +6,31 @@ Usage:
 
 Environment: FOUNDRY_PROJECT_ENDPOINT, CHAT_MODEL_DEPLOYMENT, MINI_MODEL_DEPLOYMENT, MCP_SERVER_URL,
 and either MCP_CONNECTION_ID (recommended) or MCP_API_KEY (header fallback for local testing).
+
+Every deployment creates a new version of each agent. The created versions, their models and the SHA-256 of
+their instructions are printed and recorded in data/local/deployed_agents.json (git-ignored); set
+FOUNDRY_AGENT_VERSIONS to the printed value to pin the Atlas runtime to exactly these versions.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from cad2anything.agents.runtime import AGENT_VERSIONS_ENV
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AGENTS_FILE = REPO_ROOT / "agents" / "agents.yaml"
 UI_TOOLS_FILE = REPO_ROOT / "agents" / "ui_tools.yaml"
+DEPLOY_RECORD = REPO_ROOT / "data" / "local" / "deployed_agents.json"
 MCP_SERVER_LABEL = "cad2anything"
 
 
@@ -90,7 +100,28 @@ def build_tool(spec: dict[str, Any]) -> Any:
     )
 
 
-def deploy(dry_run: bool = False) -> dict[str, Any]:
+def instructions_sha256(instructions: str) -> str:
+    return hashlib.sha256(instructions.encode("utf-8")).hexdigest()
+
+
+def version_pins(summary: dict[str, Any]) -> dict[str, str]:
+    """Agent name -> created version, the value of FOUNDRY_AGENT_VERSIONS."""
+    return {name: str(info["version"]) for name, info in summary.items() if info.get("version") is not None}
+
+
+def write_record(summary: dict[str, Any], path: Path = DEPLOY_RECORD) -> Path:
+    """Record a deployment (versions, models, instruction hashes; no endpoints or keys) at ``path``."""
+    record = {
+        "deployed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "agents": summary,
+        "env": {AGENT_VERSIONS_ENV: json.dumps(version_pins(summary), ensure_ascii=False)},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def deploy(dry_run: bool = False, record_path: Path | None = DEPLOY_RECORD) -> dict[str, Any]:
     chat_model = os.environ.get("CHAT_MODEL_DEPLOYMENT", "gpt-6.1-sol")
     mini_model = os.environ.get("MINI_MODEL_DEPLOYMENT", "gpt-5.4-mini")
     mcp_url = os.environ.get("MCP_SERVER_URL")
@@ -108,6 +139,7 @@ def deploy(dry_run: bool = False) -> dict[str, Any]:
             "model": agent["model"],
             "reasoning_effort": agent.get("reasoning_effort"),
             "tools": [s.get("name", s["kind"]) for s in specs],
+            "instructions_sha256": instructions_sha256(agent["instructions"]),
         }
         for agent, specs in plan
     }
@@ -135,16 +167,32 @@ def deploy(dry_run: bool = False) -> dict[str, Any]:
                 tools=[build_tool(s) for s in specs],
                 **options,
             ),
+            metadata={"instructions_sha256": summary[agent["name"]]["instructions_sha256"]},
         )
         summary[agent["name"]]["version"] = getattr(created, "version", None)
+    if record_path is not None:
+        write_record(summary, record_path)
     return summary
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--record",
+        type=Path,
+        default=DEPLOY_RECORD,
+        help="where to record the deployed versions (git-ignored)",
+    )
     args = parser.parse_args()
-    print(json.dumps(deploy(dry_run=args.dry_run), ensure_ascii=False, indent=2))
+    summary = deploy(dry_run=args.dry_run, record_path=args.record)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if pins := version_pins(summary):
+        print(
+            f"\nRecorded in {args.record}. To pin Atlas to these versions, set "
+            f"{AGENT_VERSIONS_ENV}='{json.dumps(pins, ensure_ascii=False)}'",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

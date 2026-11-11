@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react'
+import { errorText } from '../api/client'
 import { cacheKeys } from '../api/keys'
 import { useData } from '../api/source'
 import { useCachedResource } from '../hooks/useCachedResource'
@@ -6,6 +8,7 @@ import { formatArea, formatKrw, formatNumber, formatPercentile } from '../lib/fo
 import type { UnitInfo } from '../lib/geometry'
 import { unitDisplayName } from '../map/prepare'
 import { useAppDispatch, useAppState } from '../state/store'
+import { revisionHasSales } from '../state/uiState'
 
 interface Props {
   unit: UnitInfo
@@ -14,9 +17,21 @@ interface Props {
 
 export function UnitDetailsCard({ unit, changeType }: Props) {
   const { source, meta } = useData()
-  const { ui } = useAppState()
+  const { ui, dataEpoch } = useAppState()
   const dispatch = useAppDispatch()
-  const productivity = useCachedResource(cacheKeys.productivity(source.mode, ui.rev, ui.floor), () => source.getProductivity(ui.rev, ui.floor))
+  // A what-if revision, or an actual one after the last transaction date, has no sales to rank: the backend refuses
+  // (400) to compute KPIs for it, so it is not asked.
+  const noSales = revisionHasSales(meta, ui.rev) === false
+  const productivity = useCachedResource(noSales ? null : cacheKeys.productivity(source.mode, ui.rev, ui.floor), () =>
+    source.getProductivity(ui.rev, ui.floor),
+  )
+  const seenEpoch = useRef(dataEpoch)
+  const reloadProductivity = productivity.reload
+  useEffect(() => {
+    if (dataEpoch === seenEpoch.current) return
+    seenEpoch.current = dataEpoch
+    reloadProductivity()
+  }, [dataEpoch, reloadProductivity])
   const row = productivity.data?.rows.find((r) => r.unit_code === unit.code)
   const category = meta.categories.find((c) => c.code === unit.props.category)
   const heat = ui.heatmap?.values?.[unit.code]
@@ -64,7 +79,9 @@ export function UnitDetailsCard({ unit, changeType }: Props) {
         {heat !== undefined && (
           <>
             <dt>{ui.heatmap?.label || 'heatmap'}</dt>
-            <dd>{heat.toFixed(2)} (0~1 정규화)</dd>
+            <dd>
+              {heat.toFixed(2)} (0~1 정규화){ui.heatmap?.estimated === true ? ' · 모델 추정치' : ''}
+            </dd>
           </>
         )}
         {highlight?.reason && (
@@ -76,8 +93,9 @@ export function UnitDetailsCard({ unit, changeType }: Props) {
       </dl>
       <section className="kpi" aria-label="KPI">
         <h3>KPI · {ui.rev}</h3>
+        {noSales && <p className="muted">이 개정은 실적 데이터가 없어 KPI를 보여 줄 수 없어요</p>}
         {productivity.loading && <p className="muted">KPI 불러오는 중…</p>}
-        {productivity.error && <p className="muted">KPI를 불러오지 못했습니다.</p>}
+        {productivity.error && <p className="muted">KPI를 불러오지 못했습니다. {errorText(productivity.error)}</p>}
         {row ? (
           <dl className="kv">
             <dt>매출</dt>
@@ -99,7 +117,7 @@ export function UnitDetailsCard({ unit, changeType }: Props) {
             )}
           </dl>
         ) : (
-          !productivity.loading && !productivity.error && <p className="muted">KPI 없음 (공실이거나 데이터 없음)</p>
+          !noSales && !productivity.loading && !productivity.error && <p className="muted">KPI 없음 (공실이거나 데이터 없음)</p>
         )}
       </section>
       <button

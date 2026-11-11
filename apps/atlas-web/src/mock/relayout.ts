@@ -196,6 +196,42 @@ const ENTRY_SALES = 820_000_000
 const SEASON_WEIGHT = 1.08
 const DEFAULT_COMMISSION = 0.27
 
+/**
+ * How the alternatives were found (backend semantics): the baseline is not searched (`heuristic`), ALT-1 is proven
+ * optimal, ALT-2 optimal under the condition to differ from ALT-1, ALT-3 only feasible (a gap to the bound is left).
+ */
+const SEARCH_BY_ALT: readonly Pick<RelayoutAlternative, 'search_status' | 'objective_rounding_krw' | 'gap_krw' | 'bound_krw'>[] = [
+  { search_status: 'heuristic' },
+  { search_status: 'optimal', objective_rounding_krw: 100 },
+  { search_status: 'optimal_diverse', objective_rounding_krw: 100 },
+  { search_status: 'feasible', objective_rounding_krw: 100, gap_krw: 42_000_000, bound_krw: 540_000_000 },
+]
+
+/** Season length counted from the later of the season start and the effective date, in days (as the backend does). */
+function seasonHorizon(brief: RelayoutBrief): { start: string; end: string; days: number } {
+  const year = brief.year ?? 2026
+  const [seasonStart, seasonEnd] =
+    brief.season === 'SS' ? [`${year}-03-01`, `${year}-08-31`] : [`${year}-09-01`, `${year + 1}-02-28`]
+  const start = brief.effective_date && brief.effective_date > seasonStart ? brief.effective_date : seasonStart
+  const days = Math.max(0, Math.round((Date.parse(`${seasonEnd}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000) + 1)
+  return { start, end: seasonEnd, days }
+}
+
+/** The conditions of a plan request with the brief's defaults filled in (what the plan stores as `params`). */
+function planParams(brief: RelayoutBrief, options: RelayoutPlanOptions) {
+  return {
+    objective: options.objective ?? (brief.objective === 'sales' ? 'sales' : 'commission'),
+    season: brief.season,
+    max_moves: Math.max(0, Math.round(options.max_moves ?? brief.max_moves ?? 6)),
+    downtime_weeks: Math.max(0, options.downtime_weeks ?? brief.downtime_weeks ?? 2),
+    movable: options.movable ?? (brief.movable === 'all' ? 'all' : 'expiring'),
+    floors: brief.floors,
+    n_alternatives: Math.min(5, Math.max(1, Math.round(options.n_alternatives ?? 3))),
+    extra_exits: [...(options.extra_exits ?? [])].sort(),
+    extra_entries: [...(options.extra_entries ?? [])].sort(),
+  }
+}
+
 interface MockProject {
   brief: RelayoutBrief
   status: string
@@ -406,11 +442,9 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       p.diagnosis = diagnoseProject(p)
       if (p.status === 'draft') p.status = 'diagnosed'
     }
-    const objective = options.objective ?? (brief.objective === 'sales' ? 'sales' : 'commission')
-    const maxMoves = Math.max(0, Math.round(options.max_moves ?? brief.max_moves ?? 6))
-    const weeks = Math.max(0, options.downtime_weeks ?? brief.downtime_weeks ?? 2)
-    const movable = options.movable ?? (brief.movable === 'all' ? 'all' : 'expiring')
-    const count = Math.min(5, Math.max(1, Math.round(options.n_alternatives ?? 3)))
+    const params = planParams(brief, options)
+    const { objective, max_moves: maxMoves, downtime_weeks: weeks, movable, n_alternatives: count } = params
+    const horizon = seasonHorizon(brief)
     const rate = objective === 'commission' ? DEFAULT_COMMISSION : 1
     const weight = SEASON_WEIGHT * rate
     const { rows, sales } = salesByBrand(p)
@@ -472,6 +506,9 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
           objective_delta_krw: objectiveDelta,
           move_cost_krw: moveCost,
           net_krw: objectiveDelta - moveCost,
+          annual_uplift_krw: objectiveDelta,
+          one_off_loss_krw: moveCost,
+          season_net_krw: Math.round((objectiveDelta * horizon.days) / 365 - moveCost),
           vs_current_sales_krw: Math.round(baselineGain + spec.sales[0]),
           vs_current_objective_krw: Math.round(baselineGain * weight + objectiveDelta),
           moves: spec.moves.length,
@@ -488,21 +525,13 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
           ...(spec.constraints ?? []),
         ],
         explanations: spec.explanations,
+        ...SEARCH_BY_ALT[Math.min(index, SEARCH_BY_ALT.length - 1)],
       }
     })
 
     return {
-      params: {
-        objective,
-        season: brief.season,
-        max_moves: maxMoves,
-        downtime_weeks: weeks,
-        movable,
-        floors: brief.floors,
-        n_alternatives: count,
-        extra_exits: options.extra_exits ?? [],
-        extra_entries: options.extra_entries ?? [],
-      },
+      params,
+      season_horizon: horizon,
       current: { sales_krw: current, objective_krw: Math.round(current * weight) },
       baseline: { sales_krw: baselineSales, objective_krw: Math.round(baselineSales * weight), note: '퇴점·입점만 반영한 기준안' },
       alternatives,
@@ -527,17 +556,26 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
     const plan = p.plan
     if (!plan) throw new ApiError(400, '먼저 대안을 만들어 주세요.')
     let alternative: RelayoutAlternative | undefined
+    // Which alternative the order is for and why (backend `basis` and `basis_note`).
+    let basis: 'selected' | 'best_net_fallback' = 'selected'
+    let basisNote = ''
     if (body.alt_id) {
       let wanted = body.alt_id.trim().toUpperCase()
       if (/^\d+$/.test(wanted)) wanted = `ALT-${wanted}`
       alternative = plan.alternatives.find((a) => a.alt_id === wanted)
       if (!alternative) throw new ApiError(400, `대안을 찾을 수 없습니다: ${body.alt_id}`)
+      basisNote =
+        `요청에 지정한 ${alternative.alt_id}를 기준으로 계산했어요. ` +
+        (p.selected_alt_id === alternative.alt_id ? '프로젝트에서 결정한 대안과 같아요.' : '이 요청만으로 프로젝트의 대안 선택을 바꾸지는 않아요.')
     } else if (p.selected_alt_id) {
       alternative = plan.alternatives.find((a) => a.alt_id === p.selected_alt_id)
+      basisNote = `사람이 선택한 ${p.selected_alt_id}를 기준으로 계산했어요.`
     }
     if (!alternative) {
       const options = plan.alternatives.filter((a) => a.alt_id !== 'ALT-0')
       alternative = (options.length ? options : plan.alternatives).reduce((best, a) => ((a.kpi.net_krw ?? -Infinity) > (best.kpi.net_krw ?? -Infinity) ? a : best))
+      basis = 'best_net_fallback'
+      basisNote = `아직 선택한 대안이 없어 기존 비교 지표(net_krw)가 가장 큰 ${alternative.alt_id}를 임시 기준으로 계산했어요. 사람이 결정한 대안은 아니에요.`
     }
     const crews = body.crews ?? 2
     const weeks = body.fitout_weeks ?? Math.min(Math.max(p.brief.downtime_weeks ?? 2, 1), 12)
@@ -563,6 +601,8 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       brief_id: p.brief.brief_id,
       alt_id: alternative.alt_id,
       rev_id: alternative.rev_id,
+      basis,
+      basis_note: basisNote,
       ...result,
       caveats: [...result.caveats, STAND_IN_NOTE],
       created_at: kstNow(),
@@ -660,6 +700,24 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
     },
     plan(briefId: string, options: RelayoutPlanOptions): RelayoutPlan {
       const p = projectOf(briefId)
+      /** The stored plan with the decision the project holds (what a plan response carries). */
+      const response = (plan: RelayoutPlan, reused: boolean): RelayoutPlan => ({
+        ...structuredClone(plan),
+        selected_alt_id: p.selected_alt_id,
+        decided_by: p.decided_by,
+        decided_at: p.decided_at,
+        ...(reused ? { reused: true } : {}),
+      })
+      // A decision, a drawing check or a construction order is protected (backend: DecisionExistsError → 409).
+      if (p.plan && (p.selected_alt_id || p.check || p.phasing)) {
+        if (JSON.stringify(p.plan.params) === JSON.stringify(planParams(p.brief, options))) return response(p.plan, true)
+        if (!options.replace_decision) {
+          const reason =
+            `이미 기록된 대안 ${p.selected_alt_id ?? '선택 없음'}(결정자: ${p.decided_by ?? '기록 없음'}, 결정 시각: ${p.decided_at ?? '기록 없음'})을 보호하고 있어요. ` +
+            '조건을 바꿔 다시 만들면 선택·도면 대조·공사 순서가 초기화돼요. 사용자에게 확인한 뒤 replace_decision=true로 다시 호출하세요.'
+          throw new ApiError(409, `409 Conflict: ${reason}`, reason)
+        }
+      }
       p.plan = planProject(p, options)
       // New alternatives replace the earlier decision, construction order and drawing check.
       p.selected_alt_id = null
@@ -669,7 +727,7 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       p.phasing = null
       p.status = 'planned'
       touch(p)
-      return structuredClone(p.plan)
+      return response(p.plan, false)
     },
     select(briefId: string, body: RelayoutSelectRequest): RelayoutProject {
       const p = projectOf(briefId)
@@ -706,8 +764,11 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
       const p = projects.get(briefId)
       return p ? reportUrl(p) : null
     },
-    /** Checks an uploaded revision against the decided plan of a brief based on its parent (job step). */
-    checkUpload(rev: string, parentRev: string): UploadJob['relayout_check'] {
+    /**
+     * Checks an uploaded revision against the decided plan of a brief based on its parent (job step). Always answers:
+     * without a decided plan for this base revision it says why the check did not apply (`skipped`; not a failure).
+     */
+    checkUpload(rev: string, parentRev: string): NonNullable<UploadJob['relayout_check']> {
       for (const p of projects.values()) {
         if (!p.selected_alt_id || !p.plan || p.brief.base_rev !== parentRev) continue
         p.check = checkProject(p, rev)
@@ -715,7 +776,14 @@ export function createMockRelayout(world: MockWorld, publish: (rev: string) => v
         touch(p)
         return { brief_id: p.brief.brief_id, alt_id: p.check.alt_id, conformance_pct: p.check.conformance_pct, summary: p.check.summary }
       }
-      return null
+      return {
+        brief_id: '',
+        alt_id: null,
+        conformance_pct: null,
+        summary: '',
+        skipped: true,
+        reason: `${parentRev} 기준으로 결정한 개편안이 없어 대조하지 않았어요.`,
+      }
     },
     /** A `relayout_brief` metadata upload (adds or replaces one brief, which starts over as a draft). */
     putBrief(fields: Partial<RelayoutBrief> & { brief_id: string }): void {

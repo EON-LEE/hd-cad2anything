@@ -6,11 +6,12 @@ import { DEFAULT_REVIEW_WINDOW, REVIEW_WINDOW_OPTIONS, canReviewRelayout } from 
 import { CHANGE_LABELS, CHANGE_ORDER, changeColor } from '../lib/colors'
 import { APPROVAL_MODE_LABELS, ARTIFACT_STATUS_LABELS, RISK_LABELS, summarizeValue } from '../lib/format'
 import { floorOfUnitCode } from '../lib/geometry'
-import { replaceOp } from '../state/reducer'
+import { replaceOp, type PanelRequest, type PanelRequests } from '../state/reducer'
 import { useAppState, usePatchUi } from '../state/store'
-import { panelPayloadString, parentRevision } from '../state/uiState'
+import { parentRevision, payloadString } from '../state/uiState'
 import type { Artifact, ChangeItem } from '../types/api'
 import { UploadArea, type UploadRequest } from './UploadArea'
+import { WritesNotice } from './WritesNotice'
 
 const STATUS_TONE: Record<string, string> = {
   awaiting_approval: 'warn',
@@ -147,42 +148,71 @@ function ArtifactCard({
   )
 }
 
+/** The newest change-list or artifact request of the agent (the review tab shows one of them at a time). */
+export function latestReviewRequest(panels: PanelRequests): PanelRequest | null {
+  const { changes, artifact } = panels
+  if (changes && artifact) return changes.seq > artifact.seq ? changes : artifact
+  return changes ?? artifact ?? null
+}
+
 export function ReviewPanel() {
   const { source, meta } = useData()
-  const { ui, panelSeq } = useAppState()
+  const { ui, panels, dataEpoch, panelSeq } = useAppState()
   const patchUi = usePatchUi()
   const mode = source.mode
-  const payload = ui.panel && (ui.panel.type === 'changes' || ui.panel.type === 'artifact') ? ui.panel.payload : {}
-  const revTo = typeof payload.rev_to === 'string' ? payload.rev_to : typeof payload.rev === 'string' ? payload.rev : ui.rev
-  const revFrom =
-    typeof payload.rev_from === 'string'
-      ? payload.rev_from
-      : ui.compareRev && ui.compareRev !== revTo
-        ? ui.compareRev
-        : parentRevision(meta, revTo)
-  const focusGenerator = ui.panel?.type === 'artifact' && typeof payload.generator === 'string' ? payload.generator : null
+  // Requests live in the store, so one made while this tab was not open (or before a later panel replaced
+  // `ui.panel`) is still shown when it opens.
+  const review = latestReviewRequest(panels)
+  const payload = review?.payload ?? {}
+  const revTo = payloadString(payload, 'rev_to') ?? payloadString(payload, 'rev') ?? ui.rev
+  const revFrom = payloadString(payload, 'rev_from') ?? (ui.compareRev && ui.compareRev !== revTo ? ui.compareRev : parentRevision(meta, revTo))
+  const focusGenerator = review?.type === 'artifact' ? payloadString(payload, 'generator') : null
 
   const changes = useCachedResource(revFrom ? cacheKeys.changes(mode, revFrom, revTo) : null, () => source.getChanges(revFrom!, revTo))
   const artifacts = useCachedResource(cacheKeys.artifacts(mode, revTo), () => source.getArtifacts(revTo))
   const [overrides, setOverrides] = useState<Record<string, Artifact>>({})
   const [reviewer, setReviewer] = useState('공간기획 검토자')
   // Upload area: collapsed until opened by the user or a `panel = {type: "uploads"}` request.
-  const [uploadsOpen, setUploadsOpen] = useState(false)
-  const [uploadsMounted, setUploadsMounted] = useState(false)
-  const [uploadRequest, setUploadRequest] = useState<UploadRequest | null>(null)
+  const uploadsPanel = panels.uploads
+  const uploadRequestOf = (request: PanelRequest | undefined): UploadRequest | null =>
+    request ? { jobId: payloadString(request.payload, 'job_id'), seq: request.seq } : null
+  const [uploadsOpen, setUploadsOpen] = useState(!!uploadsPanel)
+  const [uploadsMounted, setUploadsMounted] = useState(!!uploadsPanel)
+  const [uploadRequest, setUploadRequest] = useState<UploadRequest | null>(() => uploadRequestOf(uploadsPanel))
   const uploadsRef = useRef<HTMLElement>(null)
   const [reviewDays, setReviewDays] = useState(DEFAULT_REVIEW_WINDOW)
   // Sales before and after an actual revision took effect (not for the first one or one without sales).
   const reviewable = canReviewRelayout(meta, revTo)
   const reviewUrl = reviewable ? source.relayoutReviewReportUrl(revTo, reviewDays) : null
+  // Requests this tab has already applied (the initial state above covers the ones it was mounted with).
+  const appliedUploads = useRef(uploadsPanel?.seq ?? 0)
+  const appliedReview = useRef(review?.seq ?? 0)
+  const appliedEpoch = useRef(dataEpoch)
 
   useEffect(() => {
-    if (ui.panel?.type !== 'uploads') return
-    setUploadRequest({ jobId: panelPayloadString(ui.panel, 'uploads', 'job_id'), seq: panelSeq })
+    if (!uploadsPanel || uploadsPanel.seq === appliedUploads.current) return
+    appliedUploads.current = uploadsPanel.seq
+    setUploadRequest(uploadRequestOf(uploadsPanel))
     setUploadsOpen(true)
     setUploadsMounted(true)
-    // Intentionally keyed on panelSeq only (like the other panel requests).
-  }, [panelSeq])
+    // Intentionally keyed on the request's seq only (like the other panel requests).
+  }, [uploadsPanel?.seq])
+
+  // Show what the agent just made: a new request, or a change of server data, reloads the lists (they may be cached
+  // from before an agent tool ran a generator or processed a revision).
+  const reloadChanges = changes.reload
+  const reloadArtifacts = artifacts.reload
+  useEffect(() => {
+    const requested = !!review && review.seq !== appliedReview.current
+    if (review) appliedReview.current = review.seq
+    const refreshed = dataEpoch !== appliedEpoch.current
+    appliedEpoch.current = dataEpoch
+    if (!requested && !refreshed) return
+    if (refreshed) setOverrides({})
+    reloadChanges()
+    reloadArtifacts()
+    // Keyed on the request's seq and the data epoch only.
+  }, [review?.seq, dataEpoch])
 
   useEffect(() => {
     if (uploadRequest) uploadsRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
@@ -339,6 +369,7 @@ export function ReviewPanel() {
           <span>검토자</span>
           <input type="text" value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
         </label>
+        <WritesNotice />
         {artifacts.loading && <p className="muted">산출물을 불러오는 중…</p>}
         {artifacts.error && (
           <p className="error-text" role="alert">

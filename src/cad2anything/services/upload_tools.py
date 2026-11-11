@@ -9,10 +9,10 @@ hooks: ``relayout_after_upload(rev, parent_rev)`` (relayout plan check after an 
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
-import threading
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
@@ -37,6 +37,7 @@ from cad2anything.services.uploads import (
     ACTIVE_STATUSES,
     HYPOTHETICAL_ID_RE,
     MB,
+    REV_ID_MAX_LENGTH,
     REV_ID_RE,
     STAGING_DIR,
     STATUS_LABELS,
@@ -88,6 +89,10 @@ def job_row(job: Mapping[str, Any]) -> dict[str, Any]:
         "floors_uploaded": job.get("floors_uploaded"),
         "steps": _steps_text(job),
         "error": job.get("error"),
+        "revision_available": job.get("revision_available", False),
+        "review_reason": job.get("review_reason"),
+        "stage_errors": job.get("stage_errors") or [],
+        "superseded_by": job.get("superseded_by"),
     }
 
 
@@ -119,6 +124,10 @@ def job_brief(job: Mapping[str, Any]) -> dict[str, Any]:
         parts.append(f"계약 대조 경고 {qa.get('warnings', 0)}건, 참고 {qa.get('infos', 0)}건.")
     if job.get("error"):
         parts.append(f"오류: {job['error']}")
+    if job.get("stage_errors"):
+        parts.append(f"실패한 후속 단계: {', '.join(e['step'] for e in job['stage_errors'])}.")
+    if job.get("superseded_by"):
+        parts.append(f"이후 작업 {job['superseded_by']}이 이 개정을 대체했습니다.")
     return {
         "job_id": job.get("job_id"),
         "rev_id": job.get("rev_id"),
@@ -127,6 +136,13 @@ def job_brief(job: Mapping[str, Any]) -> dict[str, Any]:
         "profile": job.get("profile"),
         "status": job.get("status"),
         "status_ko": status_ko,
+        "revision_available": job.get("revision_available", False),
+        "review_reason": job.get("review_reason"),
+        "stage_errors": job.get("stage_errors") or [],
+        "superseded_by": job.get("superseded_by"),
+        "metadata_snapshot": job.get("metadata_snapshot") or {},
+        "files": job.get("files") or [],
+        "source_files": job.get("source_files") or [],
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "floors_uploaded": job.get("floors_uploaded"),
@@ -179,7 +195,6 @@ class UploadTools:
             sync = os.environ.get("ATLAS_UPLOAD_SYNC", "").strip() == "1"
         self._upload_store = JobStore(self.ws)
         self._upload_runner = JobRunner(DrawingPipeline(self, self._upload_store, relations).run, sync)
-        self._metadata_lock = threading.Lock()
         recovered = self._upload_store.recover()
         if recovered:
             logger.warning("%d upload job(s) were interrupted by a restart and marked failed", recovered)
@@ -188,11 +203,12 @@ class UploadTools:
     @staticmethod
     def _upload_rev_id(rev_id: Any) -> str:
         value = str(rev_id or "").strip()
-        if not REV_ID_RE.match(value):
+        if not REV_ID_RE.fullmatch(value):
             raise ToolError(
-                "rev_id는 영문 대문자·숫자·-·_로 1~16자여야 하고 영문 대문자나 숫자로 시작해야 합니다."
+                f"rev_id는 영문 대문자·숫자·-·_로 1~{REV_ID_MAX_LENGTH}자여야 하고 "
+                "영문 대문자나 숫자로 시작해야 합니다."
             )
-        if HYPOTHETICAL_ID_RE.match(value):
+        if HYPOTHETICAL_ID_RE.fullmatch(value):
             raise ToolError(f"{value}처럼 H 뒤에 숫자만 붙은 ID는 가상 개정용입니다. 다른 개정 ID를 쓰세요.")
         return value
 
@@ -311,11 +327,7 @@ class UploadTools:
         self._upload_conflicts(rev)
         parent = self._upload_parent(parent_rev, rev)
         day = self._upload_date(effective_date, parent)
-        try:
-            drawing_profile = self._upload_profile(profile)
-        except NotFoundError as exc:
-            raise ToolError(str(exc)) from exc
-        unit_name = self._upload_units(units) or drawing_profile.units
+        requested_units = self._upload_units(units)
         drawings = collect_drawing_files(files)
         parent_floors = [f.code for f in parent.floors]
         for drawing in drawings:
@@ -326,29 +338,46 @@ class UploadTools:
                 )
         uploaded = [code for code in parent_floors if code in {d.floor for d in drawings}]
         order = {code: index for index, code in enumerate(parent_floors)}
-        record = reset_job(
-            {
-                "job_id": None,
-                "kind": "drawing",
-                "rev_id": rev,
-                "parent_rev": parent.revision.rev_id,
-                "effective_date": day,
-                "profile": drawing_profile.profile_id,
-                "units": unit_name,
-                "run_generators": bool(run_generators),
-                "created_at": None,
-                "updated_at": None,
-                "files": [
-                    {"name": d.name, "floor": d.floor, "bytes": len(d.data)}
-                    for d in sorted(drawings, key=lambda d: order[d.floor])
-                ],
-                "floors_uploaded": uploaded,
-                "floors_inherited": [code for code in parent_floors if code not in uploaded],
-                "layer_mappings": [],
-            }
-        )
         with self._upload_store.lock:
             self._upload_conflicts(rev)
+            try:
+                drawing_profile = self._upload_profile(profile)
+            except NotFoundError as exc:
+                raise ToolError(str(exc)) from exc
+            record = reset_job(
+                {
+                    "job_id": None,
+                    "kind": "drawing",
+                    "rev_id": rev,
+                    "parent_rev": parent.revision.rev_id,
+                    "effective_date": day,
+                    "profile": drawing_profile.profile_id,
+                    "units": requested_units or drawing_profile.units,
+                    "run_generators": bool(run_generators),
+                    "created_at": None,
+                    "updated_at": None,
+                    "files": [
+                        {
+                            "name": d.name,
+                            "floor": d.floor,
+                            "bytes": len(d.data),
+                            "sha256": hashlib.sha256(d.data).hexdigest(),
+                        }
+                        for d in sorted(drawings, key=lambda d: order[d.floor])
+                    ],
+                    "source_files": [
+                        {
+                            "name": base_name(name),
+                            "bytes": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                        }
+                        for name, data in files
+                    ],
+                    "floors_uploaded": uploaded,
+                    "floors_inherited": [code for code in parent_floors if code not in uploaded],
+                    "layer_mappings": [],
+                }
+            )
             job = self._upload_store.create(record)
         try:
             for drawing in drawings:
@@ -406,6 +435,17 @@ class UploadTools:
             job = self._upload_store.load(job_id)
             if job.get("status") in ACTIVE_STATUSES:
                 raise ConflictError("작업이 아직 처리 중입니다. 끝난 뒤 다시 시도하세요.")
+            if job.get("superseded_by"):
+                raise ConflictError(
+                    f"개정 {job['rev_id']}는 이후 작업 {job['superseded_by']}로 다시 올라왔습니다. 그 작업에서 매핑하세요."
+                )
+            if any(
+                other.get("rev_id") == job["rev_id"]
+                and other.get("job_id") != job_id
+                and other.get("status") in ACTIVE_STATUSES
+                for other in self._upload_store.all()
+            ):
+                raise ConflictError("같은 개정의 다른 도면 작업이 처리 중입니다. 끝난 뒤 다시 시도하세요.")
             folder = f"drawings/{job['rev_id']}/{UPLOAD_VARIANT}"
             manifest = self.ws.read_json(f"{folder}/manifest.json")
             if manifest and manifest.get("upload_job") not in (None, job["job_id"]):
@@ -415,7 +455,9 @@ class UploadTools:
             if manifest:
                 self.ws.write_json(f"{folder}/manifest.json", apply_layer_mappings(manifest, cleaned))
             job["layer_mappings"] = [*(job.get("layer_mappings") or []), *cleaned]
-            self._upload_store.save(reset_job(job))
+            job["run_attempt"] = int(job.get("run_attempt") or 0) + 1
+            reset_job(job)
+            self._upload_store.save(job)
         self._upload_runner.submit(job["job_id"])
         return self._upload_store.load(job["job_id"])
 
@@ -453,12 +495,20 @@ class UploadTools:
             outcome = metadata.result(kind)
             outcome["errors"] = ["빈 파일입니다."]
             return outcome
-        with self._metadata_lock:
+        with self._upload_store.lock:
+            if any(
+                job.get("kind") == "drawing" and job.get("status") in ACTIVE_STATUSES
+                for job in self._upload_store.all()
+            ):
+                raise ConflictError(
+                    "도면 처리 작업이 진행 중이라 지금은 메타데이터를 바꿀 수 없어요. 작업이 끝난 뒤 다시 올려 주세요."
+                )
             return metadata.upload_metadata(self, kind, name, bytes(data))
 
     def metadata_status(self) -> list[dict[str, Any]]:
         """Per metadata kind: ``{kind, present, rows, updated_at, required_columns, items}``."""
-        return metadata.metadata_status(self.ws)
+        with self._upload_store.lock:
+            return metadata.metadata_status(self.ws)
 
     def metadata_qa(
         self, model: SpatialModel, effective_date: str, floors: Sequence[str] | None = None
@@ -476,6 +526,111 @@ class UploadTools:
         )
 
     # Agent tools ---------------------------------------------------------------------------------------
+    def data_provenance(self) -> dict[str, Any]:
+        """Report which current datasets are synthetic defaults or uploaded inputs."""
+        with self._upload_store.lock:
+            revisions = self.ws.revisions()
+            revision_meta = {revision.rev_id: self.ws.model_meta(revision.rev_id) for revision in revisions}
+            by_id = {revision.rev_id: revision for revision in revisions}
+            jobs = {job["job_id"]: job for job in self._upload_store.all()}
+
+            def source_of(rev_id: str, seen: set[str] | None = None) -> str:
+                seen = set(seen or ())
+                if rev_id in seen:
+                    return "synthetic_demo"
+                seen.add(rev_id)
+                source = revision_meta[rev_id].get("source")
+                if source == "uploaded":
+                    return "uploaded"
+                revision = by_id[rev_id]
+                parent = revision.parent_rev_id
+                if revision.kind == RevisionKind.HYPOTHETICAL and parent in by_id:
+                    return source_of(parent, seen)
+                return "synthetic_demo"
+
+            drawing_rows = []
+            for revision in revisions:
+                info = revision_meta[revision.rev_id]
+                source = source_of(revision.rev_id)
+                row: dict[str, Any] = {
+                    "rev_id": revision.rev_id,
+                    "kind": revision.kind.value,
+                    "parent_rev_id": revision.parent_rev_id,
+                    "source": source,
+                    "model_source": info.get("source"),
+                    "origin": "uploaded" if info.get("source") == "uploaded" else "generated",
+                }
+                if info.get("source") == "uploaded":
+                    job = jobs.get(info.get("job_id")) or {}
+                    row.update(
+                        job_id=info.get("job_id"),
+                        files=job.get("files") or [],
+                        source_files=job.get("source_files") or info.get("source_files") or [],
+                        uploaded_at=job.get("created_at"),
+                        floors_uploaded=info.get("floors_uploaded") or [],
+                        floors_inherited=job.get("floors_inherited") or [],
+                    )
+                drawing_rows.append(row)
+            drawing_sources = {row["source"] for row in drawing_rows}
+            drawings_source = (
+                "mixed" if len(drawing_sources) > 1 else next(iter(drawing_sources), "synthetic_demo")
+            )
+            domains: list[dict[str, Any]] = [
+                {
+                    "domain": "drawings",
+                    "source": drawings_source,
+                    "present": bool(drawing_rows),
+                    "revisions": drawing_rows,
+                }
+            ]
+            for name in ("transactions", "customers"):
+                domains.append({"domain": name, **metadata.synthetic_business_source(self.ws, name)})
+            status = {item["kind"]: item for item in metadata.metadata_status(self.ws)}
+            for kind, domain in (
+                ("brands", "brands"),
+                ("leases", "leases"),
+                ("pos_terminals", "pos_terminals"),
+                ("stores", "stores"),
+                ("store_kpis", "store_kpis"),
+                ("relayout_brief", "briefs"),
+                ("drawing_profile", "profiles"),
+            ):
+                current = status[kind]
+                row = {
+                    "domain": domain,
+                    **{
+                        key: current.get(key)
+                        for key in (
+                            "source",
+                            "source_basis",
+                            "present",
+                            "filename",
+                            "uploaded_at",
+                            "sha256",
+                            "stored_sha256",
+                            "rows",
+                            "record_matches_content",
+                        )
+                    },
+                }
+                if "item_sources" in current:
+                    row["items"] = current["item_sources"]
+                if current.get("record_matches_content") is False or any(
+                    item.get("record_matches_content") is False for item in current.get("item_sources") or []
+                ):
+                    row["note"] = "현재 파일이 최근 업로드 기록과 달라 출처를 확인해야 해요."
+                domains.append(row)
+        return {
+            "ok": True,
+            "default_dataset": "synthetic_demo",
+            "domains": domains,
+            "note": (
+                "기본 데이터는 허구로 만든 합성 시연 데이터이며 실제 고객 데이터를 익명화한 것이 아니에요. "
+                "업로드 기록이 없는 파일은 기본 데이터로 분류하므로 직접 교체한 파일의 출처는 따로 확인해 주세요. "
+                "업로드한 자료가 실제 자료인지는 이 도구가 판단하지 않아요."
+            ),
+        }
+
     def upload_list_jobs(self, job_id: str | None = None, limit: int = 5) -> dict[str, Any]:
         """Recent drawing upload jobs, or the status and results of one job (``job_id``)."""
         if job_id:

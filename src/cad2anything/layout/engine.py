@@ -187,10 +187,14 @@ class LayoutAlternative:
     move_cost_krw: float = 0.0
     objective_label: str = "기대 매출"
     search_status: str = "heuristic"
-    """"optimal" (proven: ALT-1 over all feasible layouts; later alternatives under the diversity penalty
-    among layouts that differ from the earlier ones), "feasible" (solver time limit) or "heuristic"."""
+    """"optimal" (first, adopted rounded optimum), "optimal_diverse" (adopted restricted optimum),
+    "feasible" (unproven or heuristic retained), or "heuristic" (no exact result)."""
     net_upper_bound_krw: float = math.nan
     """Upper bound of the net objective change any feasible layout can reach (from the ALT-1 solve)."""
+    objective_rounding_krw: float | None = None
+    bound_krw: float = math.nan
+    """Upper bound of this solve's net objective, including diversity penalties and rounding allowance."""
+    gap_krw: float = math.nan
 
     @property
     def delta(self) -> float:
@@ -227,6 +231,9 @@ class LayoutAlternative:
             "spillover_krw": self.spillover_krw,
             "search_status": self.search_status,
             "net_upper_bound_krw": self.net_upper_bound_krw,
+            "objective_rounding_krw": self.objective_rounding_krw,
+            **({"bound_krw": self.bound_krw} if math.isfinite(self.bound_krw) else {}),
+            **({"gap_krw": self.gap_krw} if math.isfinite(self.gap_krw) else {}),
             "moves": [asdict(m) for m in self.moves],
             "assignment": self.assignment,
             "kpi_deltas": self.kpi_deltas.to_dict(orient="records"),
@@ -247,16 +254,21 @@ def check_constraints(
     adjacency_pairs: pd.DataFrame | None,
     constraints: LayoutConstraints,
     free: Collection[str] = (),
+    adjacency_reference: Mapping[str, str | None] | None = None,
 ) -> pd.DataFrame:
     """Verify an assignment against the constraints; one row per rule with violations listed in ``detail``.
 
-    Rules on relocated brands only; existing placements are grandfathered (an adjacency conflict counts
-    only when at least one of the two units changed brand). ``free`` brands (new entries) are not moves:
+    Rules on relocated brands only; only pairs in the actual pre-entry ``adjacency_reference`` are
+    grandfathered (defaults to the base assignment, never including ``free`` entrants). ``free`` brands
+    are not moves:
     they skip the anchor, filter, cross-floor and move-count rules but must fit area and preferred floor.
     """
     infos = brand_info(brands)
     base_assignment = normalize_assignment(base_assignment)
     assignment = normalize_assignment(assignment)
+    adjacency_reference = normalize_assignment(
+        base_assignment if adjacency_reference is None else adjacency_reference
+    )
     feats = unit_features.drop_duplicates("unit_code").set_index("unit_code")
     floor_of = feats["floor"].astype(str).to_dict()
     area_of = pd.to_numeric(feats["area_m2"], errors="coerce").to_dict()
@@ -355,7 +367,12 @@ def check_constraints(
             brand_a, brand_b = assignment.get(a), assignment.get(b)
             if brand_a is None or brand_b is None or brand_a not in infos or brand_b not in infos:
                 continue
-            if base_assignment.get(a) == brand_a and base_assignment.get(b) == brand_b:
+            if (
+                brand_a not in free_ids
+                and brand_b not in free_ids
+                and adjacency_reference.get(a) == brand_a
+                and adjacency_reference.get(b) == brand_b
+            ):
                 continue
             checked_pairs += 1
             if constraints.forbid_conflicts and constraints.conflicting(infos[brand_a], infos[brand_b]):
@@ -406,12 +423,24 @@ class _Search:
         weights: Mapping[str, float] | None = None,
         move_cost: Mapping[str, float] | None = None,
         free: Collection[str] = (),
+        adjacency_reference: Mapping[str, str | None] | None = None,
     ):
         self.scorer = scorer
         self.constraints = constraints
         codes = [u for u, info in scorer.units.items() if constraints.in_scope(info.floor)]
         self.codes = sorted(codes, key=lambda u: (floor_sort_key(scorer.units[u].floor), u))
         self.index = {u: i for i, u in enumerate(self.codes)}
+        self.adjacency_reference = normalize_assignment(
+            base_assignment if adjacency_reference is None else adjacency_reference
+        )
+        self.external_neighbors = [
+            tuple(
+                (v, base_assignment[v])
+                for v in scorer.neighbors.get(u, ())
+                if v not in self.index and base_assignment.get(v) is not None
+            )
+            for u in self.codes
+        ]
         self.nbrs = [
             tuple(self.index[v] for v in scorer.neighbors.get(u, ()) if v in self.index) for u in self.codes
         ]
@@ -424,6 +453,7 @@ class _Search:
                 self.base_pos[b] = u
         free_ids = set(free)
         self.free = [bid in free_ids for bid in self.bids]
+        self.adjacency_base = [bindex.get(self.adjacency_reference.get(u), -1) for u in self.codes]
         self.weight = [float((weights or {}).get(bid, 1.0)) for bid in self.bids]
         self.cost = [
             0.0 if self.free[b] else float((move_cost or {}).get(bid, 0.0)) for b, bid in enumerate(self.bids)
@@ -444,14 +474,15 @@ class _Search:
                 else []
             )
             self.dest.append(dest)
-            self.dest_all.append(sorted([*dest, home]))
+            homes = [home] if not self.free[b] or self._destination_ok(b, home) else []
+            self.dest_all.append(sorted([*dest, *homes]))
             if info is None:
                 self.value.append({home: 0.0})
             else:
                 self.value.append(
                     {
                         u: self.weight[b] * scorer.location_value(self.bids[b], self.codes[u])
-                        for u in self.dest_all[b]
+                        for u in sorted({home, *self.dest_all[b]})
                     }
                 )
         self.dest_set = [set(d) for d in self.dest]
@@ -473,7 +504,28 @@ class _Search:
             and unit.floor != self.scorer.units[self.codes[self.base_pos[b]]].floor
         ):
             return False
-        return self.constraints.area_ok(info, unit.area_m2) and self.constraints.floor_ok(info, unit.floor)
+        if not (self.constraints.area_ok(info, unit.area_m2) and self.constraints.floor_ok(info, unit.floor)):
+            return False
+        if self.constraints.forbid_conflicts:
+            for code, other in self.external_neighbors[u]:
+                other_info = self.scorer.brands.get(other)
+                if other_info is None or not self.constraints.conflicting(info, other_info):
+                    continue
+                if not (
+                    not self.free[b]
+                    and self.adjacency_reference.get(self.codes[u]) == self.bids[b]
+                    and self.adjacency_reference.get(code) == other
+                ):
+                    return False
+        return True
+
+    def grandfathered(self, u: int, b: int, v: int, other: int) -> bool:
+        return (
+            not self.free[b]
+            and not self.free[other]
+            and self.adjacency_base[u] == b
+            and self.adjacency_base[v] == other
+        )
 
     def excess(self, a: int, b: int) -> float:
         key = (a, b) if a < b else (b, a)
@@ -559,11 +611,7 @@ class _Search:
                     continue
                 for v in self.nbrs[u]:
                     other = st.state[v]
-                    if (
-                        other >= 0
-                        and self.conflict(b, other)
-                        and not (self.base[u] == b and self.base[v] == other)
-                    ):
+                    if other >= 0 and self.conflict(b, other) and not self.grandfathered(u, b, v, other):
                         ok = False
                         break
                 if not ok:
@@ -654,6 +702,24 @@ class _Search:
 
     def placements(self, st: _State) -> frozenset[tuple[int, int]]:
         return frozenset((b, u) for b, u in enumerate(st.pos) if u != self.base_pos[b])
+
+    def valid(self, st: _State) -> bool:
+        present = [b for b in st.state if b >= 0]
+        if sorted(present) != list(range(len(self.bids))) or st.n_moved > self.constraints.max_moves:
+            return False
+        for u, b in enumerate(st.state):
+            if b < 0:
+                continue
+            if (self.free[b] or u != self.base_pos[b]) and (
+                not self.movable[b] or not self._destination_ok(b, u)
+            ):
+                return False
+            if self.constraints.forbid_conflicts:
+                for v in self.nbrs[u]:
+                    other = st.state[v]
+                    if other >= 0 and self.conflict(b, other) and not self.grandfathered(u, b, v, other):
+                        return False
+        return True
 
     def objective_of(self, state: Sequence[int]) -> float:
         """Weighted expected sales of a full scope state minus the move costs it incurs."""
@@ -816,6 +882,7 @@ def generate_alternatives(
     free: Collection[str] = (),
     objective_label: str = "기대 매출",
     exact_search: bool | None = None,
+    adjacency_reference: Mapping[str, str | None] | None = None,
 ) -> list[LayoutAlternative]:
     """Up to ``n_alternatives`` distinct, constraint-satisfying layouts that raise the objective.
 
@@ -828,9 +895,10 @@ def generate_alternatives(
     polish (deterministic for a given ``seed``). Unless ``exact_search`` is False (default: the
     ``ATLAS_LAYOUT_EXACT`` switch, on), the same objective is then solved as a mixed-integer program with
     OR-Tools (``layout.exact``), warm-started with the heuristic layout and excluding the relocation sets
-    of earlier alternatives; the better layout is kept. ``search_status`` records "optimal" when the
-    solver proved optimality, "feasible" when it hit the time limit and "heuristic" when OR-Tools is not
-    available (the best layout found, no proof). Later alternatives pay ``diversity_weight * (average gain
+    of earlier alternatives; the better layout is kept. ``search_status`` is "optimal" only for the first
+    adopted proven rounded optimum, "optimal_diverse" for adopted optima under diversity restrictions,
+    "feasible" when unproven or the heuristic is kept, and "heuristic" without an exact result.
+    Later alternatives pay ``diversity_weight * (average gain
     per relocation of the first alternative)`` for every relocation already used by an earlier
     alternative. Alternatives without a strict net improvement are not returned, so the list may be
     shorter (or empty).
@@ -842,7 +910,7 @@ def generate_alternatives(
     move_cost = dict(move_cost or {})
     free_ids = frozenset(free)
     scorer = AssignmentScorer(unit_features, infos, model_params, affinity_pairs, adjacency_pairs)
-    search = _Search(scorer, base_assignment, constraints, weights, move_cost, free_ids)
+    search = _Search(scorer, base_assignment, constraints, weights, move_cost, free_ids, adjacency_reference)
     scope_base = {code: base_assignment.get(code) for code in search.codes}
     before = scorer.score(scope_base)
     objective_before, _, _ = _weighted(before, weights)
@@ -850,7 +918,7 @@ def generate_alternatives(
     before_units = before.units.set_index("unit_code")
     base_pos = {b: u for u, b in scope_base.items() if b is not None}
     custom = bool(weights or move_cost or free_ids)
-    gain_label = "순효과" if custom else "기대 매출 증가"
+    gain_label = "비교 지표(연간 증가 효과−1회성 공사 손실)" if custom else "기대 매출 증가"
     use_exact = exact.enabled() if exact_search is None else bool(exact_search)
     time_limit = exact.time_limit()
     base_objective = search.objective_of(search.base) if use_exact else 0.0
@@ -862,20 +930,37 @@ def generate_alternatives(
     for k in range(n_alternatives):
         accepted: _State | None = None
         status = "heuristic"
+        rounding: float | None = None
+        bound = math.nan
+        gap = math.nan
         for attempt in range(3):
             st = search.run(seed, k, attempt, max_iter, mu, placed)
             status = "heuristic"
+            rounding, bound, gap = None, math.nan, math.nan
             if use_exact:
                 solved = exact.solve(search, mu, placed, st.state, seen, time_limit)
                 if solved is not None:
                     candidate = search.state_of(solved.state, mu, placed)
-                    if search.placements(st) in seen or candidate.pen > st.pen + search.tol:
+                    adopted = (
+                        not search.valid(st)
+                        or search.placements(st) in seen
+                        or candidate.state == st.state
+                        or candidate.pen >= st.pen - 1e-6
+                    )
+                    if adopted:
                         st = candidate
-                    status = "optimal" if solved.optimal else "feasible"
+                    status = (
+                        ("optimal" if k == 0 and not seen and mu == 0 else "optimal_diverse")
+                        if solved.optimal and adopted
+                        else "feasible"
+                    )
+                    rounding = solved.objective_rounding_krw
+                    bound = solved.bound - base_objective
+                    gap = max(0.0, bound - st.pen)
                     if not alternatives and attempt == 0:
                         net_bound = solved.bound - base_objective
             moves = search.placements(st)
-            if not moves or st.raw <= search.tol:
+            if not moves or st.raw <= search.tol or not search.valid(st):
                 break
             if moves in seen:
                 mu = max(2.0 * mu, search.tol * 10)
@@ -897,6 +982,18 @@ def generate_alternatives(
         if objective_after - cost <= objective_before + search.tol:
             break
         full = {**dict(base_assignment), **scope_after}
+        checks = check_constraints(
+            base_assignment,
+            full,
+            unit_features,
+            infos,
+            adjacency_pairs,
+            constraints,
+            free_ids,
+            adjacency_reference=adjacency_reference,
+        )
+        if not checks["satisfied"].all():
+            break
         after_units = after.units.set_index("unit_code")
         move_list = [_move_detail(b, base_pos[b], new_pos[b], before_units, after_units) for b in moved]
         delta = after.total - before.total
@@ -913,7 +1010,8 @@ def generate_alternatives(
                 f"[{ESTIMATE_LABEL}] {alt_id}: 기존 브랜드 {len(move_list)}건 이동"
                 + (f", 신규 입점 위치 조정 {len(shifted)}건" if shifted else "")
                 + f", {objective_label} {format_krw(objective_before)} → {format_krw(objective_after)}"
-                f" (이전 공사 손실 {format_krw(cost)}, 순효과 {format_krw_delta(net)}), 기대 매출 "
+                f" (연간 증가 효과 {format_krw_delta(objective_after - objective_before)}, "
+                f"1회성 공사 손실 {format_krw(cost)}, 기존 비교 지표 {format_krw_delta(net)}), 기대 매출 "
                 f"{format_krw_delta(delta)} (범위 {format_krw_delta(after.total_low - before.total)}~"
                 f"{format_krw_delta(after.total_high - before.total)})."
             )
@@ -926,17 +1024,23 @@ def generate_alternatives(
             )
         explanations = [m.explanation for m in move_list]
         if not alternatives and status == "optimal":
-            summary += f" 최적해 확인: 같은 제약에서 {gain_label}가 더 큰 배치는 없습니다."
+            summary += " 최적해 확인: 100원 단위로 반올림한 모델과 제약 안에서 확인한 결과입니다."
         elif not alternatives and status == "feasible" and math.isfinite(net_bound):
             summary += (
-                f" 탐색 시간 안에 최적 증명을 끝내지 못했습니다(이론상 최대 {gain_label} "
+                f" 이 배치의 최적성은 확인하지 않았습니다(100원 단위로 반올림한 모델과 제약 안에서 "
+                f"반올림 오차 한도를 더한 {gain_label} 상한 "
                 f"{format_krw_delta(net_bound)})."
             )
         elif alternatives and alternatives[0].search_status == "optimal":
-            gap = max(0.0, alternatives[0].net_delta - net)
+            comparison_gap = alternatives[0].net_delta - net
             summary += (
-                f" ALT-1(최적해)과 겹치는 이동을 줄인 대안으로, {gain_label}가 ALT-1보다 "
-                f"{format_krw(gap)} 작습니다."
+                f" ALT-1(100원 단위로 반올림한 모델과 제약 안에서 최적해)과 겹치는 이동을 줄인 대안으로, "
+                f"{gain_label}가 ALT-1보다 "
+                f"{format_krw(abs(comparison_gap))} {'작습니다' if comparison_gap >= 0 else '큽니다'}."
+            )
+        if status == "optimal_diverse":
+            summary += (
+                " 100원 단위로 반올림한 모델과 앞선 대안과 다르게 만드는 조건 안에서 최적해를 확인했습니다."
             )
         for b in shifted:
             name = infos[b].brand_name if b in infos else b
@@ -960,9 +1064,7 @@ def generate_alternatives(
                 objective_high=objective_high,
                 spillover_krw=spillover,
                 kpi_deltas=_kpi_deltas(before, after),
-                constraint_checks=check_constraints(
-                    base_assignment, full, unit_features, infos, adjacency_pairs, constraints, free_ids
-                ),
+                constraint_checks=checks,
                 summary=summary,
                 explanations=explanations,
                 sales_before=before.total,
@@ -973,6 +1075,9 @@ def generate_alternatives(
                 objective_label=objective_label,
                 search_status=status,
                 net_upper_bound_krw=net_bound,
+                objective_rounding_krw=rounding,
+                bound_krw=bound,
+                gap_krw=gap,
             )
         )
         placements = search.placements(accepted)

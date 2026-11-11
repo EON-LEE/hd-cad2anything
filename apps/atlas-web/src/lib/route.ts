@@ -155,6 +155,8 @@ export function normalizeRoute(raw: unknown): Route | null {
     transitions: normalizeTransitions(raw.transitions, origin, destination),
     walk_m: finite(raw.walk_m),
     caveat: text(raw.caveat),
+    // I10: carry the straight-line fallback flag only when the backend set it (normal routes omit it).
+    ...(raw.straight === true ? { straight: true } : {}),
   }
 }
 
@@ -210,15 +212,24 @@ export function routeTransitionText(t: RouteTransition, viaType: string | null, 
   return parts.join(' · ')
 }
 
-/** Summary chips of the route box: "걷는 거리 85m", then one chip per floor change. */
+/**
+ * Distance chip of the route box (I10): a straight-line fallback is labeled as an estimate and an
+ * unknown distance says so, so the card never implies a drawn walkway distance that was not computed.
+ */
+export function routeDistanceChip(route: Pick<Route, 'walk_m' | 'straight'>): string {
+  if (route.walk_m === null) return route.straight ? '거리 계산 불가 · 직선 추정' : '거리 계산 불가'
+  return `${route.straight ? '직선 추정' : '걷는 거리'} ${formatWalk(route.walk_m)}`
+}
+
+/** Summary chips of the route box: the distance (or its fallback), then one chip per floor change. */
 export function routeSummaryChips(route: Route, floors?: readonly FloorInfo[]): string[] {
-  const chips: string[] = []
-  if (route.walk_m !== null) chips.push(`걷는 거리 ${formatWalk(route.walk_m)}`)
+  const chips: string[] = [routeDistanceChip(route)]
   for (const t of route.transitions) chips.push(routeTransitionText(t, route.via_type, floors))
   return chips
 }
 
-/** Legend line: "통로망 최단 경로 · 걷는 거리 85m". */
-export function routeLegendText(route: Route): string {
-  return route.walk_m !== null ? `통로망 최단 경로 · 걷는 거리 ${formatWalk(route.walk_m)}` : '통로망 최단 경로'
+/** Legend line: "통로망 최단 경로 · 걷는 거리 85m" (or the straight-line / unknown fallback, I10). */
+export function routeLegendText(route: Pick<Route, 'walk_m' | 'straight'>): string {
+  if (route.walk_m === null) return route.straight ? '통로망을 따라갈 수 없어 직선 거리로 추정' : '통로망 최단 경로'
+  return route.straight ? `직선 거리 추정 · ${formatWalk(route.walk_m)}` : `통로망 최단 경로 · 걷는 거리 ${formatWalk(route.walk_m)}`
 }

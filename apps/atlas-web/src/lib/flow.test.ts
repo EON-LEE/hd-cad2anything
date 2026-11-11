@@ -35,7 +35,7 @@ const contractExample = {
     },
   },
   markers: [{ floor: '3F', x: 60.0, y: 31.5, rank: 1, kind: 'spot', label: '1', title: '후보 1 · 3F 에스컬레이터 A 앞 통로', unit_code: null }],
-  legend: { low: '적음', high: '많음', unit: '명(추정)', note: '결제 순서를 통로망 최단 경로로 이어 모은 값' },
+  legend: { low: '적음', high: '많음', unit: '회(추정 통과)', note: '결제 순서를 통로망 최단 경로로 이어 센 가중 통과 횟수예요. 고유 방문자 수가 아니에요.' },
   summary: { customer_days: 1234, trips: 4567, floors: ['3F', '4F'] },
   caveat: '결제 순서를 통로망 최단 경로로 이은 추정이에요. 실제로 걸은 길이 아니에요.',
 }
@@ -176,7 +176,7 @@ describe('flow helpers', () => {
     expect(flowModeLabel('crowd')).toBe('통로 집계')
     expect(flowSummaryChips(flow)).toEqual(['고객-일 1,234', '이동 4,567건', '2개 층', '후보 4곳'])
     expect(flowSummaryChips(normalizeFlow(contractExample)!)).toEqual(['고객-일 1,234', '이동 4,567건', '2개 층'])
-    expect(flowValueText(flow, 1234)).toBe('1,234명(추정)')
+    expect(flowValueText(flow, 1234)).toBe('1,234회(추정 통과)')
     expect(flowValueText(flow, null)).toBe('')
     expect(flowValueText({ mode: 'egress', legend: null }, 2.4)).toBe('폭 2.4m')
     expect(flowValueText({ mode: 'egress', legend: null }, 3)).toBe('폭 3m')

@@ -2,6 +2,7 @@
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import { configDefaults } from 'vitest/config'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 // Backend (FastAPI atlas-api) used by the dev/preview proxy. Override with ATLAS_API_URL if needed.
@@ -25,5 +26,7 @@ export default defineConfig(({ mode }) => ({
     // Pure logic tests run in Node; component tests opt into jsdom with `// @vitest-environment jsdom`.
     environment: 'node',
     include: ['src/**/*.test.{ts,tsx}'],
+    // Playwright specs under e2e/ are run by `npm run e2e`, never by vitest.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
 }))

@@ -3,7 +3,7 @@ import { normalizeFlow } from '../lib/flow'
 import { normalizeJourney } from '../lib/journey'
 import { parsePointer, touchedKeys, type PatchOperation } from '../lib/jsonPatch'
 import { normalizeRoute } from '../lib/route'
-import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, PanelType, UiState } from '../types/api'
+import type { GraphEdge, HeatmapLegend, Highlight, LayerToggles, Meta, OverlayName, PanelType, UiState } from '../types/api'
 
 export const DEFAULT_LAYERS: LayerToggles = { fixtures: false, walkways: true, labels: true }
 
@@ -41,11 +41,15 @@ export function panelTab(panel: UiState['panel']): 'review' | 'layout' | null {
   }
 }
 
+/** Non-empty string field of a payload (a panel request's or a patch's). */
+export function payloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = payload?.[key]
+  return typeof value === 'string' && value.trim() !== '' ? value : null
+}
+
 /** Non-empty string payload field of a panel request of the given type (e.g. `uploads` → `job_id`). */
 export function panelPayloadString(panel: UiState['panel'], type: PanelType, key: string): string | null {
-  if (panel?.type !== type) return null
-  const value = panel.payload[key]
-  return typeof value === 'string' && value.trim() !== '' ? value : null
+  return panel?.type === type ? payloadString(panel.payload, key) : null
 }
 
 export function pickDefaultFloor(meta: Meta | null | undefined): string {
@@ -55,6 +59,36 @@ export function pickDefaultFloor(meta: Meta | null | undefined): string {
 
 export function parentRevision(meta: Meta | null | undefined, rev: string): string | null {
   return meta?.revisions.find((r) => r.rev_id === rev)?.parent_rev_id ?? null
+}
+
+// Ids the app and the backend give to what-if revisions: "H3" (layout alternatives) and "FW2026-A1" (relayout plans).
+const HYPOTHETICAL_ID = /^H\d+$|-A\d+$/
+
+/**
+ * Whether the analytics of a revision rest on observed sales: false for hypothetical revisions and for actual ones
+ * that start after the last transaction date; null when it cannot be told (a revision that is not in the list yet).
+ */
+export function revisionHasSales(meta: Meta | null | undefined, rev: string): boolean | null {
+  const info = meta?.revisions.find((r) => r.rev_id === rev)
+  if (!info) return HYPOTHETICAL_ID.test(rev) ? false : null
+  if (info.kind === 'hypothetical') return false
+  if (typeof info.has_sales === 'boolean') return info.has_sales
+  const through = meta?.data_through
+  if (info.effective_date && through) return info.effective_date <= through
+  return true
+}
+
+/** Overlays on screen right now, in the names the chat request and the agent use. */
+export function visibleOverlays(ui: UiState): OverlayName[] {
+  const names: OverlayName[] = []
+  if (ui.heatmap) names.push('heatmap')
+  if (ui.highlights.length > 0) names.push('highlights')
+  if (ui.edges.length > 0) names.push('edges')
+  if (ui.flow) names.push('flow')
+  if (ui.route) names.push('route')
+  if (ui.journey) names.push('journey')
+  if (ui.compareRev) names.push('compare')
+  return names
 }
 
 export function createInitialUiState(meta: Meta | null | undefined, overrides: Partial<UiState> = {}): UiState {

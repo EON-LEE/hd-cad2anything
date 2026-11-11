@@ -2,8 +2,8 @@
 
 ``analytics_store_compare`` puts the flagship next to peer stores. The flagship's monthly sales come from its
 transactions and its area from the actual revision in effect each month (occupied units, weighted by days);
-peer stores come from human or BI metadata (``business/stores.csv`` and ``business/store_kpis.csv``, synthetic in
-this PoC: ``cad2anything.mockgen.stores``). ``analytics_relayout_review`` reviews a past relayout (parent revision
+peer stores come from human or BI metadata (``business/stores.csv`` and ``business/store_kpis.csv``), whose
+defaults are synthetic. ``analytics_relayout_review`` reviews a past relayout (parent revision
 -> revision): each changed unit's average daily sales in the same number of days before and after the effective
 date, sales per m2 from the parent and revision areas, and the same floor's unchanged units as a control.
 ``relayout_review_html`` prints the review.
@@ -34,7 +34,12 @@ from cad2anything.catalog import CATEGORIES, FACILITY_CODE, FACILITY_NAME
 from cad2anything.model import RevisionKind
 from cad2anything.services.analytics_tools import _floor_code, _json, _parse_date
 from cad2anything.services.errors import NotFoundToolError, ToolError
-from cad2anything.services.metadata import normalize_category, normalize_period
+from cad2anything.services.metadata import (
+    normalize_category,
+    normalize_period,
+    synthetic_business_source,
+    table_provenance,
+)
 from cad2anything.services.uploads import CHANGE_LABELS
 
 FLAGSHIP_ID = FACILITY_CODE
@@ -77,21 +82,18 @@ STORE_GUIDE = (
     "store_kpis(점포별 월·층·카테고리 실적: store_id, period(YYYY-MM), floor, category, area_m2, sales_krw)를 "
     "CSV나 XLSX로 올려 주세요."
 )
-COMPARE_CAVEAT = (
-    "다른 점포 실적은 사람이 올린 store_kpis 메타데이터(이 PoC에서는 합성 데이터)이고, 대상 점포 실적은 거래 데이터에서 "
-    "계산했어요. 점포마다 면적(영업 매장 면적)과 매출(순매출) 기준이 같다고 가정했어요. 입지·상권·점포 규모를 통제하지 않은 "
-    "단순 비교라 차이의 원인을 뜻하지 않아요."
+COMPARE_CAVEAT_LIMITS = (
+    "점포마다 면적(영업 매장 면적)과 매출(순매출) 기준이 같다고 가정했어요. "
+    "입지·상권·점포 규모를 통제하지 않은 단순 비교라 차이의 원인을 뜻하지 않아요."
 )
 REVIEW_CAVEATS = (
     "적용일 앞뒤 같은 일수의 일평균 매출을 비교한 관측 결과예요. 상관관계일 뿐 인과 효과가 아니에요.",
     "같은 층에서 바뀌지 않은 매장의 같은 기간 변화(비교군)로 계절성과 층 공통 변화를 일부만 걸렀어요. "
     "판촉, 브랜드 자체 변화, 공사 기간은 통제하지 않았어요.",
-    "합성 데이터라 개편 효과가 심어져 있어요(예: R1의 3층 에스컬레이터 정면 이동, R2의 3층 카테고리 구성 변화). "
-    "실제 매장 결과가 아니에요.",
     "매출은 표본 거래에 표본 가중치를 곱한 전체 규모 순매출이에요. ㎡당 매출은 일평균 매출을 연 단위로 환산해 "
     "이전 개정과 해당 개정 도면의 면적으로 나눴어요.",
 )
-REVIEW_CAVEAT = "상관관계일 뿐 인과 효과가 아니에요. 같은 층 비교군으로 계절성을 일부만 걸렀고, 합성 데이터에는 개편 효과가 심어져 있어요."
+REVIEW_CAVEAT = "상관관계일 뿐 인과 효과가 아니에요. 같은 층 비교군으로 계절성을 일부만 걸렀어요."
 FLAGSHIP_AREA_NOTE = (
     "대상 점포 면적은 달마다 그때 적용된 실제 개정 도면에서 공실을 뺀 매장 면적을 적용 일수로 가중해 썼어요."
 )
@@ -865,6 +867,43 @@ class BenchmarkTools:
 
     ws: Any
 
+    def _comparison_caveat(self) -> str:
+        peer = table_provenance(self.ws, "store_kpis")
+        if peer["source"] == "uploaded" and peer["record_matches_content"]:
+            filename = peer["filename"] or "이름 미상"
+            uploaded_at = str(peer.get("uploaded_at") or "")[:10] or "날짜 미상"
+            peer_note = (
+                f"다른 점포 실적은 {uploaded_at}에 올린 {filename}의 store_kpis 데이터예요. "
+                "업로드 자료가 실제 자료인지는 확인하지 않았어요."
+            )
+        elif peer["source"] == "uploaded":
+            peer_note = "다른 점포 실적 파일이 업로드 기록과 달라 현재 파일의 출처를 확인해야 해요."
+        else:
+            peer_note = (
+                "다른 점포 실적은 허구로 만든 합성 시연 데이터이며 실제 자료를 익명화한 것이 아니에요. "
+                "업로드 기록이 없는 파일을 직접 바꿨다면 출처를 확인해 주세요."
+            )
+        transaction = synthetic_business_source(self.ws, "transactions")
+        transaction_note = (
+            "대상 점포 실적은 합성 거래 데이터에서 계산했어요. 거래 파일을 직접 바꿨다면 출처를 확인해 주세요."
+            if transaction["source"] == "synthetic_demo"
+            else "대상 점포 실적은 거래 데이터에서 계산했어요."
+        )
+        return f"{peer_note} {transaction_note} {COMPARE_CAVEAT_LIMITS}"
+
+    def _review_caveats(self) -> tuple[str, list[str]]:
+        transaction = synthetic_business_source(self.ws, "transactions")
+        if transaction["source"] == "synthetic_demo":
+            source_note = (
+                "거래는 허구로 만든 합성 시연 데이터이며 실제 고객 데이터를 익명화한 것이 아니에요. "
+                "개편 효과가 심어져 있어 실제 매장 결과가 아니에요. 거래 파일을 직접 바꿨다면 출처를 확인해 주세요."
+            )
+            caveat = f"{REVIEW_CAVEAT} 합성 거래 데이터에는 개편 효과가 심어져 있어요."
+        else:
+            source_note = "거래 데이터의 출처와 적용 범위를 확인해 주세요."
+            caveat = REVIEW_CAVEAT
+        return caveat, [*REVIEW_CAVEATS[:2], source_note, REVIEW_CAVEATS[2]]
+
     # Store comparison ------------------------------------------------------------------------------------
     def _peer_tables(self) -> tuple[pd.DataFrame, list[str], dict[str, dict[str, Any]], bool]:
         """Peer KPIs, loader notes, store metadata and whether a stores table exists (cached per file)."""
@@ -1068,7 +1107,7 @@ class BenchmarkTools:
                 "summary": summary,
                 "gap_label": gap_label,
                 "notes": notes,
-                "caveat": COMPARE_CAVEAT,
+                "caveat": self._comparison_caveat(),
             }
         )
 
@@ -1227,6 +1266,7 @@ class BenchmarkTools:
             )
         control_floors = sorted((key for key in groups if key is not None), key=floor_sort_key)
         store_group = groups.get(None) or {}
+        caveat, caveats = self._review_caveats()
         result = {
             "rev": rev,
             "parent_rev": parent,
@@ -1255,8 +1295,8 @@ class BenchmarkTools:
             },
             "summary": _review_summary(rev, parent, effective, days, total, items),
             "notes": notes,
-            "caveat": REVIEW_CAVEAT,
-            "caveats": list(REVIEW_CAVEATS),
+            "caveat": caveat,
+            "caveats": caveats,
             "report_url": f"/api/reports/relayout-review/{quote(rev, safe='')}?window_days={requested}",
         }
         return _json(result)

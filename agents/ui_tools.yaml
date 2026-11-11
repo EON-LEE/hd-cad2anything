@@ -1,5 +1,8 @@
 # Client-side function tools for the orchestrator. The atlas-api bridge executes them and
 # converts the result into STATE_DELTA events (docs/specs/atlas-api.md).
+# Overlays: a journey, a route or a flow replaces the overlays of earlier answers, and a heatmap,
+# highlights, relation lines or a comparison replace the path of an earlier answer. Overlays drawn
+# earlier in the same answer stay unless the revision on screen changes.
 tools:
   - name: ui_set_floor
     description: Atlas 화면의 층을 바꾼다.
@@ -10,7 +13,10 @@ tools:
       required: [floor]
       additionalProperties: false
   - name: ui_show_heatmap
-    description: 지표로 매장을 색칠한다. 값은 백엔드가 분석 결과로 계산한다.
+    description: >-
+      지표로 매장을 색칠한다. 값은 백엔드가 분석 결과로 계산한다. 화면의 개정과 층을 rev, floor로 함께 바꾸고, 다른 개정에
+      그려 둔 표시는 지운다. 실적이 없는 개정(다음 시즌 도면, 가상 개정, 개편 대안)의 매출 지표는 모델 추정치이며 결과에
+      estimated가 붙는다. 결과의 shown 문장대로 화면을 설명한다.
     parameters:
       type: object
       properties:
@@ -108,7 +114,8 @@ tools:
       통로 위 집계를 도면에 그린다. mode=traffic은 결제 순서를 통로망 최단 경로로 이어 모은 추정 유동(굵고 진할수록 많이 지남),
       mode=popup은 같은 유동 위에 팝업 후보 위치를 순위 번호로, mode=egress는 기준보다 좁은 통로와 계단·출입구까지 먼 지점을
       경고 색으로 표시한다. 유동, 붐비는 통로, 팝업 위치, 통로 폭, 피난 거리를 물으면 이 함수로 그리고 결과의 summary,
-      markers, caveat으로 설명한다. 추정 유동은 실제로 걸은 길이 아니라고 함께 말한다.
+      markers, caveat으로 설명한다. 추정 유동은 실제로 걸은 길이 아니라고 함께 말한다. 유동 값과 per_day는 지나간 추정 횟수이며
+      사람 수가 아니다.
     parameters:
       type: object
       properties:
@@ -133,7 +140,8 @@ tools:
       두 지점 사이의 통로망 최단 경로를 도면에 파란 선으로 그리고 길 찾기 상자를 연다. 걷는 거리와 지나는 층을 함께 돌려준다.
       origin·destination은 매장 코드(3F-C05), 브랜드명, 출입구(ENT-1, 정문), 층을 붙인 수직동선·편의시설(1F:ESC-A, 8F:화장실)이다.
       목적지가 '8층 식당가'처럼 카테고리면 destination 대신 destination_category와 destination_floor를 준다.
-      길, 가는 법, 거리를 물으면 이 함수로 그리고 결과의 walk_m과 transitions로 설명한다.
+      길, 가는 법, 거리를 물으면 이 함수로 그리고 결과의 walk_m과 transitions로 설명한다. 통로로 이어지지 않으면
+      straight가 true(직선 추정)이거나 walk_m이 null(거리 모름)이고, 그릴 선이 없을 수 있다. 화면은 shown 문장대로 설명한다.
     parameters:
       type: object
       properties:

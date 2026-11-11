@@ -10,10 +10,13 @@ import {
   type WheelEvent,
 } from 'react'
 import { useData } from '../api/source'
+import { useDataRefresh } from '../hooks/useDataRefresh'
 import {
   ERROR_MESSAGE,
+  INCOMPLETE_MESSAGE,
   THINKING_LABEL,
   failedUiSteps,
+  isMutatingTool,
   isRunActive,
   runStatusText,
   stepDisplayLabel,
@@ -28,8 +31,10 @@ import {
 import { QUICK_PROMPTS } from '../lib/prompts'
 import type { ChatItem } from '../state/reducer'
 import { useAppDispatch, useAppState } from '../state/store'
-import type { ChatRequest } from '../types/api'
+import { visibleOverlays } from '../state/uiState'
+import type { AgUiEvent, ChatRequest } from '../types/api'
 import { RichText } from './RichText'
+import './chatState.css'
 
 /** `?debug=1` shows the technical details (tool names, args, summaries) of every step by default. */
 function debugRequested(): boolean {
@@ -231,6 +236,25 @@ function RunView({ run, debug, onRetry }: { run: ChatRun; debug: boolean; onRetr
       {failedUi > 0 && <p className="run-note warn">화면 일부를 바꾸지 못했어요. 분석 과정 보기에서 확인할 수 있어요.</p>}
       {run.status === 'stopped' && <p className="run-note">응답을 중지했어요.</p>}
       {run.status === 'done' && !hasText && <p className="run-note">답변 내용이 비어 있어요.</p>}
+      {run.status === 'incomplete' && (
+        <div className="run-incomplete">
+          {/* Announced by the conversation's live line (liveText), not here. */}
+          <p className="run-note warn">
+            {INCOMPLETE_MESSAGE} {hasText ? '받은 내용까지만 보여 드려요. 이 답변은 끝까지 이어지지 않았어요.' : '받은 답변이 없어요.'}
+          </p>
+          {run.error && (
+            <details className="run-incomplete-details">
+              <summary>자세히 보기</summary>
+              <p className="run-error-detail">{run.error}</p>
+            </details>
+          )}
+          {onRetry && (
+            <button type="button" className="text-button" onClick={onRetry}>
+              다시 시도
+            </button>
+          )}
+        </div>
+      )}
       {run.status === 'error' && (
         <div className="run-error" role="alert">
           <p>{ERROR_MESSAGE}</p>
@@ -262,11 +286,14 @@ function UserBubble({ text }: { text: string }) {
   )
 }
 
-function EmptyState({ onPick, disabled }: { onPick: (prompt: string) => void; disabled: boolean }) {
+function EmptyState({ onPick, disabled, continuing }: { onPick: (prompt: string) => void; disabled: boolean; continuing: boolean }) {
   return (
     <div className="chat-empty">
       <h2>무엇을 도와드릴까요?</h2>
       <p>도면 변경, 매장 효율, 교차구매, 고객 동선, 길 찾기, 통로 유동·팝업 후보를 물어보세요. 답변에 맞춰 도면도 함께 바뀌어요.</p>
+      {continuing && (
+        <p className="muted small chat-continue">이전 대화를 이어서 답해요. 대화 내용은 화면에 남아 있지 않아요. 처음부터 시작하려면 “새 대화”를 눌러 주세요.</p>
+      )}
       <div className="suggestions" role="group" aria-label="추천 질문">
         {QUICK_PROMPTS.map((prompt) => (
           <button key={prompt} type="button" className="suggestion" disabled={disabled} onClick={() => onPick(prompt)}>
@@ -283,8 +310,9 @@ function lastRun(items: readonly ChatItem[]): ChatRun | null {
   return item && item.kind === 'run' ? item.run : null
 }
 
-export function ChatPanel() {
+export function ChatPanel({ active = true }: { active?: boolean }) {
   const { source } = useData()
+  const refreshData = useDataRefresh()
   const { ui, selection, chat, composer } = useAppState()
   const dispatch = useAppDispatch()
   const [input, setInput] = useState('')
@@ -293,6 +321,9 @@ export function ChatPanel() {
   const logRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const stickToBottom = useRef(true)
+  // Where the reader stood when the tab was left (a hidden tab loses its scroll position).
+  const savedTop = useRef(0)
+  const activeRef = useRef(active)
   const [showLatest, setShowLatest] = useState(false)
 
   useEffect(() => {
@@ -310,19 +341,30 @@ export function ChatPanel() {
   }, [input])
 
   // Follow new output unless the user scrolled up to read.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = logRef.current
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
   }, [chat.items])
+
+  // The side panel hides this tab with display:none and the browser forgets the scroll position of a hidden
+  // element: on return, stay at the latest text when the reader was following it, else go back to where they were.
+  useLayoutEffect(() => {
+    const el = logRef.current
+    const returned = active && !activeRef.current
+    activeRef.current = active
+    if (!returned || !el) return
+    el.scrollTop = stickToBottom.current ? el.scrollHeight : savedTop.current
+  }, [active])
 
   useEffect(() => () => abortRef.current?.abort(), [])
 
   const onScroll = () => {
     const el = logRef.current
-    if (el) {
-      stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-      setShowLatest(!stickToBottom.current)
-    }
+    // Scroll events of a hidden tab (its position is reset) say nothing about the reader.
+    if (!el || !activeRef.current) return
+    savedTop.current = el.scrollTop
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    setShowLatest(!stickToBottom.current)
   }
 
   // The one-row suggestion strip scrolls sideways with a regular mouse wheel too.
@@ -332,34 +374,49 @@ export function ChatPanel() {
   }
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, fromSuggestion = false) => {
       const message = text.trim()
       if (!message || chat.running) return
       setInput('')
       stickToBottom.current = true
       setShowLatest(false)
+      // The send button turns into the stop button (and a suggestion is disabled) while the answer runs: keep the
+      // keyboard focus in the input. On a touch screen a tapped suggestion must not pop the keyboard up.
+      const touch = typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches
+      if (!(fromSuggestion && touch)) inputRef.current?.focus({ preventScroll: true })
       dispatch({ type: 'chat/user', id: `user-${Date.now().toString(36)}-${chat.items.length}`, text: message, at: Date.now() })
       const controller = new AbortController()
       abortRef.current = controller
       const request: ChatRequest = {
         ...(chat.threadId ? { thread_id: chat.threadId } : {}),
         message,
-        ui_state: { rev: ui.rev, floor: ui.floor, selection },
+        ui_state: { rev: ui.rev, floor: ui.floor, selection, overlays: visibleOverlays(ui) },
+      }
+      // Tools that change server data (also inside specialist agents): the data panels showed is out of date once
+      // they finished, and the next UI patch may already name a revision they created.
+      const mutating = new Set<string>()
+      let received = 0
+      const onEvent = (event: AgUiEvent) => {
+        received += 1
+        if (event.type === 'TOOL_CALL_START' && isMutatingTool(event.tool_name)) mutating.add(event.tool_call_id)
+        dispatch({ type: 'chat/event', event, at: Date.now() })
+        if (event.type === 'TOOL_CALL_END' && mutating.has(event.tool_call_id)) refreshData()
       }
       try {
-        await source.streamChat(request, (event) => dispatch({ type: 'chat/event', event, at: Date.now() }), controller.signal)
+        await source.streamChat(request, onEvent, controller.signal)
         dispatch({ type: 'chat/closed', at: Date.now() })
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
         if (controller.signal.aborted) dispatch({ type: 'chat/closed', aborted: true, at: Date.now() })
-        else {
-          const detail = error instanceof Error ? error.message : String(error)
-          dispatch({ type: 'chat/event', event: { type: 'RUN_ERROR', message: `채팅 요청 실패: ${detail}` }, at: Date.now() })
-        }
+        // A connection that broke after the answer began is an incomplete answer, not a failed request.
+        else if (received > 0) dispatch({ type: 'chat/closed', detail: `응답을 받는 중 연결이 끊겼습니다: ${detail}`, at: Date.now() })
+        else dispatch({ type: 'chat/event', event: { type: 'RUN_ERROR', message: `채팅 요청 실패: ${detail}` }, at: Date.now() })
       } finally {
         if (abortRef.current === controller) abortRef.current = null
+        if (mutating.size > 0) refreshData()
       }
     },
-    [chat.running, chat.threadId, chat.items.length, dispatch, source, ui.rev, ui.floor, selection],
+    [chat.running, chat.threadId, chat.items.length, dispatch, source, ui, selection, refreshData],
   )
 
   const onSubmit = (event: FormEvent) => {
@@ -378,21 +435,35 @@ export function ChatPanel() {
   const items = chat.items
   const current = lastRun(items)
   const lastUserText = [...items].reverse().find((item) => item.kind === 'user')?.text ?? null
+  // One announcement per outcome: a failed run is announced by its own alert (RunView), not here.
   const liveText = !current
     ? ''
     : current.status === 'answering'
       ? '답변을 작성하고 있어요.'
       : current.status === 'done'
         ? '답변을 마쳤어요.'
-        : current.status === 'error'
-          ? '답변을 만들지 못했어요.'
-          : ''
+        : current.status === 'stopped'
+          ? '응답을 중지했어요.'
+          : current.status === 'incomplete'
+            ? `${INCOMPLETE_MESSAGE} 받은 내용까지만 보여 드려요.`
+            : ''
+  const canRetry = (item: ChatItem, index: number) =>
+    index === items.length - 1 && item.kind === 'run' && (item.run.status === 'error' || item.run.status === 'incomplete') && !!lastUserText && !chat.running
 
   return (
     <div className="chat-panel">
-      <div className="chat-log" ref={logRef} onScroll={onScroll} role="log" tabIndex={-1} aria-label="에이전트 대화" aria-live="off">
+      <div
+        className="chat-log"
+        data-testid="chat-log"
+        ref={logRef}
+        onScroll={onScroll}
+        role="log"
+        tabIndex={-1}
+        aria-label="에이전트 대화"
+        aria-live="off"
+      >
         {items.length === 0 ? (
-          <EmptyState onPick={(prompt) => void send(prompt)} disabled={chat.running} />
+          <EmptyState onPick={(prompt) => void send(prompt, true)} disabled={chat.running} continuing={!!chat.threadId} />
         ) : (
           items.map((item, index) =>
             item.kind === 'user' ? (
@@ -402,7 +473,7 @@ export function ChatPanel() {
                 key={`run-${item.id}`}
                 run={item.run}
                 debug={debug}
-                onRetry={index === items.length - 1 && item.run.status === 'error' && lastUserText && !chat.running ? () => void send(lastUserText) : null}
+                onRetry={canRetry(item, index) ? () => void send(lastUserText!) : null}
               />
             ),
           )
@@ -416,6 +487,7 @@ export function ChatPanel() {
           <button
             type="button"
             className="jump-latest"
+            data-testid="jump-latest"
             onClick={() => {
               stickToBottom.current = true
               setShowLatest(false)
@@ -431,7 +503,7 @@ export function ChatPanel() {
         {items.length > 0 && (
           <div className="suggestion-row" role="group" aria-label="추천 질문" onWheel={onChipsWheel}>
             {QUICK_PROMPTS.map((prompt) => (
-              <button key={prompt} type="button" className="suggestion compact" disabled={chat.running} onClick={() => void send(prompt)}>
+              <button key={prompt} type="button" className="suggestion compact" disabled={chat.running} onClick={() => void send(prompt, true)}>
                 {prompt}
               </button>
             ))}
@@ -453,7 +525,17 @@ export function ChatPanel() {
             onKeyDown={onKeyDown}
           />
           {chat.running ? (
-            <button type="button" className="composer-button stop" aria-label="중지" title="중지" onClick={() => abortRef.current?.abort()}>
+            <button
+              type="button"
+              className="composer-button stop"
+              aria-label="중지"
+              title="중지"
+              onClick={() => {
+                abortRef.current?.abort()
+                // The stop button is replaced by the send button when the run ends.
+                inputRef.current?.focus({ preventScroll: true })
+              }}
+            >
               <span className="stop-icon" aria-hidden="true" />
             </button>
           ) : (
@@ -466,7 +548,12 @@ export function ChatPanel() {
         </form>
         <div className="composer-meta">
           <span className="composer-context">{selection.length ? `선택한 매장 ${selection.join(', ')}도 함께 보내요` : 'Enter 보내기 · Shift+Enter 줄바꿈'}</span>
-          <button type="button" className="text-button" disabled={chat.running || items.length === 0} onClick={() => dispatch({ type: 'chat/reset' })}>
+          <button
+            type="button"
+            className="text-button"
+            disabled={chat.running || (items.length === 0 && !chat.threadId)}
+            onClick={() => dispatch({ type: 'chat/reset' })}
+          >
             새 대화
           </button>
         </div>

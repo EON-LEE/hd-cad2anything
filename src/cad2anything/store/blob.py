@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from cad2anything.workspace import atomic_write_bytes
+
 DEFAULT_PREFIXES = (
     "models/",
     "changes/",
@@ -58,7 +60,11 @@ class BlobMirror:
 
     def push_tree(self, root: Path, prefixes: tuple[str, ...] = DEFAULT_PREFIXES) -> int:
         count = 0
-        for path in sorted(p for p in Path(root).rglob("*") if p.is_file()):
+        for path in sorted(
+            p
+            for p in Path(root).rglob("*")
+            if p.is_file() and not (p.name.startswith(".") and p.suffix == ".tmp")
+        ):
             name = path.relative_to(root).as_posix()
             if name.startswith(prefixes):
                 self.push(path, root)
@@ -72,9 +78,7 @@ class BlobMirror:
                 target = Path(root) / blob.name
                 if target.exists() and target.stat().st_size == blob.size:
                     continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("wb") as handle:
-                    handle.write(self.container.download_blob(blob.name).readall())
+                atomic_write_bytes(target, self.container.download_blob(blob.name).readall())
                 count += 1
         return count
 

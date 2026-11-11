@@ -14,3 +14,7 @@ class ToolError(_BaseToolError):
 
 class NotFoundToolError(ToolError):
     """A ToolError for a missing resource (REST maps it to 404)."""
+
+
+class DecisionExistsError(ToolError):
+    """A relayout decision or its downstream work would be replaced (REST maps it to 409)."""

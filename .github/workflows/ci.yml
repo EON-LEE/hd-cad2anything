@@ -42,6 +42,31 @@ jobs:
       - name: Test
         run: npm test
 
+  e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/atlas-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser e2e (mock mode)
+        run: npm run e2e
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/atlas-web/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
   secrets:
     runs-on: ubuntu-latest
     steps:

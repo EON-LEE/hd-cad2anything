@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 
@@ -292,3 +293,47 @@ def test_flow_route_serves_the_ui_object_and_maps_errors(toolkit):
     assert based["rev"] == "R2" and any(
         "H1에는 거래 실적이 없어" in note for note in based["summary"]["notes"]
     )
+
+
+def test_popup_candidates_share_one_traffic_basis(toolkit):
+    from cad2anything.services.flow_tools import SPOT_REACH_M, TRAFFIC_BASIS
+
+    query = toolkit._flow_query(None, None, None, "weekend", None, default_day="weekend")
+    state = toolkit._flow_state(query)
+    result = toolkit.spatial_popup_candidates(top=50)
+    candidates = result["candidates"]
+    kinds = {c["kind"] for c in candidates}
+
+    assert kinds == {"unit", "spot"}
+    assert all(c["traffic_basis"] == TRAFFIC_BASIS for c in candidates)
+    assert all(c["passers_unit"] == "회(추정 통과)" for c in candidates)
+    # Both kinds are measured with the same statistic at their own point, so the ranking is comparable.
+    for candidate in candidates:
+        graph = state.router.graphs[candidate["floor"]]
+        flow = graph.cell_flow(state.flows.edge_flow[candidate["floor"]])
+        here = graph.nearby_max(np.array([[candidate["x"], candidate["y"]]], dtype=float), flow, SPOT_REACH_M)
+        assert candidate["passers"] == pytest.approx(round(float(here[0])), abs=1.0)
+    units = [c for c in candidates if c["kind"] == "unit"]
+    assert units and all(c["passers"] >= c["entrance_passes"] for c in units)
+    assert all("같은 기준" in text for text in [result["scoring"]])
+
+
+def test_flow_units_are_passes_not_people(toolkit):
+    from cad2anything.services.flow_tools import PASS_UNIT
+
+    flow = toolkit.flow_object("traffic")
+    assert flow["legend"]["unit"] == PASS_UNIT == "회(추정 통과)"
+    assert "명(추정)" not in json.dumps(flow, ensure_ascii=False)
+
+    traffic = toolkit.analytics_flow_map()
+    assert traffic["value_unit"] == PASS_UNIT
+    assert "사람 수가 아니라 지나간 횟수" in traffic["caveat"]
+    assert "customer_days는 같은 날 서로 다른 매장에서 두 번 이상 결제" in traffic["caveat"]
+    assert any(PASS_UNIT in note for note in traffic["notes"])
+
+    popup = toolkit.spatial_popup_candidates(top=5)
+    assert PASS_UNIT in popup["caveat"]
+    for candidate in popup["candidates"]:
+        first = candidate["reasons"][0]
+        assert "명(추정)" not in first
+        assert "회 앞을 지나가요" in first or "유동이 없어요" in first

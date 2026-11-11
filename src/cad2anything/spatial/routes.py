@@ -4,6 +4,11 @@ Used to draw a customer's purchase sequence and to answer "how do I get from A t
 and when a customer paid, not how they walked: a route is the shortest walkway path between two access
 points (store entrances, building entrances, escalator landings...), and a floor change goes through the
 vertical link of the requested type that minimizes the total walking distance on both floors.
+
+Without a walkway path the route falls back to straight lines (``Route.straight``): on one floor straight
+from access point to access point, between floors straight to the nearest vertical link of the requested
+type on each floor. When no such link connects the two floors nothing can be measured and the legs keep
+``length_m is None`` (unknown), so that a fallback is never reported as a 0 m walk.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ SIMPLIFY_M = 0.25
 class RouteLeg:
     floor: str
     points: list[tuple[float, float]]
-    length_m: float
+    length_m: float | None  # None when the distance cannot be measured
 
 
 @dataclass
@@ -44,8 +49,11 @@ class Route:
     straight: bool = False  # fallback when no walkway path exists
 
     @property
-    def length_m(self) -> float:
-        return sum(leg.length_m for leg in self.legs)
+    def length_m(self) -> float | None:
+        """Total walking distance, or None when any leg could not be measured."""
+        if any(leg.length_m is None for leg in self.legs):
+            return None
+        return sum(float(leg.length_m) for leg in self.legs)
 
 
 def _simplify(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -165,11 +173,53 @@ class RoutePlanner:
         points = [tuple(graph.nodes[n]["pos"]) for n in nodes]
         return RouteLeg(floor, _simplify(points), round(float(length), 1))
 
-    def _straight(self, a: Entity, b: Entity) -> Route:
+    def _straight(self, a: Entity, b: Entity, via: str | None = None) -> Route:
+        """Straight-line fallback used when the walkways do not connect the two places.
+
+        On one floor this is the straight distance between the access points. Between floors it walks
+        straight to the nearest vertical link of the requested type on each floor; without such a link on
+        both floors nothing can be measured and the legs keep an unknown length.
+        """
         pa, pb = self.entity_xy(a), self.entity_xy(b)
-        if a.floor == b.floor:
-            return Route([RouteLeg(a.floor or "", [pa, pb], round(math.dist(pa, pb), 1))], straight=True)
-        return Route([RouteLeg(a.floor or "", [pa], 0.0), RouteLeg(b.floor or "", [pb], 0.0)], straight=True)
+        floor_a, floor_b = a.floor or "", b.floor or ""
+        if floor_a == floor_b:
+            return Route([RouteLeg(floor_a, [pa, pb], round(math.dist(pa, pb), 1))], straight=True)
+        best: tuple[float, str, tuple[float, float], tuple[float, float]] | None = None
+        for link_id, by_floor in sorted(self.link_floors(via).items()):
+            if floor_a not in by_floor or floor_b not in by_floor:
+                continue
+            near_a = self._access_xy(floor_a, by_floor[floor_a], pa)
+            near_b = self._access_xy(floor_b, by_floor[floor_b], pb)
+            if near_a is None or near_b is None:
+                continue
+            total = math.dist(pa, near_a) + math.dist(near_b, pb)
+            if best is None or total < best[0] - 1e-9:
+                best = (total, link_id, near_a, near_b)
+        if best is None:
+            return Route([RouteLeg(floor_a, [pa], None), RouteLeg(floor_b, [pb], None)], straight=True)
+        _, link_id, near_a, near_b = best
+        return Route(
+            [
+                RouteLeg(floor_a, _simplify([pa, near_a]), round(math.dist(pa, near_a), 1)),
+                RouteLeg(floor_b, _simplify([near_b, pb]), round(math.dist(near_b, pb), 1)),
+            ],
+            via=link_id,
+            straight=True,
+        )
+
+    def _access_xy(
+        self, floor: str, entity_id: str, towards: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        """Access point of an entity that lies closest to ``towards`` (its centroid as a last resort)."""
+        points = self.network(floor).all_access_points.get(entity_id)
+        if not points:
+            entity = self.model.entities.get(entity_id)
+            if entity is None or entity.geometry.is_empty:
+                return None
+            centroid = entity.geometry.centroid
+            return round(float(centroid.x), 2), round(float(centroid.y), 2)
+        point = min(points, key=lambda p: math.dist((p.x, p.y), towards))
+        return round(float(point.x), 2), round(float(point.y), 2)
 
     def route(self, unit_a: str, unit_b: str) -> Route:
         """Route from the entrance of ``unit_a`` to the entrance of ``unit_b``."""
@@ -182,7 +232,7 @@ class RoutePlanner:
         if floor_a == floor_b:
             target = self._nearest(from_a, floor_b, b.entity_id)
             if target is None:
-                return self._straight(a, b)
+                return self._straight(a, b, via)
             distance, node = target
             return Route([self._leg(floor_a, from_a[1][node], distance)])
         from_b = self._search(floor_b, b.entity_id)
@@ -198,7 +248,7 @@ class RoutePlanner:
             if best is None or total < best[0] - 1e-9:
                 best = (total, link_id, near_a[1], near_a[0], near_b[1], near_b[0])
         if best is None:
-            return self._straight(a, b)
+            return self._straight(a, b, via)
         _, link_id, node_a, dist_a, node_b, dist_b = best
         leg_a = self._leg(floor_a, from_a[1][node_a], dist_a)
         leg_b = self._leg(floor_b, list(reversed(from_b[1][node_b])), dist_b)

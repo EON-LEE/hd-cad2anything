@@ -17,6 +17,7 @@ are removed from numbers. ``store_kpis`` rows must name a store of the ``stores`
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import logging
@@ -49,6 +50,7 @@ logger = logging.getLogger("cad2anything.uploads")
 
 BACKUP_DIR = "business/_backup"
 BRIEF_DIR = "business/relayout_briefs"
+PROVENANCE_INDEX = "uploads/metadata/events.json"
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 AREA_TOLERANCE_PCT = 3.0
 LEASE_COLUMNS = ("lease_id", "brand_id", "unit_code", "lease_start", "lease_end")
@@ -64,6 +66,8 @@ class TableSpec:
     dates: tuple[tuple[str, str], ...] = ()
     numbers: tuple[NumberRule, ...] = ()
     optional: tuple[str, ...] = ()
+    label_ko: str | None = None
+    description_ko: str | None = None
 
 
 _RATE: NumberRule = ("commission_rate", lambda v: 0.0 <= v <= 1.0, "0~1 사이의 소수여야 합니다(예: 0.27)")
@@ -90,6 +94,8 @@ TABLES: dict[str, TableSpec] = {
         # One terminal keeps its pos_id when its brand moves, so a pos_id has one row per validity period.
         keys=(("pos_id", "valid_from"),),
         dates=(("valid_from", "valid_to"),),
+        label_ko="POS 단말 매핑",
+        description_ko="POS 단말을 브랜드·매장·유효 기간에 연결해요. 거래·매출 업로드는 지원하지 않아요.",
     ),
     "stores": TableSpec(
         required=("store_id", "store_name", "region", "format", "gross_area_m2"),
@@ -171,6 +177,138 @@ def _stamp() -> str:
 def _mtime_iso(paths: Iterable[Path]) -> str | None:
     stamps = [path.stat().st_mtime for path in paths if path.is_file()]
     return datetime.fromtimestamp(max(stamps), KST).isoformat(timespec="seconds") if stamps else None
+
+
+def file_sha256(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def metadata_snapshot(ws: Any) -> dict[str, str]:
+    """Hashes of the stored business tables available to the drawing pipeline."""
+    snapshot: dict[str, str] = {}
+    for kind in (*TABLES, "transactions"):
+        digest = file_sha256(ws.table_path(kind))
+        if digest is not None:
+            snapshot[kind] = digest
+    return snapshot
+
+
+def _upload_events(ws: Any) -> list[dict[str, Any]]:
+    try:
+        index = ws.read_json(PROVENANCE_INDEX)
+        if index is None:
+            return []
+        if (
+            not isinstance(index, dict)
+            or index.get("version") != 1
+            or not isinstance(index.get("events"), list)
+            or any(
+                not isinstance(event, dict)
+                or not isinstance(event.get("kind"), str)
+                or not isinstance(event.get("id"), str | type(None))
+                for event in index["events"]
+            )
+        ):
+            raise ValueError("invalid metadata provenance index")
+        return index["events"]
+    except (OSError, ValueError) as exc:
+        raise ToolError(
+            "메타데이터 출처 기록을 읽을 수 없어요. 작업공간의 출처 기록을 확인해 주세요."
+        ) from exc
+
+
+def _record_upload(ws: Any, kind: str, filename: str, data: bytes, outcome: Mapping[str, Any]) -> None:
+    if kind in TABLES:
+        path = ws.table_path(kind)
+    else:
+        folder = BRIEF_DIR if kind == "relayout_brief" else PROFILE_DIR
+        path = ws.root / folder / f"{outcome['id']}.yaml"
+    events = _upload_events(ws)
+    events.append(
+        {
+            "kind": kind,
+            "id": outcome.get("id"),
+            "filename": filename,
+            "uploaded_at": datetime.now(KST).isoformat(timespec="seconds"),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "stored_sha256": file_sha256(path),
+            "rows": outcome["rows"],
+        }
+    )
+    ws.write_json(PROVENANCE_INDEX, {"version": 1, "events": events})
+
+
+def _restore_files(ws: Any, before: Mapping[str, bytes | None]) -> bool:
+    restored = True
+    for rel_path, content in before.items():
+        try:
+            path = ws.root / rel_path
+            if (path.read_bytes() if path.is_file() else None) == content:
+                continue
+            if content is None:
+                remove_file(ws, rel_path)
+            else:
+                ws.write_bytes(rel_path, content)
+            if (path.read_bytes() if path.is_file() else None) != content:
+                restored = False
+        except Exception:
+            logger.exception("could not restore metadata file %s", rel_path)
+            restored = False
+    return restored
+
+
+def _source_info(path: Path | None, event: Mapping[str, Any] | None) -> dict[str, Any]:
+    stored_sha256 = file_sha256(path)
+    if path is None or stored_sha256 is None or event is None:
+        return {
+            "source": "synthetic_demo",
+            "source_basis": "default_assumption" if stored_sha256 is not None else "not_present",
+            "filename": path.name if path is not None and stored_sha256 is not None else None,
+            "uploaded_at": None,
+            "sha256": stored_sha256,
+            "stored_sha256": stored_sha256,
+            "record_matches_content": None,
+        }
+    return {
+        "source": "uploaded",
+        "source_basis": "upload_index",
+        "filename": event.get("filename"),
+        "uploaded_at": event.get("uploaded_at"),
+        "sha256": event.get("sha256"),
+        "stored_sha256": stored_sha256,
+        "record_matches_content": event.get("stored_sha256") == stored_sha256,
+    }
+
+
+def table_provenance(ws: Any, kind: str) -> dict[str, Any]:
+    """Source of one current metadata table without loading the other tables."""
+    with ws._lock:
+        event = next(
+            (
+                item
+                for item in reversed(_upload_events(ws))
+                if item.get("kind") == kind and item.get("id") is None
+            ),
+            None,
+        )
+        return _source_info(ws.table_path(kind), event)
+
+
+def synthetic_business_source(ws: Any, name: str) -> dict[str, Any]:
+    """Transactions and customers have no upload path in this PoC."""
+    path = ws.table_path(name)
+    return {
+        "source": "synthetic_demo",
+        "source_basis": "default_assumption" if path is not None else "not_present",
+        "present": path is not None,
+        "filename": path.name if path is not None else None,
+    }
 
 
 # --- reading ----------------------------------------------------------------------------------------------
@@ -633,16 +771,68 @@ def _upload_profile(host: Any, filename: str, data: bytes) -> dict[str, Any]:
 
 def upload_metadata(host: Any, kind: str, filename: str, data: bytes) -> dict[str, Any]:
     """Validate and store one metadata file; ``kind`` must be one of ``KINDS`` (checked by the caller)."""
+    _upload_events(host.ws)
+    index_path = host.ws.root / PROVENANCE_INDEX
+    before: dict[str, bytes | None] = {
+        PROVENANCE_INDEX: index_path.read_bytes() if index_path.is_file() else None
+    }
     if kind in TABLES:
-        return _upload_table(host, kind, filename, data)
-    if kind == "relayout_brief":
-        return _upload_brief(host, filename, data)
-    return _upload_profile(host, filename, data)
+        for suffix in (".csv", ".csv.gz"):
+            rel_path = f"business/{kind}{suffix}"
+            path = host.ws.root / rel_path
+            before[rel_path] = path.read_bytes() if path.is_file() else None
+    else:
+        document, _ = read_document(filename, data)
+        key = "brief_id" if kind == "relayout_brief" else "profile_id"
+        item_id = str((document or {}).get(key) or "").strip()
+        if SAFE_ID_RE.fullmatch(item_id):
+            folder = BRIEF_DIR if kind == "relayout_brief" else PROFILE_DIR
+            rel_path = f"{folder}/{item_id}.yaml"
+            path = host.ws.root / rel_path
+            before[rel_path] = path.read_bytes() if path.is_file() else None
+    outcome: dict[str, Any] | None = None
+    try:
+        if kind in TABLES:
+            outcome = _upload_table(host, kind, filename, data)
+        elif kind == "relayout_brief":
+            outcome = _upload_brief(host, filename, data)
+        else:
+            outcome = _upload_profile(host, filename, data)
+        if outcome["status"] == "accepted":
+            if kind not in TABLES:
+                folder = BRIEF_DIR if kind == "relayout_brief" else PROFILE_DIR
+                rel_path = f"{folder}/{outcome['id']}.yaml"
+                if rel_path not in before:
+                    backup = outcome.get("backup")
+                    before[rel_path] = (host.ws.root / backup).read_bytes() if backup else None
+            _record_upload(host.ws, kind, filename, data, outcome)
+        return outcome
+    except Exception as exc:
+        restored = _restore_files(host.ws, before)
+        if outcome and outcome.get("backup"):
+            try:
+                remove_file(host.ws, outcome["backup"])
+            except Exception:
+                logger.exception("could not remove failed metadata upload backup")
+                restored = False
+        if restored:
+            raise ToolError(
+                "메타데이터 또는 출처 기록을 저장하지 못해 업로드를 취소했어요. 다시 올려 주세요."
+            ) from exc
+        raise ToolError(
+            "메타데이터 또는 출처 기록 저장이 중단됐어요. 작업공간의 이전 상태를 확인해 주세요."
+        ) from exc
 
 
 def metadata_status(ws: Any) -> list[dict[str, Any]]:
-    """Per kind (in ``KINDS`` order): ``{kind, present, rows, updated_at, required_columns, items}``."""
+    """Current metadata and its most recent matching upload provenance, in ``KINDS`` order."""
     status: dict[str, dict[str, Any]] = {}
+    events: dict[tuple[str, str | None], dict[str, Any]] = {}
+    order: dict[tuple[str, str | None], int] = {}
+    for index, event in enumerate(_upload_events(ws)):
+        key = (event["kind"], event.get("id"))
+        events[key] = event
+        order[key] = index
     business = ws.root / "business"
     for kind, spec in TABLES.items():
         path = next(
@@ -656,25 +846,39 @@ def metadata_status(ws: Any) -> list[dict[str, Any]]:
             "updated_at": _mtime_iso([path]) if path is not None else None,
             "required_columns": list(spec.required),
             "items": [],
+            "label_ko": spec.label_ko,
+            "description_ko": spec.description_ko,
+            **_source_info(path, events.get((kind, None))),
         }
-    briefs = sorted((ws.root / BRIEF_DIR).glob("*.yaml"))
-    status["relayout_brief"] = {
-        "kind": "relayout_brief",
-        "present": bool(briefs),
-        "rows": len(briefs),
-        "updated_at": _mtime_iso(briefs),
-        "required_columns": list(DOCUMENTS["relayout_brief"]),
-        "items": [path.stem for path in briefs],
-    }
-    profiles = [p for p in sorted((ws.root / PROFILE_DIR).glob("*.yaml")) if p.stem != DEFAULT_PROFILE_ID]
-    status["drawing_profile"] = {
-        "kind": "drawing_profile",
-        "present": True,
-        "rows": 1 + len(profiles),
-        "updated_at": _mtime_iso(profiles),
-        "required_columns": list(DOCUMENTS["drawing_profile"]),
-        "items": [DEFAULT_PROFILE_ID, *(path.stem for path in profiles)],
-    }
+
+    for kind, folder in (("relayout_brief", BRIEF_DIR), ("drawing_profile", PROFILE_DIR)):
+        paths = [
+            p
+            for p in sorted((ws.root / folder).glob("*.yaml"))
+            if kind != "drawing_profile" or p.stem != DEFAULT_PROFILE_ID
+        ]
+        item_sources = [
+            {"id": path.stem, **_source_info(path, events.get((kind, path.stem)))} for path in paths
+        ]
+        if kind == "drawing_profile":
+            item_sources.insert(
+                0, {"id": DEFAULT_PROFILE_ID, **_source_info(None, None), "source_basis": "builtin"}
+            )
+        sources = {item["source"] for item in item_sources}
+        source = "mixed" if len(sources) > 1 else next(iter(sources), "synthetic_demo")
+        latest = max(item_sources, key=lambda item: order.get((kind, item["id"]), -1), default=None)
+        info = {key: value for key, value in (latest or _source_info(None, None)).items() if key != "id"}
+        info["source"] = source
+        status[kind] = {
+            "kind": kind,
+            "present": bool(item_sources),
+            "rows": len(item_sources),
+            "updated_at": _mtime_iso(paths),
+            "required_columns": list(DOCUMENTS[kind]),
+            "items": [item["id"] for item in item_sources],
+            "item_sources": item_sources,
+            **info,
+        }
     return [status[kind] for kind in KINDS]
 
 

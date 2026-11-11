@@ -130,9 +130,18 @@ describe('route helpers', () => {
   it('builds the summary chips and the legend line', () => {
     expect(routeSummaryChips(route)).toEqual(['걷는 거리 85m', '에스컬레이터 A · 7개 층 이동 · 높이 35m'])
     expect(routeLegendText(route)).toBe('통로망 최단 경로 · 걷는 거리 85m')
+    // I10: an unknown distance says so instead of silently dropping the chip.
     const unknown = normalizeRoute({ ...contractExample, walk_m: null, transitions: null, via_type: 'elevator' })!
-    expect(routeSummaryChips(unknown)).toEqual(['엘리베이터 · 7개 층 이동'])
+    expect(routeSummaryChips(unknown)).toEqual(['거리 계산 불가', '엘리베이터 · 7개 층 이동'])
     expect(routeLegendText(unknown)).toBe('통로망 최단 경로')
+    // I10: a straight-line fallback is labeled as an estimate (and null + straight combines both notes).
+    const straight = normalizeRoute({ ...contractExample, straight: true })!
+    expect(straight.straight).toBe(true)
+    expect(routeSummaryChips(straight)[0]).toBe('직선 추정 85m')
+    expect(routeLegendText(straight)).toBe('직선 거리 추정 · 85m')
+    const straightUnknown = normalizeRoute({ ...contractExample, walk_m: null, straight: true })!
+    expect(routeSummaryChips(straightUnknown)[0]).toBe('거리 계산 불가 · 직선 추정')
+    expect(routeLegendText(straightUnknown)).toBe('통로망을 따라갈 수 없어 직선 거리로 추정')
   })
 
   it('counts floors from `floors`, else from the floor ordinals', () => {

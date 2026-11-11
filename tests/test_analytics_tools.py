@@ -1,11 +1,14 @@
 import json
+from datetime import date
 
+import pandas as pd
 import pytest
 
 from cad2anything.agents.ui_actions import UiActionHandler
 from cad2anything.services import metrics
 from cad2anything.services.analytics_tools import MOVE_FIELDS, parse_segment
 from cad2anything.services.tools import ToolError, Toolkit
+from cad2anything.workspace import Workspace
 
 
 @pytest.fixture(scope="module")
@@ -131,3 +134,77 @@ def test_heatmaps_cover_actual_and_hypothetical_revisions(toolkit):
     handler = UiActionHandler(heatmap_provider=lambda m, r, f: metrics.unit_metric(toolkit, m, r, f))
     result = handler.handle("ui_show_heatmap", {"metric": "aov_krw", "rev": "H1", "floor": "3F"}, {})
     assert json.loads(result.output)["ok"] is False and not result.patches
+
+
+def test_unit_metric_values_flag_model_estimates(toolkit):
+    observed, estimated = metrics.unit_metric_values(toolkit, "sales_per_m2", "R2", "4F")
+    assert observed and estimated is False
+
+    modelled, estimated = metrics.unit_metric_values(toolkit, "sales_per_m2", "H1", "3F")
+    assert modelled and estimated is True
+    assert metrics.unit_metric(toolkit, "sales_per_m2", "H1", "3F") == modelled
+
+    walks, estimated = metrics.unit_metric_values(toolkit, "walk_to_escalator_m", "H1", "3F")
+    assert walks and estimated is False
+    with pytest.raises(ToolError, match="기대 매출 추정치"):
+        metrics.unit_metric_values(toolkit, "aov_krw", "H1", "3F")
+
+
+def test_productivity_reports_how_the_period_was_annualized(toolkit):
+    result = toolkit.analytics_productivity("R1", level="floor")
+    block = result["annualization"]
+
+    assert block["method"] == "calendar_days" and block["seasonality_adjusted"] is False
+    assert block["index_source"] == "observed_transactions"
+    assert block["index_through"] == result["period"]["end"]
+    assert block["factor"] == pytest.approx(365.0 / result["period"]["days"], abs=1e-3)
+    assert set(block["monthly_index"]) == {str(m) for m in range(1, 13)}
+    assert block["seasonal_factor"] > 0 and 0.5 < block["seasonal_ratio"] < 2.0
+    assert result["summary"]["sales_krw_seasonally_adjusted"] == pytest.approx(
+        result["summary"]["sales_krw"] * block["seasonal_ratio"], rel=1e-3
+    )
+    assert "seasonality_adjusted=false" in result["note"]
+
+    # R1 covers the low season, so annualizing on calendar days alone understates the year.
+    assert block["seasonal_ratio"] > 1.01
+    other = toolkit.analytics_productivity("R2", level="floor")["annualization"]
+    assert other["seasonal_ratio"] != pytest.approx(block["seasonal_ratio"], rel=1e-3)
+
+
+def test_monthly_index_uses_only_sales_up_to_the_period_end(toolkit):
+    early = toolkit._monthly_index(date(2025, 2, 28))
+    late = toolkit._monthly_index(toolkit.data_through())
+
+    assert set(early) == set(range(1, 13)) and early != late
+    # August is never observed before the cut-off, so it stays neutral instead of showing its trough.
+    assert early[8] == pytest.approx(1.0, abs=0.01) and late[8] < 0.95
+    assert late[5] > 1.05 and late[2] < 0.95  # observed peak and trough
+    assert toolkit._season_profile(date(2025, 2, 28))[1] < 12
+    assert toolkit._season_profile(toolkit.data_through())[1] == 12
+
+
+def test_as_of_keeps_later_transactions_out_of_the_layout_fit(tmp_path_factory, populate):
+    cutoff = "2025-06-30"
+    full = Toolkit(populate(tmp_path_factory.mktemp("asof-full")), use_postgis=False)
+    root = populate(tmp_path_factory.mktemp("asof-cut")).root
+    path = Workspace(root).table_path("transactions")
+    frame = pd.read_csv(path)
+    frame[pd.to_datetime(frame["ts"]) < pd.Timestamp(cutoff) + pd.Timedelta(days=1)].to_csv(path, index=False)
+    truncated = Toolkit(Workspace(root), use_postgis=False)
+
+    inputs = full._layout_inputs("R2", as_of=cutoff)
+    assert inputs["as_of"] == cutoff and inputs["period"]["end"] == cutoff
+    assert inputs["fit_rev"] == "R1"  # R2 only takes effect after the cut-off
+
+    expected = full.expected_unit_sales("R2", as_of=cutoff).set_index("unit_code")["expected_sales"]
+    same = truncated.expected_unit_sales("R2", as_of=cutoff).set_index("unit_code")["expected_sales"]
+    assert expected.to_dict() == pytest.approx(same.to_dict())
+
+    # Without a cut-off the full workspace sees the later transactions and fits on R2 instead.
+    default = full._layout_inputs("R2")
+    start, end, days = full.revision_period("R2")
+    assert default["as_of"] is None and default["fit_rev"] == "R2"
+    assert default["period"] == {"start": start, "end": end, "days": days}
+    assert full.revision_period("R1", as_of=cutoff) == ("2025-03-01", cutoff, 122)
+    with pytest.raises(ToolError, match="아직 거래 실적이 없습니다"):
+        full.revision_period("R2", as_of=cutoff)  # R2 only takes effect after the cut-off

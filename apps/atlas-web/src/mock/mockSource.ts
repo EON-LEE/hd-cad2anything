@@ -199,5 +199,9 @@ export function createMockSource(): AtlasDataSource {
       await sleep(60)
       return uploads.metadataStatus()
     },
+    async getUploadRules() {
+      await sleep(40)
+      return uploads.rules()
+    },
   }
 }

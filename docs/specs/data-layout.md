@@ -41,7 +41,12 @@ data/workspace/
   artifacts/{rev}/{generator}/               # 산출물
   projects/relayout/{brief_id}.json|.html    # 개편 프로젝트(진단, 대안, 결정, 공사 순서, 도면 대조)와 제안서
   uploads/jobs/{job_id}.json                 # 도면 업로드 작업 상태와 결과
+  uploads/metadata/events.json               # 성공한 메타데이터 업로드의 파일명·시각·해시·행 수
 ```
+
+메타데이터 출처 기록의 `sha256`은 받은 원본 파일의 해시이고, `stored_sha256`은 정규화해 저장한 파일의 해시다.
+도면 작업의 `metadata_snapshot`에는 작업 시작 시 저장된 업무 표의 해시를 기록한다.
+같은 개정을 다시 올리면 새 모델의 `meta.job_id`가 현재 모델을 만든 작업을 식별한다. 작업의 `source_files`에는 받은 ZIP 또는 DXF 원본의 해시를 기록한다.
 
 `leases.csv`와 `FW2026` 브리프는 합성 데이터다. `bootstrap`이 없을 때 만들고(`cad2anything.mockgen.relayout`), 계약 면적·브랜드 불일치 4건을 일부러 심는다(6F-C14, 2F-N06, 7F-N05 면적, 3F-C13 브랜드).
 

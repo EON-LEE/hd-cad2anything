@@ -70,6 +70,14 @@ az deployment sub create --location koreacentral --template-file infra/main.bice
    uv run --no-sync python -m cad2anything.agents.deploy
    ```
 
+## 실행 상태 및 장애 대응
+
+- `/healthz`는 파일 목록만 확인하는 liveness 검사다. `/readyz`는 작업공간 개정이 적재되었는지 확인하는 readiness 검사다. PostgreSQL이 계획에 따라 중지되어도 적재된 작업공간이 있으면 `/readyz`는 200을 유지한다. 적재되지 않았으면 503이며, DB가 복구되면 백그라운드 검사가 미러를 다시 내려받는다.
+- `/readyz`와 `/api/meta`의 `db`, `writes_available`, `mirror_errors`, `last_mirror_error`, `last_mirror_error_at`, `pending_mirror_writes`를 확인한다. 마지막 오류에는 예외 유형만 표시한다. 미러에 쓰지 못한 로컬 변경은 오류로 알리고, DB 복구 후 다시 게시한다. 앱의 복제본은 메모리 작업공간의 일관성을 위해 계속 1개다.
+- 컨테이너의 `WORKSPACE_DIR`은 앱 사용자에게 쓰기 권한이 있는 `/home/app/workspace`다. 컨테이너 로컬 파일은 영구 저장소가 아니므로 PostgreSQL 미러의 상태를 확인한다.
+- 채팅은 15초마다 SSE 연결 유지 주석을 보내고, `CHAT_TURN_DEADLINE_S`(기본 230초)이 지나면 실행을 중단한다. 로그 기본 수준은 INFO이며 `LOG_LEVEL`로 조정한다. 턴 로그에는 식별자, 소요 시간, 종료 상태, 오류 유형만 남기고 질문·토큰·비밀 값은 기록하지 않는다.
+- PostgreSQL 연결에는 Entra 토큰 만료 전 재접속, TCP keepalive, 연결 시간 제한과 SQL 실행 시간 제한이 적용된다. 미러 상태 확인은 HTTP 준비 상태 검사와 별도의 백그라운드 작업이므로 DB 장애가 `/readyz` 응답을 지연시키지 않는다.
+
 ## 주의
 
 - Azure Maps는 한국에서 사용할 수 없으므로 쓰지 않는다.

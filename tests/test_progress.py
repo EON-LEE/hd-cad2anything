@@ -1,13 +1,17 @@
 """Korean narration of analysis steps (method and result lines in the chat's analysis panel)."""
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from cad2anything.agents import SPECIALISTS
 from cad2anything.agents.deploy import load_ui_tools
+from cad2anything.agents.labels import SPECIALIST_LABELS
 from cad2anything.agents.progress import (
     SPECIALIST_METHODS,
+    TOOL_METHODS,
     parse_tool_output,
     specialist_result,
     tool_method,
@@ -15,6 +19,23 @@ from cad2anything.agents.progress import (
 )
 from cad2anything.agents.runtime import _output_ok
 from cad2anything.services.mcp_server import TOOL_DESCRIPTIONS
+
+MOCK_PROGRESS = Path(__file__).resolve().parents[1] / "apps" / "atlas-web" / "src" / "mock" / "progress.ts"
+
+
+def _ts_record(source: str, name: str) -> dict[str, str]:
+    body = source.split(f"export const {name}")[1].split("}")[0]
+    return dict(re.findall(r"^\s*([a-z_]+): '([^']*)',?$", body, re.MULTILINE))
+
+
+def test_mock_progress_text_matches_the_backend():
+    """apps/atlas-web/src/mock/progress.ts copies the backend sentences so mock mode reads like the backend."""
+    source = MOCK_PROGRESS.read_text(encoding="utf-8")
+    assert _ts_record(source, "TOOL_METHODS") == TOOL_METHODS
+    assert _ts_record(source, "SPECIALIST_METHODS") == SPECIALIST_METHODS
+    assert _ts_record(source, "SPECIALIST_LABELS") == SPECIALIST_LABELS
+    assert "`${who}의 분석을 받았어요`" in source and "`${who}의 답을 받지 못해 직접 정리해요`" in source
+    assert specialist_result("researcher", True).endswith("의 분석을 받았어요")
 
 
 def test_every_tool_and_specialist_has_a_method_sentence():
@@ -101,7 +122,7 @@ def test_every_tool_and_specialist_has_a_method_sentence():
                     {"alt_id": "ALT-2", "kpi": {"net_krw": 7.3e8}},
                 ]
             },
-            "대안 2개 · 순효과 최고 ALT-2(연 7.3억 원)",
+            "대안 2개 · 순효과 최고 ALT-2(7.3억 원)",
         ),
         (
             "relayout_plan",
@@ -112,7 +133,58 @@ def test_every_tool_and_specialist_has_a_method_sentence():
                 ],
                 "search": {"status": "optimal"},
             },
-            "대안 2개 · 순효과 최고 ALT-1(연 7.4억 원) · ALT-1 최적해 확인",
+            "대안 2개 · 순효과 최고 ALT-1(7.4억 원) · ALT-1: 100원 단위로 반올림한 모델·제약 범위에서 최적",
+        ),
+        (
+            "relayout_plan",
+            {
+                "alternatives": [
+                    {"alt_id": "ALT-0", "kpi": {"net_krw": 0}, "search_status": None},
+                    {
+                        "alt_id": "ALT-1",
+                        "kpi": {"net_krw": 7.36e8},
+                        "search_status": "optimal",
+                        "objective_rounding_krw": 100,
+                    },
+                    {"alt_id": "ALT-2", "kpi": {"net_krw": 6.1e8}, "search_status": "optimal_diverse"},
+                ],
+                "search": {"status": "optimal", "objective_rounding_krw": 100},
+            },
+            "대안 3개 · 순효과 최고 ALT-1(7.4억 원) · ALT-1: 100원 단위로 반올림한 모델·제약 범위에서 최적",
+        ),
+        (
+            "relayout_plan",
+            {
+                "alternatives": [
+                    {"alt_id": "ALT-1", "kpi": {"net_krw": 7.36e8}, "search_status": "feasible"},
+                    {"alt_id": "ALT-2", "kpi": {"net_krw": 6.1e8}, "search_status": "optimal_diverse"},
+                ],
+                "search": {"status": "optimal"},
+            },
+            "대안 2개 · 순효과 최고 ALT-1(7.4억 원) · ALT-2: 앞 대안과 다르게 만드는 조건에서 최적",
+        ),
+        (
+            "relayout_plan",
+            {
+                "reused": True,
+                "alternatives": [
+                    {"alt_id": "ALT-1", "kpi": {"net_krw": 7.36e8}, "search_status": "heuristic"}
+                ],
+                "search": {"status": "heuristic"},
+            },
+            "저장된 대안 재사용 · 대안 1개 · 순효과 최고 ALT-1(7.4억 원)",
+        ),
+        (
+            "relayout_plan",
+            {
+                "alternatives": [
+                    {
+                        "alt_id": "ALT-1",
+                        "kpi": {"net_krw": 7.2e8, "annual_uplift_krw": 7.4e8, "one_off_loss_krw": 2.0e7},
+                    }
+                ]
+            },
+            "대안 1개 · 순효과 최고 ALT-1(연간 증가 7.4억 원, 1회성 손실 2,000만 원)",
         ),
         (
             "layout_generate_alternatives",
@@ -122,7 +194,44 @@ def test_every_tool_and_specialist_has_a_method_sentence():
         (
             "layout_generate_alternatives",
             {"alternatives": [{"alt_id": "ALT-1"}], "search": {"status": "optimal"}},
-            "대안 1개 · ALT-1 최적해 확인",
+            "대안 1개 · ALT-1: 100원 단위로 반올림한 모델·제약 범위에서 최적",
+        ),
+        (
+            "relayout_phasing",
+            {"alt_id": "ALT-2", "basis": "best_net_fallback", "total_weeks": 10, "lost_krw": 66_481_534},
+            "선택안이 없어 ALT-2 기준 · 총 10주 · 예상 영업 손실 6,648만 원",
+        ),
+        (
+            "relayout_phasing",
+            {"alt_id": "ALT-2", "basis": "selected", "total_weeks": 10},
+            "총 10주",
+        ),
+        (
+            "spatial_route",
+            {"walk_m": 40, "straight": True, "transitions": []},
+            "직선 추정 약 40m",
+        ),
+        (
+            "ui_show_route",
+            {"walk_m": None, "straight": True, "transitions": [{"floors": 2}]},
+            "걷는 거리 알 수 없음 · 2개 층 이동",
+        ),
+        (
+            "data_provenance",
+            {
+                "ok": True,
+                "default_dataset": "synthetic_demo",
+                "domains": [
+                    {"domain": "transactions", "source": "synthetic_demo"},
+                    {"domain": "leases", "source": "uploaded"},
+                ],
+            },
+            "기본 데이터는 가상 합성 데모 · 올린 자료가 있는 영역 1개",
+        ),
+        (
+            "ui_show_heatmap",
+            {"ok": True, "rev": "R0", "rev_switched": True, "estimated": True},
+            "R0 개정으로 전환 · 실적이 없어 모델 추정치로 색칠",
         ),
         (
             "spatial_egress_check",
@@ -148,7 +257,7 @@ def test_every_tool_and_specialist_has_a_method_sentence():
                     {"title": "후보 2"},
                 ],
             },
-            "후보 2곳 · 1순위 1F 에스컬레이터 B 옆 통로(하루 약 1,803명)",
+            "후보 2곳 · 1순위 1F 에스컬레이터 B 옆 통로(하루 약 1,803회 통행)",
         ),
         (
             "analytics_store_compare",
@@ -163,6 +272,11 @@ def test_results_read_the_tool_output(name, output, expected):
 
 def test_results_for_failures_ui_actions_and_odd_outputs():
     assert tool_result("spatial_query", {}, '{"ok": false, "error": "x"}') == "조건을 고쳐 다시 시도해요"
+    decision = {"ok": False, "code": "decision_exists", "error": "이미 결정한 대안이 있어요."}
+    assert tool_result("relayout_plan", {}, decision) == "기존 결정이 있어 사용자 확인이 필요해요"
+    internal = {"ok": False, "code": "internal_error", "error": "도구 내부 오류(KeyError)가 났어요."}
+    assert tool_result("spatial_query", {}, internal) == "도구 내부 오류로 이 단계를 하지 못했어요"
+    assert tool_result("ui_show_heatmap", {}, {"ok": True, "rev": "R2", "estimated": False}) is None
     assert tool_result("ui_set_floor", {"floor": "4F"}, '{"ok": true, "floor": "4F"}') is None
     assert tool_result("ui_show_panel", {}, {"ok": True, "panel": "table", "rows": 9}) == "표 9행"
     assert tool_result("analytics_productivity", {}, "not json") is None

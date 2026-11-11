@@ -4,7 +4,16 @@
 // (the F/W relayout as the CAD team drew it); other parents are copied as they are.
 import { ApiError } from '../api/client'
 import { isRecord } from '../lib/coerce'
-import { LAYER_SEMANTICS, METADATA_KINDS, STEP_LABELS, STEP_ORDER, floorFromFileName, metadataKindInfo, validateDrawingUpload } from '../lib/uploads'
+import {
+  DEFAULT_UPLOAD_RULES,
+  LAYER_SEMANTICS,
+  METADATA_KINDS,
+  STEP_LABELS,
+  STEP_ORDER,
+  floorFromFileName,
+  metadataKindInfo,
+  validateDrawingUpload,
+} from '../lib/uploads'
 import type {
   DrawingProfile,
   DrawingUploadRequest,
@@ -16,6 +25,7 @@ import type {
   UploadJob,
   UploadJobCreated,
   UploadJobSummary,
+  UploadRules,
 } from '../types/api'
 import { planImpact } from './analytics'
 import { MOCK_FLOORS } from './catalog'
@@ -49,10 +59,12 @@ interface JobState {
   questions: LayerReviewItem[]
   /** File that fails to parse (names containing "broken"). */
   broken: string | null
+  /** File whose job saves the model but fails the lease check afterwards (names containing "partial"): status `partial`. */
+  partial: string | null
   runGenerators: boolean
 }
 
-const settled = (status: string) => status === 'done' || status === 'failed' || status === 'needs_review'
+const settled = (status: string) => status === 'done' || status === 'failed' || status === 'needs_review' || status === 'partial'
 
 function extension(name: string): string {
   const dot = name.lastIndexOf('.')
@@ -161,7 +173,9 @@ export function createMockUploads(
 
   function finish(state: JobState): void {
     const { job } = state
-    job.status = job.parse?.review_queue.length ? 'needs_review' : 'done'
+    // A layer question waits for a person; otherwise a failed later step leaves the model saved but the job partial.
+    job.status = job.parse?.review_queue.length ? 'needs_review' : job.stage_errors.length ? 'partial' : 'done'
+    job.review_reason = job.status === 'needs_review' ? 'layer_review_queue' : null
     if (job.rev_id) hooks.publish(job.rev_id)
   }
 
@@ -205,6 +219,14 @@ export function createMockUploads(
           return
         }
         world.revisions.set(rev, revision)
+        // The saved model is now this job's; an earlier job that uploaded the same revision id no longer owns it.
+        job.revision_available = true
+        for (const other of jobs) {
+          if (other.job !== job && other.job.rev_id === rev && other.job.revision_available !== false) {
+            other.job.superseded_by = job.job_id
+            other.job.revision_available = false
+          }
+        }
         step.message = `올린 층 ${job.floors_uploaded.join(', ')} · 가져온 층 ${job.floors_inherited.length}개`
         break
       }
@@ -217,6 +239,13 @@ export function createMockUploads(
         break
       }
       case 'qa': {
+        if (state.partial) {
+          // The model is saved; this later step fails, which makes the job partial instead of failed.
+          step.status = 'failed'
+          step.message = '계약 정보를 읽지 못했어요'
+          job.stage_errors.push({ step: 'qa', message: `${state.partial}: 계약(leases) 표를 읽는 중 오류가 났어요. 도면 모델은 저장했어요.` })
+          break
+        }
         const units = world.revisions.get(rev)?.floors['3F']?.units ?? []
         const c06 = units.find((u) => u.code === '3F-C06')
         const seasonDrawing = parent === SEASON_BASE_REV && !!c06
@@ -267,12 +296,13 @@ export function createMockUploads(
       }
       case 'relayout_check': {
         const check = relayout.checkUpload(rev, parent)
-        if (!check) {
+        job.relayout_check = check
+        if (check.skipped) {
+          // Not applicable (no decided plan for this base revision): a skipped step, not a failure.
           step.status = 'skipped'
-          step.message = `${parent} 기준으로 결정한 개편안이 없습니다.`
+          step.message = check.reason ?? `${parent} 기준으로 결정한 개편안이 없습니다.`
           break
         }
-        job.relayout_check = check
         step.message = `${check.brief_id} ${check.alt_id ?? ''} 일치율 ${check.conformance_pct ?? '–'}%`
         break
       }
@@ -303,6 +333,10 @@ export function createMockUploads(
     rev_id: job.rev_id,
     created_at: job.created_at,
     updated_at: job.updated_at,
+    revision_available: job.revision_available,
+    review_reason: job.review_reason,
+    stage_errors: job.stage_errors.map((e) => ({ ...e })),
+    superseded_by: job.superseded_by,
   })
 
   return {
@@ -349,12 +383,17 @@ export function createMockUploads(
         artifacts: [],
         qa: null,
         relayout_check: null,
+        stage_errors: [],
+        superseded_by: null,
+        review_reason: null,
+        revision_available: false,
         error: null,
       }
       jobs.push({
         job,
         questions: profile === 'default' ? [question(uploaded[0])] : [],
         broken: files.find((f) => /broken/i.test(f.name))?.name ?? null,
+        partial: files.find((f) => /partial/i.test(f.name))?.name ?? null,
         runGenerators: request.run_generators !== false,
       })
       return { job_id: jobId, status: 'queued' }
@@ -388,12 +427,26 @@ export function createMockUploads(
           step.message = null
         }
       }
-      Object.assign(job, { status: 'queued', parse: null, changes: null, impact: [], artifacts: [], qa: null, relayout_check: null, error: null })
+      Object.assign(job, {
+        status: 'queued',
+        parse: null,
+        changes: null,
+        impact: [],
+        artifacts: [],
+        qa: null,
+        relayout_check: null,
+        stage_errors: [],
+        review_reason: null,
+        error: null,
+      })
       touch(state)
       return structuredClone(job)
     },
 
     listProfiles: (): DrawingProfile[] => [...profiles.values()].map((p) => ({ ...p })),
+
+    /** GET /api/uploads/rules: the revision id rules the server applies (shared with the form's pre-check). */
+    rules: (): UploadRules => structuredClone(DEFAULT_UPLOAD_RULES),
 
     async uploadMetadata(kind: MetadataKind, file: File): Promise<MetadataUploadResult> {
       const info = metadataKindInfo(kind)
@@ -466,6 +519,8 @@ export function createMockUploads(
         const table = tables[info.kind]
         return {
           kind: info.kind,
+          label_ko: info.label,
+          ...(info.description ? { description_ko: info.description } : {}),
           present: table ? table.rows > 0 : items.length > 0,
           rows: table ? table.rows : items.length,
           updated_at: table ? table.updated_at : (documentsUpdated[info.kind] ?? null),

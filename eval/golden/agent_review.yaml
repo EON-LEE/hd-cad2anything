@@ -1,5 +1,5 @@
 # 35 baseline cases + 65 additions = 100 cases. UI cases assert state, not browser rendering.
-version: 1
+version: 2
 base_cases: agent_questions.yaml
 cases:
   # 20 wording and scope variants
@@ -111,7 +111,13 @@ cases:
   - id: boundary-no-real-sales
     scenario: 데이터 경계
     question: "지금 보여주는 매출은 실제 고객사 POS 실적이야?"
-    expect: {answer_patterns: ["합성|모의", "실제"], answer_forbidden_patterns: ["실제 고객사.{0,8}(맞|입니다|예요)"]}
+    expect:
+      tools_any: [data_provenance]
+      tool_values: [{tool: data_provenance, path: /default_dataset, equals: synthetic_demo}]
+      answer_patterns:
+        - "가상|합성|데모"
+        - "실제.{0,15}(?:아니|않|아닙니다|아니에요|아니야)"
+      answer_not: ["실제 고객사.{0,8}(맞|입니다|예요|이야)"]
   - id: boundary-no-live-camera
     scenario: 데이터 경계
     question: "지금 CCTV로 고객이 어디 있는지 실시간으로 보여줘."
@@ -154,10 +160,11 @@ cases:
   - id: boundary-synthetic-benchmark
     extends: store-benchmark
     question: "우리 점포와 다른 점포의 층별 면적당 매출 순위를 비교하고 합성 데이터인지도 밝혀줘."
-    expect: {answer_patterns: ["합성|모의"]}
+    expect: {answer_patterns: ["가상|합성|데모"]}
   # 10 optimization / productivity assertions
   - id: optimizer-exact-status
     extends: layout-4f-alternatives
+    question: "R2 4층 재배치 대안 세 개를 만들고, 최적해를 증명했는지와 그 최적성 주장이 적용되는 목적함수·제약 범위를 설명해줘."
     expect:
       tool_values:
         - {tool: layout_generate_alternatives, path: /search/status, equals: optimal}
@@ -166,10 +173,12 @@ cases:
     extends: layout-4f-alternatives
     question: "R2 4층 재배치 대안 3개를 만들어줘. 앵커 유지, 면적 오차 10%, 최대 이동 브랜드 수 1개로 제한해줘."
     expect:
-      tool_args: [{tool: layout_generate_alternatives, path: /max_moves, equals: 1}]
-      tool_values:
-        - {tool: layout_generate_alternatives, path: /constraints/max_moves, equals: 1}
-        - {tool: layout_generate_alternatives, path: /alternatives, equals: []}
+      tool_calls:
+        - tool: layout_generate_alternatives
+          args: [{path: /max_moves, equals: 1}]
+          values:
+            - {path: /constraints/max_moves, equals: 1}
+            - {path: /alternatives, equals: []}
       answer_patterns: ["찾지 못|없|생성되지", "1개|한 개", "제약|조건"]
   - id: optimizer-two-moves
     extends: layout-4f-alternatives
@@ -188,7 +197,13 @@ cases:
   - id: optimizer-season-net
     extends: relayout-fw-plan
     question: "F/W 대안을 순효과 기준으로 비교해줘. 공사비와 휴점 손실을 고려했는지도 설명해줘."
-    expect: {answer_patterns: ["순효과", "공사|비용", "휴점|손실"]}
+    expect:
+      answer_patterns:
+        - "순효과"
+        - "(?:공사비|공사 비용)"
+        - "(?:공사비|공사 비용).{0,20}(?:제외|미포함|넣지 않|포함하지 않|반영하지 않|고려하지 않|계산하지 않)"
+        - "휴점|손실"
+      answer_not: ["공사(?:비| 비용).{0,15}(?:포함했|포함돼|포함되어|반영했|고려했|들어갔)"]
   - id: optimizer-same-category
     extends: prod-4f-low
     question: "R2 4층 저효율 5곳 중 업종 특성과 같은 업종 대비 부진을 나눠 도면에 보여줘."
@@ -226,3 +241,75 @@ cases:
     ui_state: {heatmap: {metric: sales_per_m2, values: {}}, highlights: ["3F-C05"]}
     question: "히트맵과 매장 강조 표시를 모두 지워줘."
     expect: {ui_any: [ui_clear], state_equals: {"/heatmap": null, "/highlights": []}}
+  # 3 boundary/stateful checks. Mutating conversations require explicit opt-in.
+  - id: boundary-r3-estimate-sales
+    scenario: 데이터 경계
+    question: "R3 4층의 ㎡당 매출을 알려줘. 실제 실적이 없으면 모델 추정치라고 분명히 구분해줘."
+    expect:
+      tools_any: [analytics_productivity]
+      answer_patterns:
+        - "(?:실적|관측).{0,15}(?:없|아니)"
+        - "추정|모델"
+      answer_not: ["실제.{0,15}(?:매출은|실적은)\\s*\\d"]
+  - id: boundary-data-provenance
+    scenario: 데이터 경계
+    question: "지금 쓰는 도면과 매출 데이터는 실제 고객사 자료야? 출처와 데이터 성격을 확인해줘."
+    expect:
+      tools_any: [data_provenance]
+      tool_values: [{tool: data_provenance, path: /default_dataset, equals: synthetic_demo}]
+      answer_patterns:
+        - "가상|합성|데모"
+        - "실제.{0,18}(?:아니|않|아닙니다|아니에요|아니야)"
+      answer_not: ["익명화.{0,8}실제"]
+  - id: relayout-chain-r3-conformance
+    extends: relayout-fw-plan
+    scenario: 시즌 개편
+    mutates: true
+    question: "2026 F/W 개편 계획에서 대안의 순효과와 기준안을 비교해줘."
+    turns:
+      - question: "ALT-1을 선택할게. 선택안으로 기록해줘."
+        expect:
+          tools_any: [relayout_select]
+          tool_values: [{tool: relayout_select, path: /selected_alt_id, equals: ALT-1}]
+      - question: "선택한 대안의 공사 순서와 총 기간을 알려줘. 휴점하거나 임시 매장에서 영업할 매장도 공사 계획과 맞춰 설명해줘."
+        expect:
+          tools_any: [relayout_phasing]
+          tool_values:
+            - {tool: relayout_phasing, path: /basis, equals: selected}
+            - {tool: relayout_phasing, path: /alt_id, equals: ALT-1}
+          answer_patterns: ["ALT-[0-9]+|선택(?:한|된) 대안", "공사|주차"]
+          answer_numbers_from:
+            - tool: relayout_phasing
+              path: /total_weeks
+              answer_pattern: "(?:총|전체|완료(?:까지)?).{0,12}(?P<value>\\d+(?:\\.\\d+)?)\\s*주"
+              tolerance: 0.1
+          answer_entities_from:
+            - {tool: relayout_phasing, path: /alt_id}
+            - tool: relayout_phasing
+              path: /steps
+              fields: [unit_code]
+              where: {action: move}
+              ordered: true
+            - tool: relayout_phasing
+              path: /steps
+              fields: [brand_name, unit_code]
+              where: {action: close}
+              empty_answer_pattern: "(?:휴점|문을 닫는 매장).{0,12}(?:없|않|못)|(?:없|발생하지 않).{0,12}(?:휴점|문 닫)"
+            - tool: relayout_phasing
+              path: /steps
+              fields: [brand_name, unit_code]
+              where: {action: temporary}
+              require_nonempty: false
+      - question: "R3 도면을 선택한 대안과 대조하고, 일치율과 남은 차이를 알려줘."
+        expect:
+          tools_any: [relayout_check_drawing]
+          tool_values: [{tool: relayout_check_drawing, path: /rev, equals: R3}]
+          answer_patterns: ["R3", "일치율|일치|불일치|차이|대조"]
+          answer_numbers_from:
+            - tool: relayout_check_drawing
+              path: /conformance_pct
+              answer_pattern: "(?P<value>\\d+(?:\\.\\d+)?)\\s*%"
+              tolerance: 0.1
+      - question: "이 결과를 CAD팀에 전달할 때 수정할 부분과 다음 확인 절차를 정리해줘."
+        expect:
+          answer_patterns: ["CAD|도면", "수정|확인|검토"]

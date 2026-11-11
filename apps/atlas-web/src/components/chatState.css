@@ -1,0 +1,66 @@
+/* Styles of the chat/state/data-flow components (WS6a); the shared look stays in styles.css. */
+
+/* Blocking error screen: the server did not answer and mock data was not asked for. */
+.boot.boot-error {
+  padding: 24px;
+  color: inherit;
+}
+
+.boot-error-card {
+  display: grid;
+  gap: 10px;
+  max-width: 460px;
+  padding: 20px 22px;
+  border: 1px solid #f5b5b5;
+  border-left: 4px solid var(--danger);
+  border-radius: 10px;
+  background: #fff7f7;
+  color: var(--ink);
+  text-align: left;
+}
+
+.boot-error-card h1 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--danger);
+}
+
+.boot-error-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.boot-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.boot-error-card details {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.boot-error-card summary {
+  cursor: pointer;
+}
+
+.boot-error-detail {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Several prepared results can wait at once: one button each. */
+.result-notice {
+  flex-wrap: wrap;
+}
+
+/* Non-blocking warning near actions the server may not be able to save. */
+.writes-warning {
+  margin: 8px 0;
+}

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { ApiError } from '../api/client'
 import { useData } from '../api/source'
+import { useIsCompact } from '../hooks/useMediaQuery'
 import { floorLabel, formatManwon } from '../lib/format'
 import { gapText, journeySubtitle, journeySummaryChips, transitionText } from '../lib/journey'
 import type { PatchOperation } from '../lib/jsonPatch'
@@ -20,6 +21,13 @@ export function JourneyCard({ journey }: { journey: Journey }) {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [activeOrder, setActiveOrder] = useState<number | null>(null)
+  // On a phone the card floats over a small canvas: collapse to one line with an expander (R1).
+  const compact = useIsCompact()
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => {
+    if (!compact) setExpanded(false)
+  }, [compact])
+  const collapsed = compact && !expanded
   const alive = useRef(true)
 
   useEffect(() => {
@@ -76,74 +84,98 @@ export function JourneyCard({ journey }: { journey: Journey }) {
   const chips = journeySummaryChips(journey)
 
   return (
-    <section className="journey-card" aria-labelledby="journey-card-title" onKeyDown={onKeyDown}>
+    <section className={`journey-card${collapsed ? ' card-collapsed' : ''}`} aria-labelledby="journey-card-title" onKeyDown={onKeyDown}>
       <header className="journey-head">
-        <p className="journey-eyebrow">
-          <span className="journey-eyebrow-line" aria-hidden="true" />
-          고객 동선
-        </p>
-        <h2 id="journey-card-title">{journey.title}</h2>
-        {subtitle && <p className="journey-sub">{subtitle}</p>}
-        <ul className="journey-chips" aria-label="동선 요약">
-          {chips.map((chip) => (
-            <li key={chip}>{chip}</li>
-          ))}
-        </ul>
-      </header>
-      <ol className="journey-timeline" aria-label="결제 순서 (누르면 도면에서 매장으로 이동)">
-        {journey.stops.map((stop) => {
-          const move = journey.transitions.find((t) => t.to_order === stop.order)
-          const gap = gapText(stop.gap_min)
-          const place = floorLabel(stop.floor)
-          const name = stop.brand_name ?? stop.unit_code
-          const amount = stop.amount_krw !== null ? formatManwon(stop.amount_krw) : ''
-          return (
-            <li key={`${stop.order}-${stop.unit_code}`}>
-              {move && <div className="journey-move">{transitionText(move, floors)}</div>}
-              {gap && <div className="journey-gap">{gap}</div>}
+        <div className="card-head-top">
+          <p className="journey-eyebrow">
+            <span className="journey-eyebrow-line" aria-hidden="true" />
+            고객 동선
+          </p>
+          {compact && (
+            <span className="card-compact-controls">
               <button
                 type="button"
-                className={`journey-stop${activeOrder === stop.order ? ' active' : ''}${stop.floor === ui.floor ? ' on-floor' : ''}`}
-                aria-current={activeOrder === stop.order ? 'true' : undefined}
-                aria-label={`${stop.order}번째 결제 ${stop.time} ${place} ${name}${stop.category_name ? ` ${stop.category_name}` : ''}${amount ? ` ${amount}` : ''}, 도면에서 보기`}
-                onClick={() => showStop(stop)}
+                className="card-expand"
+                aria-expanded={expanded}
+                aria-controls="journey-card-detail"
+                onClick={() => setExpanded((v) => !v)}
               >
-                <span className="journey-num" aria-hidden="true">
-                  {stop.order}
-                </span>
-                <span className="journey-stop-body">
-                  <span className="journey-stop-top">
-                    <span className="journey-time">{stop.time}</span>
-                    <span className="journey-floor">{place}</span>
-                    {amount && <span className="journey-amount">{amount}</span>}
-                  </span>
-                  <span className="journey-brand">
-                    {name}
-                    {stop.category_name && <span className="journey-category"> · {stop.category_name}</span>}
-                  </span>
-                </span>
+                {expanded ? '접기' : '자세히'}
               </button>
-            </li>
-          )
-        })}
-      </ol>
-      {journey.caveat && <p className="journey-caveat">{journey.caveat}</p>}
-      {message && (
-        <p className="journey-message" role="status">
-          {message}
-        </p>
+              <button type="button" className="icon-button" aria-label="동선 지우기" onClick={clear}>
+                ×
+              </button>
+            </span>
+          )}
+        </div>
+        <h2 id="journey-card-title">{journey.title}</h2>
+        {!collapsed && subtitle && <p className="journey-sub">{subtitle}</p>}
+        {!collapsed && (
+          <ul className="journey-chips" aria-label="동선 요약">
+            {chips.map((chip) => (
+              <li key={chip}>{chip}</li>
+            ))}
+          </ul>
+        )}
+      </header>
+      {!collapsed && (
+        <>
+          <ol id="journey-card-detail" className="journey-timeline" aria-label="결제 순서 (누르면 도면에서 매장으로 이동)">
+            {journey.stops.map((stop) => {
+              const move = journey.transitions.find((t) => t.to_order === stop.order)
+              const gap = gapText(stop.gap_min)
+              const place = floorLabel(stop.floor)
+              const name = stop.brand_name ?? stop.unit_code
+              const amount = stop.amount_krw !== null ? formatManwon(stop.amount_krw) : ''
+              return (
+                <li key={`${stop.order}-${stop.unit_code}`}>
+                  {move && <div className="journey-move">{transitionText(move, floors)}</div>}
+                  {gap && <div className="journey-gap">{gap}</div>}
+                  <button
+                    type="button"
+                    className={`journey-stop${activeOrder === stop.order ? ' active' : ''}${stop.floor === ui.floor ? ' on-floor' : ''}`}
+                    aria-current={activeOrder === stop.order ? 'true' : undefined}
+                    aria-label={`${stop.order}번째 결제 ${stop.time} ${place} ${name}${stop.category_name ? ` ${stop.category_name}` : ''}${amount ? ` ${amount}` : ''}, 도면에서 보기`}
+                    onClick={() => showStop(stop)}
+                  >
+                    <span className="journey-num" aria-hidden="true">
+                      {stop.order}
+                    </span>
+                    <span className="journey-stop-body">
+                      <span className="journey-stop-top">
+                        <span className="journey-time">{stop.time}</span>
+                        <span className="journey-floor">{place}</span>
+                        {amount && <span className="journey-amount">{amount}</span>}
+                      </span>
+                      <span className="journey-brand">
+                        {name}
+                        {stop.category_name && <span className="journey-category"> · {stop.category_name}</span>}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ol>
+          {journey.caveat && <p className="journey-caveat">{journey.caveat}</p>}
+          {message && (
+            <p className="journey-message" role="status">
+              {message}
+            </p>
+          )}
+          <footer className="journey-actions">
+            <button type="button" onClick={() => void showNextCustomer()} disabled={loading} aria-busy={loading}>
+              {loading ? '불러오는 중…' : '다른 고객 보기'}
+            </button>
+            <button type="button" onClick={close}>
+              닫기
+            </button>
+            <button type="button" className="danger" onClick={clear}>
+              동선 지우기
+            </button>
+          </footer>
+        </>
       )}
-      <footer className="journey-actions">
-        <button type="button" onClick={() => void showNextCustomer()} disabled={loading} aria-busy={loading}>
-          {loading ? '불러오는 중…' : '다른 고객 보기'}
-        </button>
-        <button type="button" onClick={close}>
-          닫기
-        </button>
-        <button type="button" className="danger" onClick={clear}>
-          동선 지우기
-        </button>
-      </footer>
     </section>
   )
 }

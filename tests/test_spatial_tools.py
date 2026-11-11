@@ -188,3 +188,131 @@ def test_specialists_with_spatial_tools_get_every_spatial_tool():
             assert set(tools) <= set(TOOL_DESCRIPTIONS), agent["name"]
             if any(t.startswith("spatial_") for t in tools):
                 assert spatial <= set(tools), agent["name"]
+
+
+# --- inter-floor route fallback (never 0 m) -----------------------------------------------------------
+
+
+def _two_floor_model(stairs_on_2f: bool = True):
+    """1F and 2F with one unit each and stairs that the 2F walkway does not reach.
+
+    The 2F walkway is split in two pieces, so a route to the stairs cannot be walked there; with
+    ``stairs_on_2f`` False the floors share no stairs at all.
+    """
+    from cad2anything.model import Entity, EntityKind, Floor, Revision, SpatialModel
+
+    model = SpatialModel(
+        revision=Revision("RT"),
+        floors=[Floor("1F", 0, elevation_m=0.0), Floor("2F", 1, elevation_m=5.0)],
+    )
+    for floor in ("1F", "2F"):
+        code = f"{floor}-C01"
+        model.add(
+            Entity(
+                f"U-{code}",
+                EntityKind.UNIT,
+                floor,
+                box(0, 4, 10, 12),
+                attributes={
+                    "unit_code": code,
+                    "brand_id": "BR01",
+                    "brand_name": f"브랜드 {code}",
+                    "category": "COSMETICS",
+                    "vacant": False,
+                },
+            )
+        )
+        model.add(Entity(f"W-{floor}-A", EntityKind.WALKWAY, floor, box(0, 0, 10, 4)))
+        # 1F is one corridor; on 2F the far piece is detached, so the stairs cannot be walked to.
+        model.add(
+            Entity(
+                f"W-{floor}-B",
+                EntityKind.WALKWAY,
+                floor,
+                box(10, 0, 40, 4) if floor == "1F" else box(30, 0, 40, 4),
+            )
+        )
+        if floor == "1F" or stairs_on_2f:
+            model.add(
+                Entity(
+                    f"V-{floor}-ST-A",
+                    EntityKind.VERTICAL_LINK,
+                    floor,
+                    box(30, 4, 34, 8),
+                    attributes={"link_id": "ST-A", "link_type": "stair"},
+                )
+            )
+    return model
+
+
+def test_inter_floor_fallback_estimates_the_walk_instead_of_reporting_zero():
+    from cad2anything.spatial.routes import RoutePlanner
+
+    planner = RoutePlanner(_two_floor_model())
+    route = planner.route_between(planner._units["1F-C01"], planner._units["2F-C01"], "stairs")
+
+    assert route.straight and route.via == "ST-A"
+    assert [leg.floor for leg in route.legs] == ["1F", "2F"]
+    assert all(leg.length_m > 0 for leg in route.legs)
+    assert route.length_m == pytest.approx(sum(leg.length_m for leg in route.legs))
+    assert route.length_m > 0
+
+
+def test_inter_floor_fallback_without_a_link_reports_an_unknown_walk():
+    from cad2anything.spatial.routes import RoutePlanner
+
+    planner = RoutePlanner(_two_floor_model(stairs_on_2f=False))
+    route = planner.route_between(planner._units["1F-C01"], planner._units["2F-C01"], "stairs")
+
+    assert route.straight and route.via is None
+    assert [leg.length_m for leg in route.legs] == [None, None]
+    assert route.length_m is None
+
+
+def _fallback_toolkit(tmp_path, stairs_on_2f: bool) -> Toolkit:
+    from cad2anything.workspace import Workspace
+
+    workspace = Workspace(tmp_path)
+    workspace.save_model(_two_floor_model(stairs_on_2f), {"source": "test"})
+    return Toolkit(workspace, use_postgis=False)
+
+
+def test_route_tool_never_reports_a_zero_metre_fallback(tmp_path):
+    toolkit = _fallback_toolkit(tmp_path / "estimate", stairs_on_2f=True)
+
+    route = toolkit.route_object("RT", "1F-C01", "2F-C01", via="stairs")
+
+    assert route["straight"] is True and route["walk_m"] > 0
+    assert [leg["walk_m"] for leg in route["legs"]] == [pytest.approx(route["walk_m"] / 2, abs=5)] * 2
+    assert all(leg["straight"] for leg in route["legs"])
+    assert route["transitions"] == [
+        {
+            "from_floor": "1F",
+            "to_floor": "2F",
+            "via": "ST-A",
+            "floors": 1,
+            "height_m": 5.0,
+            "straight": True,
+        }
+    ]
+    assert "직선거리로 어림잡았어요" in route["caveat"] and "계단" in route["caveat"]
+    assert "1m 격자" in route["caveat"]
+
+
+def test_route_tool_reports_an_unknown_walk_without_a_shared_link(tmp_path):
+    toolkit = _fallback_toolkit(tmp_path / "unknown", stairs_on_2f=False)
+
+    route = toolkit.route_object("RT", "1F-C01", "2F-C01", via="stairs")
+
+    assert route["straight"] is True and route["walk_m"] is None
+    assert [leg["walk_m"] for leg in route["legs"]] == [None, None]
+    assert route["transitions"] == [] and route["segments"] == []
+    assert "walk_m은 비어 있어요" in route["caveat"] and "계단" in route["caveat"]
+
+
+def test_short_walks_are_not_rounded_down_to_zero():
+    from cad2anything.services.spatial_tools import _round5
+
+    assert _round5(0.0) == 0 and _round5(None) is None
+    assert _round5(2.0) == 2 and _round5(0.4) == 1
+    assert _round5(12.0) == 10 and _round5(13.0) == 15

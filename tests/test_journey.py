@@ -1,3 +1,4 @@
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -83,3 +84,90 @@ def test_journey_endpoint_returns_the_ui_state_object(toolkit):
     } <= set(body)
     assert body["query"] == {"segment": {"age_band": "40s"}, "rank": 1}
     assert client.get("/api/analytics/journey", params={"customer_id": "C9999999"}).status_code == 404
+
+
+def test_candidate_stops_count_merged_stops_not_receipts():
+    from datetime import date
+
+    from cad2anything.analytics.journey import journey_candidates, journey_stops
+
+    day = date(2025, 10, 4)
+    rows = pd.DataFrame(
+        {
+            "customer_key": ["C1"] * 5 + ["C2"] * 3,
+            "day": [day] * 8,
+            "ts": pd.to_datetime(
+                [
+                    "2025-10-04 10:00",
+                    "2025-10-04 10:20",  # same unit again: one stop
+                    "2025-10-04 11:00",
+                    "2025-10-04 11:30",
+                    "2025-10-04 12:00",  # back to the first unit: a new stop
+                    "2025-10-04 10:00",
+                    "2025-10-04 10:10",
+                    "2025-10-04 10:20",
+                ]
+            ),
+            "unit_code": ["3F-C05", "3F-C05", "3F-C06", "4F-C01", "3F-C05", "1F-C01", "1F-C01", "1F-C01"],
+            "floor": ["3F", "3F", "3F", "4F", "3F", "1F", "1F", "1F"],
+            "brand_id": ["B1"] * 8,
+            "brand_name": ["브랜드"] * 8,
+            "category": ["COSMETICS"] * 8,
+            "amount_krw": [1000.0] * 8,
+        }
+    )
+
+    ranked = journey_candidates(rows, min_stops=1)
+
+    assert list(ranked["customer_id"]) == ["C1", "C2"]
+    assert list(ranked["stops"]) == [4, 1] and list(ranked["receipts"]) == [5, 3]
+    for row in ranked.itertuples(index=False):
+        stops, _ = journey_stops(rows, row.customer_id, row.date)
+        assert len(stops) == row.stops
+        assert sum(s["receipts"] for s in stops) == row.receipts
+
+
+def test_journey_summary_stops_match_every_alternative(toolkit):
+    journey = toolkit.customer_journey(segment="tier:VIP|VVIP", with_routes=False)
+
+    assert journey["summary"]["stops"] == len(journey["stops"])
+    assert journey["summary"]["receipts"] == sum(s["receipts"] for s in journey["stops"])
+    assert journey["summary"]["receipts"] >= journey["summary"]["stops"]
+    assert [s["unit_code"] for s in journey["stops"]] == list(
+        dict.fromkeys(
+            [
+                code
+                for i, code in enumerate(s["unit_code"] for s in journey["stops"])
+                if i == 0 or code != journey["stops"][i - 1]["unit_code"]
+            ]
+        )
+    )
+    for alternative in journey["alternatives"]:
+        other = toolkit.customer_journey(
+            customer_id=alternative["customer_id"], date=alternative["date"], with_routes=False
+        )
+        assert other["summary"]["stops"] == alternative["stops"]
+        assert other["summary"]["receipts"] == alternative["receipts"]
+
+
+def test_journey_walk_reports_skipped_and_straight_legs(toolkit):
+    journey = toolkit.customer_journey(segment="tier:VIP|VVIP")
+    summary = journey["summary"]
+
+    assert summary["legs"] == len(journey["stops"]) - 1
+    assert summary["skipped_legs"] == 0 and summary["straight_legs"] == 0
+    assert summary["measured_legs"] == summary["legs"] and summary["walk_complete"] is True
+    assert summary["walk_m"] > 0 and "walk_notes" not in summary
+
+    # A stop in a unit the drawing does not know must not be counted as a 0 m leg.
+    partial = toolkit.customer_journey(
+        customer_id=journey["customer"]["id"], date=journey["date"], with_routes=False
+    )
+    partial["stops"][1] = {**partial["stops"][1], "unit_code": "ZZ-X99"}
+    toolkit._add_routes(partial)
+
+    assert partial["summary"]["skipped_legs"] == 2
+    assert partial["summary"]["measured_legs"] == partial["summary"]["legs"] - 2
+    assert partial["summary"]["walk_complete"] is False
+    assert partial["summary"]["walk_m"] < summary["walk_m"]
+    assert any("walk_m에 넣지 않았어요" in note for note in partial["summary"]["walk_notes"])

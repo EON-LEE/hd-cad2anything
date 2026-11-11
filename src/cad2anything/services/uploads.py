@@ -50,8 +50,11 @@ JOB_DIR = "uploads/jobs"
 STAGING_DIR = "uploads/staging"
 UPLOAD_VARIANT = "uploaded"
 JOB_ID_RE = re.compile(r"^J(\d{8})-(\d{4})$")
-REV_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,15}$")
-HYPOTHETICAL_ID_RE = re.compile(r"^H\d+$")
+REV_ID_MAX_LENGTH = 16
+REV_ID_PATTERN = rf"^[A-Z0-9][A-Z0-9_-]{{0,{REV_ID_MAX_LENGTH - 1}}}$"
+HYPOTHETICAL_ID_PATTERN = r"^H[0-9]+$"
+REV_ID_RE = re.compile(REV_ID_PATTERN)
+HYPOTHETICAL_ID_RE = re.compile(HYPOTHETICAL_ID_PATTERN)
 STEP_LABELS: dict[str, str] = {
     "save": "파일 저장",
     "parse": "도면 읽기",
@@ -67,6 +70,7 @@ STATUS_LABELS: dict[str, str] = {
     "queued": "대기 중",
     "running": "처리 중",
     "needs_review": "검토 필요",
+    "partial": "일부 단계 실패",
     "done": "완료",
     "failed": "실패",
 }
@@ -90,6 +94,14 @@ CHANGE_LABELS: dict[str, str] = {
 }
 ACTIVE_STATUSES = ("queued", "running")
 RESTART_MESSAGE = "서버가 다시 시작되어 작업이 중단되었습니다. 다시 올려 주세요."
+RESTART_MODEL_MESSAGE = (
+    "서버가 다시 시작되어 작업이 중단되었지만 이 작업이 저장한 개정 모델은 남아 있습니다. "
+    "나머지 단계를 마치려면 다시 처리하거나 도면을 다시 올려 주세요."
+)
+RESTART_EXISTING_MODEL_MESSAGE = (
+    "서버가 다시 시작되어 작업이 중단되었습니다. 같은 개정의 모델은 남아 있지만 이 작업의 결과인지는 확인할 수 없습니다. "
+    "나머지 단계를 마치려면 다시 처리하거나 도면을 다시 올려 주세요."
+)
 _FLOOR_IN_NAME = re.compile(
     r"(?<![A-Za-z0-9])(지하\s*\d{1,2}\s*층|B\d{1,2}F?|\d{1,3}\s*층|\d{1,3}F)(?![A-Za-z0-9])", re.IGNORECASE
 )
@@ -113,8 +125,20 @@ def size_text(size: int) -> str:
     return f"{size / MB:g}MB" if size >= MB else f"{size:,}바이트"
 
 
+def revision_id_rules() -> dict[str, Any]:
+    return {
+        "rev_id_pattern": REV_ID_PATTERN,
+        "reserved_patterns": [HYPOTHETICAL_ID_PATTERN],
+        "max_length": REV_ID_MAX_LENGTH,
+    }
+
+
 def remove_file(ws: Any, rel_path: str) -> None:
-    """Delete a workspace file locally and from the mirror when it supports deletes (best effort)."""
+    """Delete a workspace file through its mirror-aware API when available."""
+    delete_file = getattr(ws, "delete_file", None)
+    if callable(delete_file):
+        delete_file(rel_path)
+        return
     (ws.root / rel_path).unlink(missing_ok=True)
     delete = getattr(ws.mirror, "delete", None)
     if callable(delete):
@@ -274,6 +298,11 @@ def reset_job(job: dict[str, Any]) -> dict[str, Any]:
         artifacts=None,
         qa=None,
         relayout_check=None,
+        stage_errors=[],
+        metadata_snapshot={},
+        review_reason=None,
+        revision_available=False,
+        superseded_by=None,
         error=None,
         started_at=None,
         finished_at=None,
@@ -282,7 +311,21 @@ def reset_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def job_list_row(job: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: job.get(key) for key in ("job_id", "kind", "status", "rev_id", "created_at", "updated_at")}
+    return {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "kind",
+            "status",
+            "rev_id",
+            "created_at",
+            "updated_at",
+            "revision_available",
+            "review_reason",
+            "stage_errors",
+            "superseded_by",
+        )
+    }
 
 
 class JobStore:
@@ -290,20 +333,78 @@ class JobStore:
 
     def __init__(self, ws: Any) -> None:
         self.ws = ws
-        self.lock = threading.RLock()
+        self.lock = getattr(ws, "_lock", threading.RLock())
 
     @staticmethod
     def rel_path(job_id: str) -> str:
         return f"{JOB_DIR}/{job_id}.json"
+
+    def _with_defaults(self, job: dict[str, Any]) -> dict[str, Any]:
+        job.setdefault("run_attempt", 0)
+        if "revision_available" not in job:
+            job["revision_available"] = self.owns_model(job)
+        if "review_reason" not in job:
+            parse = job.get("parse") or {}
+            job["review_reason"] = (
+                "layer_review_queue" if parse.get("review_queue") or parse.get("review_total") else None
+            )
+        job.setdefault("metadata_snapshot", {})
+        if "superseded_by" not in job:
+            job["superseded_by"] = None
+            rev, job_id = str(job.get("rev_id") or ""), str(job.get("job_id") or "")
+            if REV_ID_RE.fullmatch(rev) and self.ws.has_model(rev):
+                try:
+                    owner = self.ws.model_meta(rev).get("job_id")
+                    current = (
+                        self.ws.read_json(self.rel_path(owner))
+                        if isinstance(owner, str) and JOB_ID_RE.fullmatch(owner)
+                        else None
+                    )
+                    if (
+                        current
+                        and current.get("rev_id") == rev
+                        and (str(current.get("created_at") or ""), owner)
+                        > (str(job.get("created_at") or ""), job_id)
+                    ):
+                        job["superseded_by"] = owner
+                except (KeyError, OSError, ValueError):
+                    pass
+        if "stage_errors" not in job:
+            downstream = {"diff", "qa", "impact", "generate", "relayout_check"}
+            errors = [
+                {"step": step["name"], "message": step.get("message") or "후속 단계가 실패했습니다."}
+                for step in job.get("steps") or []
+                if step.get("name") in downstream and step.get("status") == "failed"
+            ]
+            invalid_artifacts = [
+                item.get("title_ko") or item.get("generator")
+                for item in job.get("artifacts") or []
+                if item.get("status") in ("failed", "qa_failed")
+            ]
+            if invalid_artifacts and not any(error["step"] == "generate" for error in errors):
+                errors.append(
+                    {
+                        "step": "generate",
+                        "message": f"산출물 생성 또는 검증에 실패했습니다: {', '.join(map(str, invalid_artifacts))}",
+                    }
+                )
+            job["stage_errors"] = errors
+            model_saved = job["revision_available"] or any(
+                step.get("name") == "merge" and step.get("status") == "done"
+                for step in job.get("steps") or []
+            )
+            if errors and model_saved and job.get("status") in ("done", "needs_review"):
+                job["status"] = "partial"
+        return job
 
     def load(self, job_id: Any) -> dict[str, Any]:
         if not isinstance(job_id, str) or not JOB_ID_RE.match(job_id):
             raise NotFoundError(f"작업 {job_id}가 없습니다.")
         with self.lock:
             data = self.ws.read_json(self.rel_path(job_id))
-        if data is None:
-            raise NotFoundError(f"작업 {job_id}가 없습니다.")
-        return data
+            if data is None:
+                raise NotFoundError(f"작업 {job_id}가 없습니다.")
+            return self._with_defaults(data)
 
     def save(self, job: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -331,12 +432,34 @@ class JobStore:
                 if not JOB_ID_RE.match(path.stem):
                     continue
                 try:
-                    jobs.append(json.loads(path.read_text(encoding="utf-8")))
+                    jobs.append(self._with_defaults(json.loads(path.read_text(encoding="utf-8"))))
                 except (OSError, ValueError):
                     logger.warning("unreadable upload job file %s", path.name)
         return sorted(
             jobs, key=lambda j: (str(j.get("created_at") or ""), str(j.get("job_id") or "")), reverse=True
         )
+
+    def owns_model(self, job: Mapping[str, Any]) -> bool:
+        rev = str(job.get("rev_id") or "")
+        if not REV_ID_RE.fullmatch(rev) or not self.ws.has_model(rev):
+            return False
+        try:
+            meta = self.ws.model_meta(rev)
+            return meta.get("job_id") == job.get("job_id") and meta.get("upload_attempt", 0) == job.get(
+                "run_attempt", 0
+            )
+        except (KeyError, OSError, ValueError):
+            return False
+
+    def supersede_earlier(self, job: Mapping[str, Any]) -> None:
+        with self.lock:
+            current_key = (str(job.get("created_at") or ""), str(job.get("job_id") or ""))
+            for earlier in self.all():
+                earlier_key = (str(earlier.get("created_at") or ""), str(earlier.get("job_id") or ""))
+                if earlier.get("rev_id") != job.get("rev_id") or earlier_key >= current_key:
+                    continue
+                earlier.update(superseded_by=job["job_id"], revision_available=False)
+                self.save(earlier)
 
     def recover(self) -> int:
         """Fail jobs left queued or running by a previous process; drop leftover staging files."""
@@ -345,10 +468,24 @@ class JobStore:
             for job in self.all():
                 if job.get("status") not in ACTIVE_STATUSES:
                     continue
+                model_available = self.owns_model(job)
+                rev = str(job.get("rev_id") or "")
+                existing_model = bool(REV_ID_RE.fullmatch(rev)) and self.ws.has_model(rev)
+                message = (
+                    RESTART_MODEL_MESSAGE
+                    if model_available
+                    else RESTART_EXISTING_MODEL_MESSAGE
+                    if existing_model
+                    else RESTART_MESSAGE
+                )
                 for step in job.get("steps") or []:
                     if step.get("status") == "running":
-                        step.update(status="failed", message=RESTART_MESSAGE)
-                job.update(status="failed", error=RESTART_MESSAGE, finished_at=now_iso())
+                        step.update(status="failed", message=message)
+                job.update(
+                    status="failed", error=message, revision_available=model_available, finished_at=now_iso()
+                )
+                if model_available:
+                    self.supersede_earlier(job)
                 self.save(job)
                 count += 1
         shutil.rmtree(self.ws.root / STAGING_DIR, ignore_errors=True)
@@ -594,6 +731,16 @@ def _failure_message(step: str, exc: BaseException) -> str:
     return f"{STEP_LABELS.get(step, step)} 중 오류가 발생했습니다({type(exc).__name__})."
 
 
+def _checked_result(step: str, result: Any) -> Mapping[str, Any]:
+    if not isinstance(result, Mapping) or not result:
+        raise ToolError(f"{STEP_LABELS[step]} 결과의 형식을 확인할 수 없습니다.")
+    if result.get("ok") is False:
+        raise ToolError(
+            str(result.get("error") or result.get("message") or f"{STEP_LABELS[step]}에 실패했습니다.")
+        )
+    return result
+
+
 # --- pipeline ---------------------------------------------------------------------------------------------
 
 
@@ -638,12 +785,28 @@ class DrawingPipeline:
                 if isinstance(exc, ToolError)
                 else f"작업 처리 중 오류가 발생했습니다({type(exc).__name__})."
             )
-            job.update(status="failed", error=error, finished_at=now_iso())
+            job.update(
+                status="failed",
+                error=error,
+                revision_available=self.store.owns_model(job),
+                finished_at=now_iso(),
+            )
             self.store.save(job)
 
     def _run(self, job: dict[str, Any]) -> None:
-        job.update(status="running", started_at=now_iso(), finished_at=None, error=None)
-        self.store.save(job)
+        from cad2anything.services.metadata import metadata_snapshot
+
+        with self.store.lock:
+            job.update(
+                status="running",
+                started_at=now_iso(),
+                finished_at=None,
+                error=None,
+                stage_errors=[],
+                metadata_snapshot=metadata_snapshot(self.ws),
+                revision_available=self.store.owns_model(job),
+            )
+            self.store.save(job)
         state = _RunState()
         for name, step in (("save", self._save), ("parse", self._parse), ("merge", self._merge)):
             error = self._execute(job, name, step, state)
@@ -661,8 +824,13 @@ class DrawingPipeline:
             ("generate", self._generate),
             ("relayout_check", self._relayout_check),
         ):
-            self._execute(job, name, step, state)
-        job["status"] = "needs_review" if (job.get("parse") or {}).get("review_queue") else "done"
+            error = self._execute(job, name, step, state)
+            if error is not None:
+                job["stage_errors"].append({"step": name, "message": error})
+                self.store.save(job)
+        needs_review = bool((job.get("parse") or {}).get("review_queue"))
+        job["review_reason"] = "layer_review_queue" if needs_review else None
+        job["status"] = "partial" if job["stage_errors"] else "needs_review" if needs_review else "done"
         job["finished_at"] = now_iso()
         self.store.save(job)
 
@@ -690,7 +858,7 @@ class DrawingPipeline:
         status, message = outcome if isinstance(outcome, tuple) else ("done", outcome)
         record.update(status=status, message=message, elapsed_s=round(time.perf_counter() - started, 2))
         self.store.save(job)
-        return None
+        return message if status == "failed" else None
 
     def _remove(self, rel_path: str) -> None:
         remove_file(self.ws, rel_path)
@@ -733,14 +901,15 @@ class DrawingPipeline:
         )
         report_dict = report.to_dict()
         report_dict["upload_job"] = job["job_id"]
-        self.ws.save_report(rev, report_dict)
         job["parse"] = parse_summary(report_dict, model, floors)
+        job["review_reason"] = "layer_review_queue" if job["parse"]["review_queue"] else None
         empty = [floor for floor in floors if not model.units(floor)]
         if empty:
             raise ToolError(
                 f"{', '.join(empty)} 도면에서 매장을 찾지 못했습니다. 도면 규약 프로필(현재 {job['profile']})과 "
                 "레이어 매핑을 확인하세요."
             )
+        self.ws.save_report(rev, report_dict)
         state.parsed = model
         message = f"매장 {job['parse']['units']}개"
         if job["parse"]["review_total"]:
@@ -777,12 +946,20 @@ class DrawingPipeline:
                 "source": "uploaded",
                 "variant": UPLOAD_VARIANT,
                 "job_id": job["job_id"],
+                "upload_attempt": job.get("run_attempt", 0),
                 "parent": parent_rev,
                 "profile": job["profile"],
                 "floors_uploaded": list(job["floors_uploaded"]),
+                "file_sha256": {item["floor"]: item.get("sha256") for item in job["files"]},
+                "source_files": list(job.get("source_files") or []),
+                "metadata_snapshot": dict(job.get("metadata_snapshot") or {}),
             },
         )
         state.merged = merged
+        job["revision_available"] = True
+        with self.store.lock:
+            self.store.supersede_earlier(job)
+            self.store.save(job)
         uploaded = set(job["floors_uploaded"])
         job["floors_inherited"] = [f.code for f in merged.floors if f.code not in uploaded]
         return (
@@ -807,7 +984,9 @@ class DrawingPipeline:
         change_set = diff_models(state.parent, state.merged)
         self.ws.save_change_set(change_set, {"source": "diff", "job_id": job["job_id"]})
         state.change_set = change_set
-        summary = self.host.revision_diff(job["parent_rev"], job["rev_id"], limit=30)
+        summary = _checked_result("diff", self.host.revision_diff(job["parent_rev"], job["rev_id"], limit=30))
+        if not isinstance(summary.get("total"), int) or not isinstance(summary.get("by_type"), Mapping):
+            raise ToolError("변경 비교 결과에 건수나 유형이 없습니다.")
         job["changes"] = {
             key: summary.get(key) for key in ("total", "by_type", "by_floor", "items", "truncated")
         }
@@ -815,10 +994,14 @@ class DrawingPipeline:
 
     def _qa(self, job: dict[str, Any], state: _RunState) -> StepResult:
         assert state.merged is not None
-        result = self.host.metadata_qa(state.merged, job["effective_date"], floors=job["floors_uploaded"])
+        result = _checked_result(
+            "qa", self.host.metadata_qa(state.merged, job["effective_date"], floors=job["floors_uploaded"])
+        )
         if result.get("skipped"):
             job["qa"] = None
             return "skipped", str(result.get("message") or "계약 정보가 없어 대조하지 않았습니다.")
+        if not isinstance(result.get("total"), int) or not isinstance(result.get("by_code"), Mapping):
+            raise ToolError("계약 정보 대조 결과에 건수나 유형이 없습니다.")
         job["qa"] = result
         return qa_message(result)
 
@@ -827,7 +1010,12 @@ class DrawingPipeline:
 
         if state.change_set is None:
             return "skipped", "변경 비교 결과가 없어 건너뛰었습니다."
-        state.plan = plan_impact(state.change_set, load_specs())
+        plan = plan_impact(state.change_set, load_specs())
+        if isinstance(plan, Mapping):
+            _checked_result("impact", plan)
+        if not isinstance(plan, list | tuple):
+            raise ToolError("영향 분석 결과의 형식을 확인할 수 없습니다.")
+        state.plan = list(plan)
         job["impact"] = [asdict(entry) for entry in state.plan]
         return f"다시 만들 산출물 {len(state.plan)}개" if state.plan else "다시 만들 산출물이 없습니다."
 
@@ -842,7 +1030,15 @@ class DrawingPipeline:
         for entry in state.plan:
             row: dict[str, Any] = {"generator": entry.generator, "title_ko": entry.title_ko}
             try:
-                result = self.host.registry_run(entry.generator, job["rev_id"])
+                result = _checked_result("generate", self.host.registry_run(entry.generator, job["rev_id"]))
+                if result.get("status") not in (
+                    "draft",
+                    "awaiting_approval",
+                    "published",
+                    "qa_failed",
+                    "failed",
+                ):
+                    raise ToolError("산출물 생성 결과에 유효한 상태가 없습니다.")
                 row.update(
                     status=result.get("status"),
                     approval_mode=result.get("approval_mode"),
@@ -855,22 +1051,36 @@ class DrawingPipeline:
             artifacts.append(row)
             job["artifacts"] = artifacts
             self.store.save(job)
-        failed = [row["title_ko"] or row["generator"] for row in artifacts if row["status"] == "failed"]
+        failed = [
+            row["title_ko"] or row["generator"]
+            for row in artifacts
+            if row["status"] in ("failed", "qa_failed")
+        ]
         if failed:
             raise ToolError(
-                f"산출물 {len(artifacts)}개 중 {len(failed)}개를 만들지 못했습니다: {', '.join(failed)}"
+                f"산출물 {len(artifacts)}개 중 {len(failed)}개의 생성 또는 검증에 실패했습니다: {', '.join(failed)}"
             )
         return f"산출물 {len(artifacts)}개 재생성"
 
     def _relayout_check(self, job: dict[str, Any], state: _RunState) -> StepResult:
         hook = getattr(self.host, "relayout_after_upload", None)
         if not callable(hook):
-            return "skipped", "개편안 대조 기능을 사용할 수 없습니다."
+            reason = "개편안 대조 기능을 사용할 수 없습니다."
+            job["relayout_check"] = {"skipped": True, "reason": reason}
+            return "skipped", reason
         result = hook(job["rev_id"], job["parent_rev"])
-        if not result:
-            job["relayout_check"] = None
-            return "skipped", f"{job['parent_rev']}를 기준으로 선택된 개편안이 없습니다."
+        if result is None:
+            reason = f"{job['parent_rev']}를 기준으로 선택된 개편안이 없습니다."
+            job["relayout_check"] = {"skipped": True, "reason": reason}
+            return "skipped", reason
+        result = _checked_result("relayout_check", result)
         job["relayout_check"] = dict(result)
+        if result.get("skipped"):
+            reason = str(result.get("reason") or "개편안 대조를 건너뛰었습니다.")
+            job["relayout_check"]["reason"] = reason
+            return "skipped", reason
         if result.get("summary"):
             return str(result["summary"])
+        if result.get("conformance_pct") is None:
+            raise ToolError("개편안 대조 결과에 일치율이 없습니다.")
         return f"개편안 일치율 {result.get('conformance_pct')}%"
